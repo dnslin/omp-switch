@@ -178,14 +178,17 @@ impl AppService {
 
     pub fn detect_omp(&self) -> StartupState {
         let saved = self.settings.read().omp_executable_path.clone();
-        if let Some(path) = saved {
+        if let Some(path) = saved.as_ref() {
             let state = self.validate_omp(PathBuf::from(path), false);
             if matches!(state, StartupState::OmpReady { .. }) {
                 return state;
             }
         }
         if let Some(path) = self.environment.find_in_path() {
-            return self.validate_omp(path, false);
+            let requires_confirmation = saved.is_some();
+            let state = self.validate_omp(path.clone(), requires_confirmation);
+            *self.pending_omp.write() = matches!(state, StartupState::OmpReady { .. } if requires_confirmation).then_some(path);
+            return state;
         }
         StartupState::OmpUnavailable { message: "未在已保存路径或系统 PATH 中找到可用的 OMP。".to_owned() }
     }

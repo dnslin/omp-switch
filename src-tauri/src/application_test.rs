@@ -112,11 +112,19 @@ fn startup_detection_prefers_saved_omp_and_runs_only_fixed_commands() {
 }
 
 #[test]
-fn startup_detection_uses_path_after_unusable_saved_executable() {
+fn startup_detection_requires_confirmation_before_replacing_unusable_saved_executable_with_path() {
     let environment = Arc::new(FakeOmpEnvironment::with_path("/bin/path-omp"));
     let service = service_with(environment.clone(), Some("/bin/missing-omp"));
 
-    assert!(matches!(service.detect_omp(), StartupState::OmpReady { executable_path, .. } if executable_path == "/bin/path-omp"));
+    assert!(matches!(
+        service.detect_omp(),
+        StartupState::OmpReady { executable_path, requires_confirmation: true, .. }
+            if executable_path == "/bin/path-omp"
+    ));
+    assert_eq!(service.get_ui_settings().unwrap().omp_executable_path.as_deref(), Some("/bin/missing-omp"));
+
+    service.confirm_selected_omp(PathBuf::from("/bin/path-omp")).unwrap();
+    assert_eq!(service.get_ui_settings().unwrap().omp_executable_path.as_deref(), Some("/bin/path-omp"));
 }
 
 #[test]

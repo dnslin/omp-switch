@@ -16,7 +16,6 @@ const pages = [
 function MainShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="app-frame">
-      <div className="application-titlebar-space" aria-hidden="true" />
       <main className="shell-main">
         <aside className="sidebar">
           <nav className="sidebar-nav" aria-label="主导航">
@@ -103,7 +102,6 @@ function SetupPage() {
 
   return (
     <div className="app-frame">
-      <div className="application-titlebar-space" aria-hidden="true"><span className="window-title">OMP Switch</span></div>
       <main className="setup-body">
         <section className="setup-card">
           <header><h1>{title}</h1><p>{description}</p></header>
