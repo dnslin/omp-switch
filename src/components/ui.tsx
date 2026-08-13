@@ -8,7 +8,7 @@ import { Select as ShadcnSelect, SelectTrigger, SelectValue } from "./ui/select"
 export { Button };
 
 
-export function Input({ className = "", ...props }: InputHTMLAttributes<HTMLInputElement>) {
+export function SearchInput({ className = "", ...props }: InputHTMLAttributes<HTMLInputElement>) {
   return (
     <label className={`input-shell ${className}`}>
       <Search aria-hidden="true" size={18} />

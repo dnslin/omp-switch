@@ -10,7 +10,7 @@ mod application_test;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    logging::init();
+    logging::init().expect("failed to initialize redacted application logging");
     tracing::info!("starting OMP Switch without configuration payload logging");
 
     tauri::Builder::default()

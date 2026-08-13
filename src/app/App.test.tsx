@@ -46,6 +46,7 @@ describe("React page seam", () => {
 
     expect(await screen.findByRole("heading", { name: "概览" })).toBeVisible();
     expect(screen.getByRole("link", { name: "概览" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("banner", { name: "应用状态" })).toBeVisible();
   });
 
   it("navigates the main shell through accessible links", async () => {

@@ -1,10 +1,9 @@
 use tracing_subscriber::filter::LevelFilter;
 
-pub fn init() {
-    let _ = tracing_subscriber::fmt()
+pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing_subscriber::fmt()
         .with_max_level(LevelFilter::INFO)
         .with_target(false)
-        .without_time()
         .compact()
-        .try_init();
+        .try_init()
 }

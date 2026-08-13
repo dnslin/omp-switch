@@ -2,6 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
+    time::Instant,
 };
 
 use serde::{Deserialize, Serialize};
@@ -58,15 +59,24 @@ impl AppService {
         self.settings
             .read()
             .map(|settings| settings.clone())
-            .map_err(|_| AppError::internal("无法读取界面设置"))
+            .map_err(|_| {
+                internal_error_with_cause(
+                    "read_ui_settings",
+                    "settings-lock-poisoned",
+                    "无法读取界面设置",
+                )
+            })
     }
 
     pub fn save_ui_settings(&self, settings: AppSettings) -> Result<AppSettings, AppError> {
         persist_settings(&self.settings_path, &settings)?;
-        let mut current = self
-            .settings
-            .write()
-            .map_err(|_| AppError::internal("无法保存界面设置"))?;
+        let mut current = self.settings.write().map_err(|_| {
+            internal_error_with_cause(
+                "save_ui_settings",
+                "settings-lock-poisoned",
+                "无法保存界面设置",
+            )
+        })?;
         *current = settings.clone();
         Ok(settings)
     }
@@ -74,47 +84,110 @@ impl AppService {
 
 fn load_settings(path: &Path) -> Result<AppSettings, AppError> {
     match fs::read(path) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).map_err(|_| AppError::internal("界面设置文件无法解析"))
-        }
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+            let cause = match error.classify() {
+                serde_json::error::Category::Io => "settings-json-io",
+                serde_json::error::Category::Syntax => "settings-json-syntax",
+                serde_json::error::Category::Data => "settings-json-data",
+                serde_json::error::Category::Eof => "settings-json-eof",
+            };
+            internal_error_with_cause("load_ui_settings", cause, "界面设置文件无法解析")
+        }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AppSettings::default()),
-        Err(_) => Err(AppError::internal("无法读取界面设置文件")),
+        Err(error) => Err(internal_error_with_cause(
+            "load_ui_settings",
+            io_error_cause(error.kind()),
+            "无法读取界面设置文件",
+        )),
     }
 }
 
 fn persist_settings(path: &Path, settings: &AppSettings) -> Result<(), AppError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| AppError::internal("界面设置路径无效"))?;
-    fs::create_dir_all(parent).map_err(|_| AppError::internal("无法创建应用数据目录"))?;
-    let bytes = serde_json::to_vec_pretty(settings)
-        .map_err(|_| AppError::internal("无法序列化界面设置"))?;
+    let parent = path.parent().ok_or_else(|| {
+        internal_error_with_cause("persist_ui_settings", "missing-parent", "界面设置路径无效")
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        internal_error_with_cause(
+            "persist_ui_settings",
+            io_error_cause(error.kind()),
+            "无法创建应用数据目录",
+        )
+    })?;
+    let bytes = serde_json::to_vec_pretty(settings).map_err(|_| {
+        internal_error_with_cause(
+            "persist_ui_settings",
+            "settings-json-serialize",
+            "无法序列化界面设置",
+        )
+    })?;
     let temporary_path = path.with_extension("json.tmp");
-    fs::write(&temporary_path, bytes).map_err(|_| AppError::internal("无法写入界面设置"))?;
-    fs::rename(&temporary_path, path).map_err(|_| AppError::internal("无法提交界面设置"))?;
+    fs::write(&temporary_path, bytes).map_err(|error| {
+        internal_error_with_cause(
+            "persist_ui_settings",
+            io_error_cause(error.kind()),
+            "无法写入界面设置",
+        )
+    })?;
+    fs::rename(&temporary_path, path).map_err(|error| {
+        internal_error_with_cause(
+            "persist_ui_settings",
+            io_error_cause(error.kind()),
+            "无法提交界面设置",
+        )
+    })?;
     Ok(())
+}
+
+fn internal_error_with_cause(
+    operation: &'static str,
+    cause: &'static str,
+    message: &'static str,
+) -> AppError {
+    tracing::warn!(operation, cause, "application service diagnostic");
+    AppError::internal(message)
+}
+
+fn io_error_cause(kind: std::io::ErrorKind) -> &'static str {
+    match kind {
+        std::io::ErrorKind::PermissionDenied => "io-permission-denied",
+        std::io::ErrorKind::AlreadyExists => "io-already-exists",
+        std::io::ErrorKind::InvalidInput => "io-invalid-input",
+        std::io::ErrorKind::InvalidData => "io-invalid-data",
+        std::io::ErrorKind::WriteZero => "io-write-zero",
+        std::io::ErrorKind::StorageFull => "io-storage-full",
+        _ => "io-other",
+    }
+}
+
+fn log_command_result<T>(
+    operation: &'static str,
+    started_at: Instant,
+    result: &Result<T, AppError>,
+) {
+    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+    match result {
+        Ok(_) => tracing::info!(operation, status = "success", elapsed_ms),
+        Err(error) => tracing::warn!(operation, status = "error", code = error.code, elapsed_ms),
+    }
 }
 
 #[tauri::command]
 pub fn get_startup_state(service: tauri::State<'_, AppService>) -> StartupState {
+    let started_at = Instant::now();
+    let state = service.get_startup_state();
     tracing::info!(
         operation = "get_startup_state",
-        "application service completed"
+        status = "success",
+        elapsed_ms = started_at.elapsed().as_millis() as u64
     );
-    service.get_startup_state()
+    state
 }
 
 #[tauri::command]
 pub fn get_ui_settings(service: tauri::State<'_, AppService>) -> Result<AppSettings, AppError> {
+    let started_at = Instant::now();
     let result = service.get_ui_settings();
-    match &result {
-        Ok(_) => tracing::info!(operation = "get_ui_settings", status = "success"),
-        Err(error) => tracing::warn!(
-            operation = "get_ui_settings",
-            status = "error",
-            code = error.code
-        ),
-    }
+    log_command_result("get_ui_settings", started_at, &result);
     result
 }
 
@@ -123,14 +196,8 @@ pub fn save_ui_settings(
     service: tauri::State<'_, AppService>,
     settings: AppSettings,
 ) -> Result<AppSettings, AppError> {
+    let started_at = Instant::now();
     let result = service.save_ui_settings(settings);
-    match &result {
-        Ok(_) => tracing::info!(operation = "save_ui_settings", status = "success"),
-        Err(error) => tracing::warn!(
-            operation = "save_ui_settings",
-            status = "error",
-            code = error.code
-        ),
-    }
+    log_command_result("save_ui_settings", started_at, &result);
     result
 }

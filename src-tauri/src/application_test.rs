@@ -19,6 +19,22 @@ fn intent_command_returns_secret_free_startup_dto() {
 }
 
 #[test]
+fn malformed_settings_return_safe_diagnostic_error() {
+    let app_data = tempdir().unwrap();
+    let settings_path = app_data.path().join("settings.json");
+    fs::write(&settings_path, br#"{"apiKey":"secret"}"#).unwrap();
+
+    let error = match AppService::new(settings_path) {
+        Ok(_) => panic!("malformed settings must be rejected"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.code, "internal-error");
+    assert_eq!(error.message, "界面设置文件无法解析");
+    assert!(!error.to_string().contains("secret"));
+}
+
+#[test]
 fn settings_seam_persists_only_approved_lightweight_state() {
     let app_data = tempdir().unwrap();
     let settings_path = app_data.path().join("settings.json");
