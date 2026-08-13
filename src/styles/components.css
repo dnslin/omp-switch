@@ -1,0 +1,20 @@
+button, input { font: inherit; }
+button { touch-action: manipulation; }
+.input-shell, .select { min-height: var(--control-height); border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-bg-surface); display: flex; align-items: center; gap: 10px; padding: 0 14px; color: var(--color-text-secondary); }
+.input-shell input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--color-text-primary); }
+.status-indicator--neutral .status-dot { background: var(--color-text-disabled); }
+.status-indicator--warning .status-dot { background: var(--color-warning); }
+.status-indicator { display: inline-flex; gap: 8px; align-items: center; color: var(--color-text-primary); }
+.status-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--color-success); }
+.status-tag { padding: 4px 10px; border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text-secondary); font-size: var(--font-size-xs); }
+.navigation-item { width: 252px; height: 56px; display: flex; align-items: center; gap: 14px; padding: 0 20px; color: var(--color-text-primary); font-size: 18px; font-weight: var(--font-weight-medium); }
+.navigation-active-bar { width: 4px; height: 40px; border-radius: 2px; background: transparent; }
+.navigation-item--active { background: var(--color-bg-selected); color: var(--color-primary); }
+.navigation-item--active .navigation-active-bar { background: var(--color-primary); }
+.card { background: var(--color-bg-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 20px; }
+.card-title { margin: 0 0 16px; font-size: var(--font-size-body); font-weight: var(--font-weight-semibold); }
+.page-title h1 { margin: 0; font-size: var(--font-size-title); line-height: 1.25; font-weight: var(--font-weight-semibold); text-wrap: balance; }
+.page-title p { margin: 6px 0 0; color: var(--color-text-secondary); }
+.key-value-row { min-height: var(--row-height); display: grid; grid-template-columns: 260px 1fr; border-bottom: 1px solid var(--color-border); }
+.key-value-row > div { display: flex; align-items: center; padding: 0 20px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; } }
