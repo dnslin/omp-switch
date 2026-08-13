@@ -13,7 +13,7 @@ body { overflow: hidden; background: var(--color-bg-app); color: var(--color-tex
 a { color: inherit; text-decoration: none; }
 .window { width: 100vw; height: 100vh; min-width: 1100px; min-height: 720px; background: var(--color-bg-app); }
 .app-frame { width: 100%; height: 100%; display: grid; grid-template-rows: var(--titlebar-height) minmax(0, 1fr); }
-.application-header { height: var(--titlebar-height); border-bottom: 1px solid var(--color-border); background: var(--color-bg-app); user-select: none; }
+.application-titlebar-space { height: var(--titlebar-height); border-bottom: 1px solid var(--color-border); background: var(--color-bg-app); user-select: none; }
 .shell-main { min-height: 0; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); }
 .sidebar { border-right: 1px solid var(--color-border); background: var(--color-bg-sidebar); padding: 32px 12px 22px; display: flex; flex-direction: column; justify-content: space-between; }
 .sidebar-nav { display: flex; flex-direction: column; gap: 4px; }

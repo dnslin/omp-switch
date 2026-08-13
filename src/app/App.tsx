@@ -12,14 +12,11 @@ const pages = [
   { to: "/settings", label: "设置", icon: Settings },
 ] as const;
 
-function ApplicationHeader() {
-  return <header className="application-header" aria-label="应用状态" />;
-}
 
 function MainShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="app-frame">
-      <ApplicationHeader />
+      <div className="application-titlebar-space" aria-hidden="true" />
       <main className="shell-main">
         <aside className="sidebar">
           <nav className="sidebar-nav" aria-label="主导航">
@@ -57,7 +54,7 @@ function SetupPage() {
 
   return (
     <div className="app-frame">
-      <ApplicationHeader />
+      <div className="application-titlebar-space" aria-hidden="true" />
       <main className="setup-body">
         <section className="setup-card">
           <header>
