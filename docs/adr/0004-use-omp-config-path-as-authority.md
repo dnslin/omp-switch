@@ -1,0 +1,3 @@
+# Use `omp config path` as the configuration-path authority
+
+OMP Switch uses the selected OMP executable's `omp config path` output as the only authoritative global Agent configuration directory instead of reproducing OMP's platform, Profile, XDG, and override rules. The command is run silently because path accuracy is more important than duplicating evolving OMP logic; failures disable configuration access rather than falling back to a guessed directory. OMP may initialize Settings, access `agent.db`, or run its own legacy migration before printing the path, so errors and documentation must report that behavior accurately.
