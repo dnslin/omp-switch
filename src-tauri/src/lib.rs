@@ -2,7 +2,10 @@ mod application;
 mod error;
 mod logging;
 
-use application::{AppService, get_startup_state, get_ui_settings, save_ui_settings};
+use application::{
+    AppService, confirm_selected_omp, detect_omp, get_startup_state, get_ui_settings,
+    save_ui_settings, validate_selected_omp,
+};
 use tauri::Manager;
 
 #[cfg(test)]
@@ -14,6 +17,7 @@ pub fn run() {
     tracing::info!("starting OMP Switch without configuration payload logging");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let settings_path = app.path().app_data_dir()?.join("settings.json");
             let service = AppService::new(settings_path)
@@ -23,6 +27,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_startup_state,
+            detect_omp,
+            validate_selected_omp,
+            confirm_selected_omp,
             get_ui_settings,
             save_ui_settings
         ])

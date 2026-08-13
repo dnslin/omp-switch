@@ -1,6 +1,6 @@
-import { LayoutGrid, Server, Settings, Users } from "lucide-react";
+import { CheckCircle2, File, Folder, Info, LayoutGrid, Server, Settings, SquareTerminal, Users } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Link, NavLink, Navigate, Route, Routes } from "react-router";
+import { Link, NavLink, Navigate, Route, Routes, useNavigate } from "react-router";
 import { toast, Toaster } from "sonner";
 import { Button, Card, NavigationItem, PageTitle, StatusIndicator } from "../components/ui";
 import { asAppError, useTauriClient, type StartupState } from "../lib/tauri-client";
@@ -39,7 +39,8 @@ function MainShell({ children }: { children: React.ReactNode }) {
 
 function SetupPage() {
   const client = useTauriClient();
-  const [state, setState] = useState<StartupState | null>(null);
+  const navigate = useNavigate();
+  const [state, setState] = useState<StartupState>({ kind: "detecting" });
 
   useEffect(() => {
     let active = true;
@@ -52,35 +53,94 @@ function SetupPage() {
     return () => { active = false; };
   }, [client]);
 
+  async function detect() {
+    setState({ kind: "detecting" });
+    try {
+      setState(await client.detectOmp());
+    } catch (error: unknown) {
+      const appError = asAppError(error, "无法重新检测 OMP");
+      toast.error(appError.message, { description: appError.action });
+      setState({ kind: "omp-unavailable", message: appError.message });
+    }
+  }
+
+  async function selectExecutable() {
+    try {
+      const path = await client.selectOmpExecutable();
+      if (!path) return;
+      setState({ kind: "detecting" });
+      setState(await client.validateSelectedOmp(path));
+    } catch (error: unknown) {
+      const appError = asAppError(error, "无法验证所选 OMP");
+      toast.error(appError.message, { description: appError.action });
+      setState({ kind: "omp-unavailable", message: appError.message });
+    }
+  }
+
+  async function enterApplication() {
+    if (state.kind !== "omp-ready") return;
+    try {
+      if (state.requiresConfirmation) {
+        await client.confirmSelectedOmp(state.executablePath);
+      }
+      navigate("/overview");
+    } catch (error: unknown) {
+      const appError = asAppError(error, "无法保存 OMP 选择");
+      toast.error(appError.message, { description: appError.action });
+    }
+  }
+  const ready = state.kind === "omp-ready";
+  const configurationReady = ready && state.targetAccess.modelsYml !== "missing" && state.targetAccess.configYml !== "missing";
+  const failure = state.kind === "version-failed" || state.kind === "config-path-failed";
+  const title = ready ? "OMP 已找到" : state.kind === "detecting" ? "正在检测 OMP…" : state.kind === "config-path-failed" ? "无法获取 OMP 配置目录" : "设置 OMP";
+  const description = ready
+    ? "OMP Switch 已确认可执行文件和权威配置目录。"
+    : state.kind === "detecting"
+      ? "正在检查可执行文件、版本和权威配置目录。"
+      : state.kind === "omp-unavailable"
+        ? state.message
+        : state.message;
+
   return (
     <div className="app-frame">
-      <div className="application-titlebar-space" aria-hidden="true" />
+      <div className="application-titlebar-space" aria-hidden="true"><span className="window-title">OMP Switch</span></div>
       <main className="setup-body">
         <section className="setup-card">
-          <header>
-            <h1>设置 OMP</h1>
-            <p>连接 OMP 后，OMP Switch 才能读取权威配置目录。</p>
-          </header>
-          <div className="setup-state" aria-live="polite">
+          <header><h1>{title}</h1><p>{description}</p></header>
+          <div className={`setup-state ${ready ? "setup-state--success" : ""}`} aria-live="polite">
             <span className="status-dot" aria-hidden="true" />
-            {state?.message ?? "正在读取应用状态…"}
+            {ready ? "检测完成  ·  OMP 已可用" : state.kind === "detecting" ? "正在检测 OMP…" : description}
           </div>
-          <div className="setup-table">
-            <div className="setup-row"><span>可执行文件</span><code>尚未选择</code><span>未检测</span></div>
-            <div className="setup-row"><span>版本</span><span>—</span><span>未知</span></div>
-            <div className="setup-row"><span>权威配置目录</span><code>等待 omp config path</code><span>不可用</span></div>
-            <div className="setup-row"><span>models.yml</span><span>—</span><span>未读取</span></div>
-            <div className="setup-row"><span>config.yml</span><span>—</span><span>未读取</span></div>
-          </div>
-          <p className="setup-unavailable-note">OMP 检测将在后续工单中启用。</p>
+          {ready ? (
+            <>
+              <div className="setup-table">
+                <SetupRow icon={SquareTerminal} label="可执行文件" value={state.executablePath} mono />
+                <SetupRow icon={Info} label="版本" value={state.version} />
+                <SetupRow icon={Folder} label="权威配置目录" value={state.targetConfiguration} mono status={state.targetAccess.writable ? "正常" : "只读"} />
+                <SetupRow icon={File} label="models.yml" value="" status={fileStatusLabel(state.targetAccess.modelsYml)} />
+                <SetupRow icon={File} label="config.yml" value="" status={fileStatusLabel(state.targetAccess.configYml)} />
+              </div>
+              <div className="permission-summary"><CheckCircle2 aria-hidden="true" />{state.targetAccess.writable && state.targetAccess.modelsYml === "normal" && state.targetAccess.configYml === "normal" ? "配置文件可读写，权限正常。" : "配置目录已确认；只读或缺失文件状态如上。"}</div>
+            </>
+          ) : failure ? (
+            <details className="technical-details"><summary>查看技术详情</summary><p>退出码：{state.exitCode ?? "不可用"}</p><p>{state.stderr || "命令没有返回 stderr。"}</p></details>
+          ) : null}
           <div className="setup-actions">
-            <Button variant="secondary" disabled>手动选择 OMP</Button>
-            <Button disabled>自动检测</Button>
+            {ready ? <Button variant="secondary" onClick={detect}>重新检测</Button> : <Button variant="secondary" onClick={selectExecutable} disabled={state.kind === "detecting"}>手动选择 OMP</Button>}
+            {ready ? <Button onClick={enterApplication} disabled={!configurationReady}>进入应用</Button> : <Button onClick={detect} disabled={state.kind === "detecting"}>自动检测</Button>}
           </div>
         </section>
       </main>
     </div>
   );
+}
+
+function SetupRow({ icon: Icon, label, value, mono = false, status = "正常" }: { icon: typeof File; label: string; value: string; mono?: boolean; status?: string }) {
+  return <div className="setup-row"><span className="setup-row-label"><Icon aria-hidden="true" />{label}</span><span className={mono ? "mono" : ""}>{value}</span><span className="setup-row-status"><span className="status-dot" aria-hidden="true" />{status}</span></div>;
+}
+
+function fileStatusLabel(status: "normal" | "missing" | "read-only") {
+  return status === "normal" ? "正常" : status === "missing" ? "缺失" : "只读";
 }
 
 const routeCopy = {
@@ -135,7 +195,7 @@ export function App() {
   return (
     <div className="window">
       <Routes>
-        <Route path="/" element={<Navigate replace to="/overview" />} />
+        <Route path="/" element={<SetupPage />} />
         <Route path="/setup" element={<SetupPage />} />
         <Route path="/overview" element={<PlaceholderPage page="overview" />} />
         <Route path="/providers" element={<PlaceholderPage page="providers" />} />

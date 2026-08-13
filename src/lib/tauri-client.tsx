@@ -1,10 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { createContext, useContext, type PropsWithChildren } from "react";
 
-export type StartupState = {
-  kind: "omp-unavailable";
-  message: string;
-};
+export type ConfigurationFileStatus = "normal" | "missing" | "read-only";
+export type TargetAccess = { writable: boolean; modelsYml: ConfigurationFileStatus; configYml: ConfigurationFileStatus };
+export type StartupState =
+  | { kind: "detecting" }
+  | { kind: "omp-unavailable"; message: string }
+  | { kind: "invalid-executable"; executablePath: string; message: string }
+  | { kind: "version-failed"; executablePath: string; message: string; exitCode: number | null; stderr: string }
+  | { kind: "config-path-failed"; executablePath: string; version: string; message: string; exitCode: number | null; stderr: string }
+  | { kind: "omp-ready"; executablePath: string; version: string; targetConfiguration: string; targetAccess: TargetAccess; requiresConfirmation: boolean };
 
 export type Theme = "light" | "dark" | "system";
 
@@ -44,12 +50,23 @@ export function asAppError(error: unknown, fallbackMessage: string): AppError {
 
 export interface TauriClient {
   getStartupState(): Promise<StartupState>;
+  detectOmp(): Promise<StartupState>;
+  selectOmpExecutable(): Promise<string | null>;
+  validateSelectedOmp(executablePath: string): Promise<StartupState>;
+  confirmSelectedOmp(executablePath: string): Promise<void>;
   getUiSettings(): Promise<UiSettings>;
   saveUiSettings(settings: UiSettings): Promise<UiSettings>;
 }
 
 export const tauriClient: TauriClient = {
   getStartupState: () => invoke<StartupState>("get_startup_state"),
+  detectOmp: () => invoke<StartupState>("detect_omp"),
+  selectOmpExecutable: async () => {
+    const selected = await open({ multiple: false, directory: false, title: "选择 OMP 可执行文件" });
+    return typeof selected === "string" ? selected : null;
+  },
+  validateSelectedOmp: (executablePath) => invoke<StartupState>("validate_selected_omp", { executablePath }),
+  confirmSelectedOmp: async (executablePath) => { await invoke("confirm_selected_omp", { executablePath }); },
   getUiSettings: () => invoke<UiSettings>("get_ui_settings"),
   saveUiSettings: (settings) => invoke<UiSettings>("save_ui_settings", { settings }),
 };

@@ -3,5 +3,5 @@
   "identifier": "main-capability",
   "description": "Core permissions for the single native OMP Switch window.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:allow-open"]
 }

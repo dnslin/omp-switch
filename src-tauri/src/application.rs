@@ -1,18 +1,133 @@
 use std::{
-    fs,
+    fs::{self, OpenOptions},
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    process::Command,
+    sync::Arc,
     time::Instant,
 };
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfigurationFileStatus {
+    Normal,
+    Missing,
+    ReadOnly,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetAccess {
+    pub writable: bool,
+    pub models_yml: ConfigurationFileStatus,
+    pub config_yml: ConfigurationFileStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 pub enum StartupState {
     OmpUnavailable { message: String },
+    InvalidExecutable { executable_path: String, message: String },
+    VersionFailed {
+        executable_path: String,
+        message: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+    ConfigPathFailed {
+        executable_path: String,
+        version: String,
+        message: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+    OmpReady {
+        executable_path: String,
+        version: String,
+        target_configuration: String,
+        target_access: TargetAccess,
+        requires_confirmation: bool,
+    },
+}
+
+pub struct CommandOutput {
+    pub success: bool,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl CommandOutput {
+    #[cfg(test)]
+    pub fn success(stdout: impl Into<String>) -> Self {
+        Self { success: true, exit_code: Some(0), stdout: stdout.into(), stderr: String::new() }
+    }
+
+    #[cfg(test)]
+    pub fn failure(exit_code: i32, stderr: impl Into<String>) -> Self {
+        Self { success: false, exit_code: Some(exit_code), stdout: String::new(), stderr: stderr.into() }
+    }
+}
+
+pub trait OmpEnvironment: Send + Sync {
+    fn find_in_path(&self) -> Option<PathBuf>;
+    fn run(&self, executable: &Path, arguments: &[&str]) -> std::io::Result<CommandOutput>;
+    fn inspect_target(&self, target: &Path) -> std::io::Result<TargetAccess>;
+}
+
+struct SystemOmpEnvironment;
+
+impl OmpEnvironment for SystemOmpEnvironment {
+    fn find_in_path(&self) -> Option<PathBuf> {
+        which::which("omp").ok()
+    }
+
+    fn run(&self, executable: &Path, arguments: &[&str]) -> std::io::Result<CommandOutput> {
+        let output = Command::new(executable).args(arguments).output()?;
+        Ok(CommandOutput {
+            success: output.status.success(),
+            exit_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+
+    fn inspect_target(&self, target: &Path) -> std::io::Result<TargetAccess> {
+        let access_root = if target.exists() {
+            if !target.is_dir() {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "target is not a directory"));
+            }
+            target
+        } else {
+            target.parent().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "target has no parent"))?
+        };
+        Ok(TargetAccess {
+            writable: probe_directory_write(access_root),
+            models_yml: inspect_configuration_file(&target.join("models.yml"))?,
+            config_yml: inspect_configuration_file(&target.join("config.yml"))?,
+        })
+    }
+}
+
+fn inspect_configuration_file(path: &Path) -> std::io::Result<ConfigurationFileStatus> {
+    match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(_) => Ok(ConfigurationFileStatus::Normal),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ConfigurationFileStatus::Missing),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(ConfigurationFileStatus::ReadOnly),
+        Err(error) => Err(error),
+    }
+}
+
+fn probe_directory_write(directory: &Path) -> bool {
+    let probe = directory.join(format!(".omp-switch-access-{}", std::process::id()));
+    match OpenOptions::new().write(true).create_new(true).open(&probe) {
+        Ok(_) => fs::remove_file(probe).is_ok(),
+        Err(_) => false,
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,48 +153,161 @@ pub struct AppSettings {
 pub struct AppService {
     settings_path: Arc<PathBuf>,
     settings: Arc<RwLock<AppSettings>>,
+    environment: Arc<dyn OmpEnvironment>,
+    pending_omp: Arc<RwLock<Option<PathBuf>>>,
 }
 
 impl AppService {
     pub fn new(settings_path: PathBuf) -> Result<Self, AppError> {
+        Self::new_with_environment(settings_path, Arc::new(SystemOmpEnvironment))
+    }
+
+    pub fn new_with_environment(settings_path: PathBuf, environment: Arc<dyn OmpEnvironment>) -> Result<Self, AppError> {
         let settings = load_settings(&settings_path)?;
         Ok(Self {
             settings_path: Arc::new(settings_path),
             settings: Arc::new(RwLock::new(settings)),
+            environment,
+            pending_omp: Arc::new(RwLock::new(None)),
         })
     }
 
     pub fn get_startup_state(&self) -> StartupState {
-        StartupState::OmpUnavailable {
-            message: "尚未检测 OMP".to_owned(),
+        self.detect_omp()
+    }
+
+    pub fn detect_omp(&self) -> StartupState {
+        let saved = self.settings.read().omp_executable_path.clone();
+        if let Some(path) = saved {
+            let state = self.validate_omp(PathBuf::from(path), false);
+            if matches!(state, StartupState::OmpReady { .. }) {
+                return state;
+            }
+        }
+        if let Some(path) = self.environment.find_in_path() {
+            return self.validate_omp(path, false);
+        }
+        StartupState::OmpUnavailable { message: "未在已保存路径或系统 PATH 中找到可用的 OMP。".to_owned() }
+    }
+
+    pub fn validate_selected_omp(&self, executable: PathBuf) -> StartupState {
+        let state = self.validate_omp(executable.clone(), true);
+        *self.pending_omp.write() = matches!(state, StartupState::OmpReady { .. }).then_some(executable);
+        state
+    }
+
+    fn validate_omp(&self, executable: PathBuf, requires_confirmation: bool) -> StartupState {
+        let executable_path = executable.to_string_lossy().into_owned();
+        let version_output = match self.environment.run(&executable, &["--version"]) {
+            Ok(output) => output,
+            Err(_) => return StartupState::InvalidExecutable {
+                executable_path,
+                message: "所选文件无法作为 OMP 可执行文件运行。".to_owned(),
+            },
+        };
+        if !version_output.success {
+            return StartupState::VersionFailed {
+                executable_path,
+                message: "OMP 版本命令执行失败。".to_owned(),
+                exit_code: version_output.exit_code,
+                stderr: redact_diagnostic(&version_output.stderr),
+            };
+        }
+        let version = parse_single_line(&version_output.stdout).unwrap_or_else(|| "未知版本".to_owned());
+        let path_output = match self.environment.run(&executable, &["config", "path"]) {
+            Ok(output) => output,
+            Err(_) => return StartupState::ConfigPathFailed {
+                executable_path,
+                version,
+                message: config_path_failure_message(),
+                exit_code: None,
+                stderr: String::new(),
+            },
+        };
+        let target = parse_absolute_directory(&path_output.stdout);
+        if !path_output.success || target.is_none() {
+            return StartupState::ConfigPathFailed {
+                executable_path,
+                version,
+                message: config_path_failure_message(),
+                exit_code: path_output.exit_code,
+                stderr: redact_diagnostic(&path_output.stderr),
+            };
+        }
+        let target = target.unwrap();
+        let target_access = match self.environment.inspect_target(&target) {
+            Ok(access) => access,
+            Err(_) => return StartupState::ConfigPathFailed {
+                executable_path,
+                version,
+                message: "权威配置目录及其父目录不可访问。OMP Switch 不会改用其他目录。".to_owned(),
+                exit_code: path_output.exit_code,
+                stderr: String::new(),
+            },
+        };
+        StartupState::OmpReady {
+            executable_path,
+            version,
+            target_configuration: target.to_string_lossy().into_owned(),
+            target_access,
+            requires_confirmation,
         }
     }
 
+    pub fn confirm_selected_omp(&self, executable: PathBuf) -> Result<AppSettings, AppError> {
+        let pending = self.pending_omp.write().take();
+        if pending.as_ref() != Some(&executable) {
+            return Err(AppError::internal("OMP 验证状态已变化，请重新检测"));
+        }
+        let mut settings = self.settings.read().clone();
+        settings.omp_executable_path = Some(executable.to_string_lossy().into_owned());
+        self.save_ui_settings(settings)
+    }
+
     pub fn get_ui_settings(&self) -> Result<AppSettings, AppError> {
-        self.settings
-            .read()
-            .map(|settings| settings.clone())
-            .map_err(|_| {
-                internal_error_with_cause(
-                    "read_ui_settings",
-                    "settings-lock-poisoned",
-                    "无法读取界面设置",
-                )
-            })
+        Ok(self.settings.read().clone())
     }
 
     pub fn save_ui_settings(&self, settings: AppSettings) -> Result<AppSettings, AppError> {
         persist_settings(&self.settings_path, &settings)?;
-        let mut current = self.settings.write().map_err(|_| {
-            internal_error_with_cause(
-                "save_ui_settings",
-                "settings-lock-poisoned",
-                "无法保存界面设置",
-            )
-        })?;
-        *current = settings.clone();
+        *self.settings.write() = settings.clone();
         Ok(settings)
     }
+}
+
+fn parse_single_line(value: &str) -> Option<String> {
+    let mut lines = value.lines().map(str::trim).filter(|line| !line.is_empty());
+    let value = lines.next()?;
+    if lines.next().is_some() { None } else { Some(value.to_owned()) }
+}
+
+fn parse_absolute_directory(value: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(parse_single_line(value)?);
+    path.is_absolute().then_some(path)
+}
+
+fn redact_diagnostic(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    trimmed
+        .split_whitespace()
+        .take(32)
+        .map(|token| {
+            let lower = token.to_ascii_lowercase();
+            if lower.contains("key=") || lower.contains("token=") || lower.contains("secret=") || lower.starts_with("sk-") {
+                "[已脱敏]"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn config_path_failure_message() -> String {
+    "OMP 没有成功返回一个绝对配置目录。OMP Switch 不会猜测目录。该命令可能初始化 OMP Settings、访问 agent.db，或运行 OMP 自身的旧迁移。".to_owned()
 }
 
 fn load_settings(path: &Path) -> Result<AppSettings, AppError> {
@@ -94,55 +322,21 @@ fn load_settings(path: &Path) -> Result<AppSettings, AppError> {
             internal_error_with_cause("load_ui_settings", cause, "界面设置文件无法解析")
         }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AppSettings::default()),
-        Err(error) => Err(internal_error_with_cause(
-            "load_ui_settings",
-            io_error_cause(error.kind()),
-            "无法读取界面设置文件",
-        )),
+        Err(error) => Err(internal_error_with_cause("load_ui_settings", io_error_cause(error.kind()), "无法读取界面设置文件")),
     }
 }
 
 fn persist_settings(path: &Path, settings: &AppSettings) -> Result<(), AppError> {
-    let parent = path.parent().ok_or_else(|| {
-        internal_error_with_cause("persist_ui_settings", "missing-parent", "界面设置路径无效")
-    })?;
-    fs::create_dir_all(parent).map_err(|error| {
-        internal_error_with_cause(
-            "persist_ui_settings",
-            io_error_cause(error.kind()),
-            "无法创建应用数据目录",
-        )
-    })?;
-    let bytes = serde_json::to_vec_pretty(settings).map_err(|_| {
-        internal_error_with_cause(
-            "persist_ui_settings",
-            "settings-json-serialize",
-            "无法序列化界面设置",
-        )
-    })?;
+    let parent = path.parent().ok_or_else(|| internal_error_with_cause("persist_ui_settings", "missing-parent", "界面设置路径无效"))?;
+    fs::create_dir_all(parent).map_err(|error| internal_error_with_cause("persist_ui_settings", io_error_cause(error.kind()), "无法创建应用数据目录"))?;
+    let bytes = serde_json::to_vec_pretty(settings).map_err(|_| internal_error_with_cause("persist_ui_settings", "settings-json-serialize", "无法序列化界面设置"))?;
     let temporary_path = path.with_extension("json.tmp");
-    fs::write(&temporary_path, bytes).map_err(|error| {
-        internal_error_with_cause(
-            "persist_ui_settings",
-            io_error_cause(error.kind()),
-            "无法写入界面设置",
-        )
-    })?;
-    fs::rename(&temporary_path, path).map_err(|error| {
-        internal_error_with_cause(
-            "persist_ui_settings",
-            io_error_cause(error.kind()),
-            "无法提交界面设置",
-        )
-    })?;
+    fs::write(&temporary_path, bytes).map_err(|error| internal_error_with_cause("persist_ui_settings", io_error_cause(error.kind()), "无法写入界面设置"))?;
+    fs::rename(&temporary_path, path).map_err(|error| internal_error_with_cause("persist_ui_settings", io_error_cause(error.kind()), "无法提交界面设置"))?;
     Ok(())
 }
 
-fn internal_error_with_cause(
-    operation: &'static str,
-    cause: &'static str,
-    message: &'static str,
-) -> AppError {
+fn internal_error_with_cause(operation: &'static str, cause: &'static str, message: &'static str) -> AppError {
     tracing::warn!(operation, cause, "application service diagnostic");
     AppError::internal(message)
 }
@@ -159,11 +353,7 @@ fn io_error_cause(kind: std::io::ErrorKind) -> &'static str {
     }
 }
 
-fn log_command_result<T>(
-    operation: &'static str,
-    started_at: Instant,
-    result: &Result<T, AppError>,
-) {
+fn log_command_result<T>(operation: &'static str, started_at: Instant, result: &Result<T, AppError>) {
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
     match result {
         Ok(_) => tracing::info!(operation, status = "success", elapsed_ms),
@@ -175,11 +365,7 @@ fn log_command_result<T>(
 pub fn get_startup_state(service: tauri::State<'_, AppService>) -> StartupState {
     let started_at = Instant::now();
     let state = service.get_startup_state();
-    tracing::info!(
-        operation = "get_startup_state",
-        status = "success",
-        elapsed_ms = started_at.elapsed().as_millis() as u64
-    );
+    tracing::info!(operation = "get_startup_state", status = "success", elapsed_ms = started_at.elapsed().as_millis() as u64);
     state
 }
 
@@ -192,12 +378,24 @@ pub fn get_ui_settings(service: tauri::State<'_, AppService>) -> Result<AppSetti
 }
 
 #[tauri::command]
-pub fn save_ui_settings(
-    service: tauri::State<'_, AppService>,
-    settings: AppSettings,
-) -> Result<AppSettings, AppError> {
+pub fn save_ui_settings(service: tauri::State<'_, AppService>, settings: AppSettings) -> Result<AppSettings, AppError> {
     let started_at = Instant::now();
     let result = service.save_ui_settings(settings);
     log_command_result("save_ui_settings", started_at, &result);
     result
+}
+
+#[tauri::command]
+pub fn detect_omp(service: tauri::State<'_, AppService>) -> StartupState {
+    service.detect_omp()
+}
+
+#[tauri::command]
+pub fn validate_selected_omp(service: tauri::State<'_, AppService>, executable_path: String) -> StartupState {
+    service.validate_selected_omp(PathBuf::from(executable_path))
+}
+
+#[tauri::command]
+pub fn confirm_selected_omp(service: tauri::State<'_, AppService>, executable_path: String) -> Result<AppSettings, AppError> {
+    service.confirm_selected_omp(PathBuf::from(executable_path))
 }
