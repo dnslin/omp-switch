@@ -371,10 +371,15 @@ fn secret_assignment_width(key: &str, inline_value: &str, following: &[String]) 
     if !inline_value.is_empty() {
         return 1;
     }
-    if key.eq_ignore_ascii_case("authorization") || key.eq_ignore_ascii_case("proxy_authorization") {
+    if is_authorization_name(key) {
         return 1 + following.len().min(2);
     }
     1 + usize::from(!following.is_empty())
+}
+
+fn is_authorization_name(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+    normalized == "authorization" || normalized == "proxy_authorization" || normalized.ends_with("_authorization")
 }
 
 fn config_path_failure_message() -> String {

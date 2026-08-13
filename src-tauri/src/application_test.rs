@@ -236,10 +236,10 @@ fn diagnostics_suppress_structured_json_and_url_credentials() {
 
 #[test]
 fn diagnostics_redact_provider_prefixed_secret_names() {
-    let diagnostic = "OPENAI_API_KEY=sk-openai-live ANTHROPIC_API_KEY anthropic-live AZURE_ACCESS_TOKEN=azure-live safe-context";
+    let diagnostic = "OPENAI_API_KEY=sk-openai-live ANTHROPIC_API_KEY anthropic-live AZURE_ACCESS_TOKEN=azure-live OPENAI_AUTHORIZATION: Bearer provider-secret safe-context";
     let redacted = crate::application::redact_diagnostic(diagnostic);
 
-    for secret in ["sk-openai-live", "anthropic-live", "azure-live"] {
+    for secret in ["sk-openai-live", "anthropic-live", "azure-live", "provider-secret"] {
         assert!(!redacted.contains(secret), "secret {secret:?} leaked in {redacted:?}");
     }
     assert!(redacted.contains("safe-context"));
