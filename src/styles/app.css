@@ -13,8 +13,9 @@ body { overflow: hidden; background: var(--color-bg-app); color: var(--color-tex
 a { color: inherit; text-decoration: none; }
 .window { width: 100vw; height: 100vh; min-width: 1100px; min-height: 720px; background: var(--color-bg-app); }
 .app-frame { width: 100%; height: 100%; }
-.shell-main { min-height: 0; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); }
-.sidebar { border-right: 1px solid var(--color-border); background: var(--color-bg-sidebar); padding: 32px 12px 22px; display: flex; flex-direction: column; justify-content: space-between; }
+.app-frame--shell { min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr); }
+.shell-main { min-width: 0; min-height: 0; height: 100%; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); overflow: hidden; }
+.sidebar { min-height: 0; overflow: hidden; border-right: 1px solid var(--color-border); background: var(--color-bg-sidebar); padding: 32px 12px 22px; display: flex; flex-direction: column; justify-content: space-between; }
 .sidebar-nav { display: flex; flex-direction: column; gap: 4px; }
 .sidebar-nav a { display: block; }
 .sidebar-footer { border-top: 1px solid var(--color-border); padding: 22px 10px 0; display: grid; gap: 14px; }

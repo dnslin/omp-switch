@@ -15,7 +15,7 @@ const pages = [
 
 function MainShell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="app-frame">
+    <div className="app-frame app-frame--shell">
       <main className="shell-main">
         <aside className="sidebar">
           <nav className="sidebar-nav" aria-label="主导航">
@@ -40,6 +40,7 @@ function SetupPage() {
   const client = useTauriClient();
   const navigate = useNavigate();
   const [state, setState] = useState<StartupState>({ kind: "detecting" });
+  const [redetecting, setRedetecting] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -53,13 +54,17 @@ function SetupPage() {
   }, [client]);
 
   async function detect() {
-    setState({ kind: "detecting" });
+    const preserveReadyState = state.kind === "omp-ready";
+    if (preserveReadyState) setRedetecting(true);
+    else setState({ kind: "detecting" });
     try {
       setState(await client.detectOmp());
     } catch (error: unknown) {
       const appError = asAppError(error, "无法重新检测 OMP");
       toast.error(appError.message, { description: appError.action });
       setState({ kind: "omp-unavailable", message: appError.message });
+    } finally {
+      setRedetecting(false);
     }
   }
 
@@ -124,8 +129,8 @@ function SetupPage() {
             <details className="technical-details"><summary>查看技术详情</summary><p>退出码：{state.exitCode ?? "不可用"}</p><p>{state.stderr || "命令没有返回 stderr。"}</p></details>
           ) : null}
           <div className="setup-actions">
-            {ready ? <Button variant="secondary" onClick={detect}>重新检测</Button> : <Button variant="secondary" onClick={selectExecutable} disabled={state.kind === "detecting"}>手动选择 OMP</Button>}
-            {ready ? <Button onClick={enterApplication} disabled={!configurationReady}>进入应用</Button> : <Button onClick={detect} disabled={state.kind === "detecting"}>自动检测</Button>}
+            {ready ? <Button variant="secondary" onClick={detect} disabled={redetecting}>{redetecting ? "正在重新检测" : "重新检测"}</Button> : <Button variant="secondary" onClick={selectExecutable} disabled={state.kind === "detecting"}>手动选择 OMP</Button>}
+            {ready ? <Button onClick={enterApplication} disabled={!configurationReady || redetecting}>进入应用</Button> : <Button onClick={detect} disabled={state.kind === "detecting"}>自动检测</Button>}
           </div>
         </section>
       </main>

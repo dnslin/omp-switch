@@ -4,7 +4,7 @@ import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import { TauriClientProvider, type TauriClient } from "../lib/tauri-client";
+import { TauriClientProvider, type StartupState, type TauriClient } from "../lib/tauri-client";
 
 const unavailableClient: TauriClient = {
   getStartupState: async () => ({
@@ -80,6 +80,34 @@ describe("React page seam", () => {
     expect(await screen.findByRole("heading", { name: "概览" })).toBeVisible();
   });
 
+  it("keeps the successful setup layout mounted while redetection is pending", async () => {
+    const user = userEvent.setup();
+    let resolveDetection!: (state: StartupState) => void;
+    const detectOmp = vi.fn(() => new Promise<StartupState>((resolve) => { resolveDetection = resolve; }));
+    renderRoute("/setup", {
+      ...unavailableClient,
+      getStartupState: async () => ({
+        kind: "omp-ready",
+        executablePath: "/usr/local/bin/omp",
+        version: "17.4.1",
+        targetConfiguration: "/Users/username/.omp/agent",
+        targetAccess: { writable: true, modelsYml: "normal", configYml: "normal" },
+        requiresConfirmation: false,
+      }),
+      detectOmp,
+    });
+
+    expect(await screen.findByRole("heading", { name: "OMP 已找到" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "重新检测" }));
+
+    expect(screen.getByRole("heading", { name: "OMP 已找到" })).toBeVisible();
+    expect(screen.getByText("/Users/username/.omp/agent")).toBeVisible();
+    expect(screen.getByRole("button", { name: "正在重新检测" })).toBeDisabled();
+
+    resolveDetection({ kind: "omp-unavailable", message: "仍未找到 OMP" });
+    expect((await screen.findAllByText("仍未找到 OMP"))[0]).toBeVisible();
+  });
+
   it("shows missing files without allowing entry or initializing them", async () => {
     renderRoute("/setup", {
       ...unavailableClient,
@@ -109,6 +137,15 @@ describe("React page seam", () => {
     await user.click(screen.getByRole("link", { name: "Providers" }));
     expect(screen.getByRole("heading", { name: "Providers" })).toBeVisible();
     expect(screen.getByText("Provider 管理将在后续工单中实现。")).toBeVisible();
+  });
+
+  it("fills the application viewport with a bounded sidebar and content region", () => {
+    renderRoute("/overview");
+
+    const shell = screen.getByRole("main");
+    expect(shell).toHaveClass("shell-main");
+    expect(shell.parentElement).toHaveClass("app-frame", "app-frame--shell");
+    expect(screen.getByRole("navigation", { name: "主导航" }).closest("aside")).toHaveClass("sidebar");
   });
 
   it("falls back safely for an unknown route", () => {
