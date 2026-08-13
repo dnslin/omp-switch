@@ -179,6 +179,61 @@ fn valid_manual_replacement_is_saved_only_after_explicit_confirmation() {
 }
 
 #[test]
+fn failed_revalidation_clears_previous_pending_omp() {
+    let environment = Arc::new(FakeOmpEnvironment::default());
+    let service = service_with(environment, Some("/bin/saved-omp"));
+
+    assert!(matches!(
+        service.validate_selected_omp(PathBuf::from("/bin/path-omp")),
+        StartupState::OmpReady { .. }
+    ));
+    assert!(matches!(
+        service.validate_selected_omp(PathBuf::from("/bin/broken-version")),
+        StartupState::VersionFailed { .. }
+    ));
+    assert!(service.confirm_selected_omp(PathBuf::from("/bin/path-omp")).is_err());
+    assert_eq!(service.get_ui_settings().unwrap().omp_executable_path.as_deref(), Some("/bin/saved-omp"));
+}
+
+#[test]
+fn automatic_detection_clears_previous_manual_pending_omp() {
+    let environment = Arc::new(FakeOmpEnvironment::default());
+    let service = service_with(environment, Some("/bin/saved-omp"));
+
+    assert!(matches!(
+        service.validate_selected_omp(PathBuf::from("/bin/path-omp")),
+        StartupState::OmpReady { .. }
+    ));
+    assert!(matches!(service.detect_omp(), StartupState::OmpReady { requires_confirmation: false, .. }));
+    assert!(service.confirm_selected_omp(PathBuf::from("/bin/path-omp")).is_err());
+    assert_eq!(service.get_ui_settings().unwrap().omp_executable_path.as_deref(), Some("/bin/saved-omp"));
+}
+
+#[test]
+fn diagnostics_redact_common_secret_assignments_and_authorization_headers() {
+    let diagnostic = "API_KEY super-secret password=hunter2 Authorization: Bearer abc.def token 'quoted secret' client_secret: hidden access_token= spaced x-api-key: header-secret sk-live-raw safe-context";
+    let redacted = crate::application::redact_diagnostic(diagnostic);
+    for secret in ["super-secret", "hunter2", "abc.def", "quoted secret", "hidden", "spaced", "header-secret", "sk-live-raw"] {
+        assert!(!redacted.contains(secret), "secret {secret:?} leaked in {redacted:?}");
+    }
+    assert!(redacted.contains("safe-context"));
+    assert!(redacted.contains("[已脱敏]"));
+}
+
+#[test]
+fn diagnostics_suppress_structured_json_and_url_credentials() {
+    for diagnostic in [
+        r#"request failed: {\"token\":\"json-secret\",\"message\":\"denied\"}"#,
+        "request failed: https://example.test/models?api_key=query-secret&limit=10",
+    ] {
+        let redacted = crate::application::redact_diagnostic(diagnostic);
+        assert_eq!(redacted, "[诊断信息因可能包含凭据而已脱敏]");
+        assert!(!redacted.contains("json-secret"));
+        assert!(!redacted.contains("query-secret"));
+    }
+}
+
+#[test]
 fn malformed_settings_return_safe_diagnostic_error() {
     let app_data = tempdir().unwrap();
     let settings_path = app_data.path().join("settings.json");

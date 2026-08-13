@@ -177,6 +177,7 @@ impl AppService {
     }
 
     pub fn detect_omp(&self) -> StartupState {
+        *self.pending_omp.write() = None;
         let saved = self.settings.read().omp_executable_path.clone();
         if let Some(path) = saved.as_ref() {
             let state = self.validate_omp(PathBuf::from(path), false);
@@ -194,6 +195,7 @@ impl AppService {
     }
 
     pub fn validate_selected_omp(&self, executable: PathBuf) -> StartupState {
+        *self.pending_omp.write() = None;
         let state = self.validate_omp(executable.clone(), true);
         *self.pending_omp.write() = matches!(state, StartupState::OmpReady { .. }).then_some(executable);
         state
@@ -289,24 +291,87 @@ fn parse_absolute_directory(value: &str) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
-fn redact_diagnostic(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return String::new();
+pub(crate) fn redact_diagnostic(value: &str) -> String {
+    if contains_structured_secret(value) {
+        return "[诊断信息因可能包含凭据而已脱敏]".to_owned();
     }
-    trimmed
-        .split_whitespace()
-        .take(32)
-        .map(|token| {
-            let lower = token.to_ascii_lowercase();
-            if lower.contains("key=") || lower.contains("token=") || lower.contains("secret=") || lower.starts_with("sk-") {
-                "[已脱敏]"
-            } else {
-                token
+    let tokens = diagnostic_tokens(value);
+    let mut redacted = Vec::with_capacity(tokens.len().min(32));
+    let mut index = 0;
+    while index < tokens.len() && redacted.len() < 32 {
+        let token = &tokens[index];
+        let lower = token.to_ascii_lowercase();
+        if let Some((key, value)) = token.split_once(['=', ':']) {
+            if is_secret_name(key) {
+                redacted.push(format!("{key}=[已脱敏]"));
+                index += secret_assignment_width(key, value, &tokens[index + 1..]);
+                continue;
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+        }
+        let key = token.trim_end_matches(['=', ':']);
+        if is_secret_name(key) {
+            redacted.push(token.clone());
+            redacted.push("[已脱敏]".to_owned());
+            index += secret_assignment_width(key, "", &tokens[index + 1..]);
+            continue;
+        }
+        if lower.starts_with("sk-") {
+            redacted.push("[已脱敏]".to_owned());
+        } else {
+            redacted.push(token.clone());
+        }
+        index += 1;
+    }
+    redacted.join(" ")
+}
+
+fn diagnostic_tokens(value: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    for character in value.chars() {
+        match (quote, character) {
+            (Some(active), value) if value == active => quote = None,
+            (Some(_), value) => current.push(value),
+            (None, '\'' | '"') => quote = Some(character),
+            (None, value) if value.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            (None, value) => current.push(value),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn contains_structured_secret(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase().replace('-', "_");
+    let structured = value.contains('{') || value.contains('[') || lower.contains("http://") || lower.contains("https://") || lower.contains('?') || lower.contains('&');
+    structured
+        && ["api_key", "apikey", "token", "access_token", "refresh_token", "password", "passwd", "secret", "client_secret", "authorization", "x_api_key"]
+            .iter()
+            .any(|name| lower.contains(name))
+}
+
+fn is_secret_name(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().replace('-', "_").as_str(),
+        "api_key" | "apikey" | "token" | "access_token" | "refresh_token" | "password" | "passwd" | "secret" | "client_secret" | "authorization" | "proxy_authorization" | "x_api_key"
+    )
+}
+
+fn secret_assignment_width(key: &str, inline_value: &str, following: &[String]) -> usize {
+    if !inline_value.is_empty() {
+        return 1;
+    }
+    if key.eq_ignore_ascii_case("authorization") || key.eq_ignore_ascii_case("proxy_authorization") {
+        return 1 + following.len().min(2);
+    }
+    1 + usize::from(!following.is_empty())
 }
 
 fn config_path_failure_message() -> String {
