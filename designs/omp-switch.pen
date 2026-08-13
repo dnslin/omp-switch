@@ -1,5 +1,141 @@
 {
   "version": "2.17",
-  "children": [],
+  "children": [
+    {
+      "type": "group",
+      "id": "F65gWs",
+      "x": -1396,
+      "y": -569,
+      "name": "img",
+      "children": [
+        {
+          "type": "rectangle",
+          "id": "D3FZhz",
+          "x": 3072,
+          "y": 2104,
+          "fill": {
+            "type": "image",
+            "enabled": true,
+            "url": "10-overview-normal.png",
+            "mode": "fill"
+          },
+          "width": 1536,
+          "height": 1024
+        },
+        {
+          "type": "rectangle",
+          "id": "IpsUv",
+          "x": 1536,
+          "y": 2104,
+          "fill": {
+            "type": "image",
+            "enabled": true,
+            "url": "20-providers-list.png",
+            "mode": "fill"
+          },
+          "width": 1536,
+          "height": 1024
+        },
+        {
+          "type": "rectangle",
+          "id": "wvbHQ",
+          "x": 3072,
+          "y": 1049,
+          "fill": {
+            "type": "image",
+            "enabled": true,
+            "url": "24-provider-create-step2.png",
+            "mode": "fill"
+          },
+          "width": 1536,
+          "height": 1024
+        },
+        {
+          "type": "rectangle",
+          "id": "JGmdT",
+          "x": 1536,
+          "y": 1049,
+          "fill": {
+            "type": "image",
+            "enabled": true,
+            "url": "30-provider-detail.png",
+            "mode": "fill"
+          },
+          "width": 1536,
+          "height": 1024
+        },
+        {
+          "type": "rectangle",
+          "id": "O9S6d4",
+          "x": 31,
+          "y": 25,
+          "fill": {
+            "type": "image",
+            "enabled": true,
+            "url": "01-setup-success.png",
+            "mode": "fill"
+          },
+          "width": 1536,
+          "height": 1024
+        },
+        {
+          "type": "rectangle",
+          "id": "zyWYx",
+          "x": 0,
+          "y": 2148,
+          "fill": {
+            "type": "image",
+            "enabled": true,
+            "url": "23-provider-create-step1.png",
+            "mode": "fill"
+          },
+          "width": 1536,
+          "height": 1024
+        },
+        {
+          "type": "rectangle",
+          "id": "BoP8b",
+          "x": 0,
+          "y": 1080,
+          "fill": {
+            "type": "image",
+            "enabled": true,
+            "url": "32-model-create-sheet.png",
+            "mode": "fill"
+          },
+          "width": 1536,
+          "height": 1024
+        },
+        {
+          "type": "rectangle",
+          "id": "VeNAk",
+          "x": 3072,
+          "y": 0,
+          "fill": {
+            "type": "image",
+            "enabled": true,
+            "url": "50-roles-dirty.png",
+            "mode": "fill"
+          },
+          "width": 1536,
+          "height": 1024
+        },
+        {
+          "type": "rectangle",
+          "id": "SiBEZ",
+          "x": 1536,
+          "y": 0,
+          "fill": {
+            "type": "image",
+            "enabled": true,
+            "url": "60-settings-normal.png",
+            "mode": "fill"
+          },
+          "width": 1536,
+          "height": 1024
+        }
+      ]
+    }
+  ],
   "fileToken": "943cd193-fe1b-4567-ba32-439933e09a5a"
 }
