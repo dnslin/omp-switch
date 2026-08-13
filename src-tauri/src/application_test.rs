@@ -233,6 +233,17 @@ fn diagnostics_suppress_structured_json_and_url_credentials() {
     }
 }
 
+
+#[test]
+fn diagnostics_redact_provider_prefixed_secret_names() {
+    let diagnostic = "OPENAI_API_KEY=sk-openai-live ANTHROPIC_API_KEY anthropic-live AZURE_ACCESS_TOKEN=azure-live safe-context";
+    let redacted = crate::application::redact_diagnostic(diagnostic);
+
+    for secret in ["sk-openai-live", "anthropic-live", "azure-live"] {
+        assert!(!redacted.contains(secret), "secret {secret:?} leaked in {redacted:?}");
+    }
+    assert!(redacted.contains("safe-context"));
+}
 #[test]
 fn malformed_settings_return_safe_diagnostic_error() {
     let app_data = tempdir().unwrap();

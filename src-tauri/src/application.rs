@@ -358,10 +358,13 @@ fn contains_structured_secret(value: &str) -> bool {
 }
 
 fn is_secret_name(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
     matches!(
-        value.trim().to_ascii_lowercase().replace('-', "_").as_str(),
+        normalized.as_str(),
         "api_key" | "apikey" | "token" | "access_token" | "refresh_token" | "password" | "passwd" | "secret" | "client_secret" | "authorization" | "proxy_authorization" | "x_api_key"
-    )
+    ) || ["_api_key", "_apikey", "_access_token", "_refresh_token", "_password", "_passwd", "_client_secret", "_authorization"]
+        .iter()
+        .any(|suffix| normalized.ends_with(suffix))
 }
 
 fn secret_assignment_width(key: &str, inline_value: &str, following: &[String]) -> usize {
