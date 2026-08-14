@@ -8,11 +8,15 @@ use std::{
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use tauri_plugin_opener::OpenerExt;
 
 use crate::{
     error::AppError,
-    omp_environment::{OmpEnvironment, SystemOmpEnvironment, TargetAccess},
+    omp_environment::{OmpEnvironment, SystemOmpEnvironment},
     redaction::redact_diagnostic,
+    target_configuration::{
+        TargetConfigurationDiscovery, TargetConfigurationStatus, TargetInitializationExpectation,
+    },
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -48,9 +52,8 @@ pub enum StartupState {
     OmpReady {
         executable_path: String,
         version: String,
-        target_configuration: String,
+        target_configuration: Box<TargetConfigurationDiscovery>,
         previous_target_configuration: Option<String>,
-        target_access: TargetAccess,
         requires_confirmation: bool,
     },
 }
@@ -90,11 +93,18 @@ pub struct AppService {
     settings_write: Arc<parking_lot::Mutex<()>>,
     environment: Arc<dyn OmpEnvironment>,
     pending_omp: Arc<RwLock<Option<PathBuf>>>,
+    recovery_notice: Arc<RwLock<Option<(PathBuf, String)>>>,
 }
-
 impl AppService {
     pub fn new(settings_path: PathBuf) -> Result<Self, AppError> {
-        Self::new_with_environment(settings_path, Arc::new(SystemOmpEnvironment))
+        let transaction_root = settings_path
+            .parent()
+            .ok_or_else(|| AppError::internal("界面设置路径没有父目录"))?
+            .join("target-initialization-transactions");
+        Self::new_with_environment(
+            settings_path,
+            Arc::new(SystemOmpEnvironment::new(transaction_root)),
+        )
     }
 
     pub fn new_with_environment(
@@ -108,14 +118,20 @@ impl AppService {
             settings_write: Arc::new(parking_lot::Mutex::new(())),
             environment,
             pending_omp: Arc::new(RwLock::new(None)),
+            recovery_notice: Arc::new(RwLock::new(None)),
         })
     }
 
     pub fn get_startup_state(&self) -> StartupState {
-        self.detect_omp()
+        self.detect_omp_internal()
     }
 
     pub fn detect_omp(&self) -> StartupState {
+        *self.recovery_notice.write() = None;
+        self.detect_omp_internal()
+    }
+
+    fn detect_omp_internal(&self) -> StartupState {
         *self.pending_omp.write() = None;
         let saved = self.settings.read().omp_executable_path.clone();
         let mut saved_failure = None;
@@ -170,7 +186,7 @@ impl AppService {
             StartupState::OmpReady {
                 target_configuration,
                 ..
-            } => Some(target_configuration),
+            } => Some(target_configuration.path),
             _ => None,
         }
     }
@@ -233,8 +249,8 @@ impl AppService {
             };
         }
         let target = target.unwrap();
-        let target_access = match self.environment.inspect_target(&target) {
-            Ok(access) => access,
+        let mut target_configuration = match self.environment.inspect_target(&target) {
+            Ok(discovery) => discovery,
             Err(error) => {
                 return StartupState::ConfigPathFailed {
                     executable_path,
@@ -243,17 +259,136 @@ impl AppService {
                         .to_owned(),
                     diagnostic_code: io_error_cause(error.kind()).to_owned(),
                     exit_code: None,
-                    stderr: String::new(),
+                    stderr: redact_diagnostic(&error.to_string()),
                 };
             }
         };
+        if let Some(notice) = target_configuration.recovery_notice.clone() {
+            *self.recovery_notice.write() = Some((target.clone(), notice));
+        } else if let Some((notice_target, notice)) = self.recovery_notice.read().as_ref()
+            && notice_target == &target
+        {
+            target_configuration.recovery_notice = Some(notice.clone());
+        }
         StartupState::OmpReady {
             executable_path,
             version,
-            target_configuration: target.to_string_lossy().into_owned(),
+            target_configuration: Box::new(target_configuration),
             previous_target_configuration,
-            target_access,
             requires_confirmation,
+        }
+    }
+
+    pub fn initialize_target_configuration(
+        &self,
+        executable: PathBuf,
+        expectation: TargetInitializationExpectation,
+    ) -> Result<StartupState, AppError> {
+        let saved = self.settings.read().omp_executable_path.clone();
+        let requires_confirmation = self.pending_omp.read().as_ref() == Some(&executable)
+            || saved
+                .as_deref()
+                .is_some_and(|saved_path| Path::new(saved_path) != executable);
+        let previous_target_configuration = self.saved_target_configuration(&executable);
+        let state = self.validate_omp(
+            executable.clone(),
+            requires_confirmation,
+            previous_target_configuration.clone(),
+        );
+        let target = match state {
+            StartupState::OmpReady {
+                ref target_configuration,
+                ..
+            } if target_configuration.status == TargetConfigurationStatus::CreationRequired => {
+                if target_configuration.create_paths != expectation.create_paths
+                    || target_configuration.discovery_token != expectation.discovery_token
+                {
+                    return Err(AppError::new(
+                        "target-initialization-changed",
+                        "Target configuration 在确认后发生变化。",
+                        "请重新检测并确认最新的真实目标和创建文件清单。",
+                    ));
+                }
+                PathBuf::from(&target_configuration.path)
+            }
+            StartupState::OmpReady { .. } => {
+                return Err(AppError::new(
+                    "target-initialization-not-required",
+                    "Target configuration 当前状态不允许创建最小配置。",
+                    "请重新检测并按当前只读、迁移或错误提示处理。",
+                ));
+            }
+            _ => {
+                return Err(AppError::new(
+                    "target-initialization-unavailable",
+                    "无法重新验证 OMP 的权威配置目录。",
+                    "请重新检测或重新选择 OMP。",
+                ));
+            }
+        };
+        if requires_confirmation {
+            self.confirm_selected_omp(executable.clone())?;
+        }
+        if let Err(error) = self.environment.initialize_target(&target, &expectation) {
+            let recovery_incomplete = error.recovery_incomplete();
+            tracing::warn!(
+                operation = "initialize_target_configuration",
+                cause = io_error_cause(error.kind()),
+                diagnostic = %redact_diagnostic(&error.to_string()),
+                recovery_incomplete,
+                "Target configuration initialization failed"
+            );
+            if requires_confirmation && !recovery_incomplete {
+                self.update_settings(|settings| {
+                    settings.omp_executable_path = saved.clone();
+                })?;
+                *self.pending_omp.write() = Some(executable.clone());
+            }
+            return Err(AppError::new(
+                "target-initialization-failed",
+                if recovery_incomplete {
+                    "创建最小 Target configuration 失败，且事务恢复尚未完整完成。"
+                } else {
+                    "创建最小 Target configuration 失败。"
+                },
+                if recovery_incomplete {
+                    "已保留新的 OMP 选择以便下次启动继续恢复。请勿继续写入，并重新检测。"
+                } else {
+                    "未保留部分创建结果，原 OMP 选择已恢复。请检查路径、权限和链接状态后重试。"
+                },
+            ));
+        }
+        if self
+            .recovery_notice
+            .read()
+            .as_ref()
+            .is_some_and(|(notice_target, _)| notice_target == &target)
+        {
+            *self.recovery_notice.write() = None;
+        }
+        Ok(self.validate_omp(executable, false, None))
+    }
+
+    pub fn target_directory_for_opening(&self, executable: PathBuf) -> Result<PathBuf, AppError> {
+        match self.validate_omp(executable, false, None) {
+            StartupState::OmpReady {
+                target_configuration,
+                ..
+            } => target_configuration
+                .resolved_path
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    AppError::new(
+                        "target-directory-unresolved",
+                        "无法确认 Target configuration 的真实目录。",
+                        "请修复链接或路径问题后重新检测。",
+                    )
+                }),
+            _ => Err(AppError::new(
+                "target-directory-unavailable",
+                "无法重新验证 OMP 的 Target configuration。",
+                "请重新检测或重新选择 OMP。",
+            )),
         }
     }
 
@@ -491,6 +626,47 @@ pub fn validate_selected_omp(
     state
 }
 
+#[tauri::command]
+pub fn initialize_target_configuration(
+    service: tauri::State<'_, AppService>,
+    executable_path: String,
+    expectation: TargetInitializationExpectation,
+) -> Result<StartupState, AppError> {
+    let started_at = Instant::now();
+    let result =
+        service.initialize_target_configuration(PathBuf::from(executable_path), expectation);
+    log_command_result("initialize_target_configuration", started_at, &result);
+    result
+}
+
+#[tauri::command]
+pub fn open_target_configuration_directory(
+    service: tauri::State<'_, AppService>,
+    app: tauri::AppHandle,
+    executable_path: String,
+) -> Result<(), AppError> {
+    let started_at = Instant::now();
+    let result = service
+        .target_directory_for_opening(PathBuf::from(executable_path))
+        .and_then(|path| {
+            app.opener()
+                .open_path(path.to_string_lossy(), None::<&str>)
+                .map_err(|error| {
+                    tracing::warn!(
+                        operation = "open_target_configuration_directory",
+                        diagnostic = %redact_diagnostic(&error.to_string()),
+                        "native directory opener failed"
+                    );
+                    AppError::new(
+                        "target-directory-open-failed",
+                        "系统文件管理器未能打开配置目录。",
+                        "请检查系统文件管理器关联后重试，并在问题持续时查看脱敏日志。",
+                    )
+                })
+        });
+    log_command_result("open_target_configuration_directory", started_at, &result);
+    result
+}
 #[tauri::command]
 pub fn confirm_selected_omp(
     service: tauri::State<'_, AppService>,

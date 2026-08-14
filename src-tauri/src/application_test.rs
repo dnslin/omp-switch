@@ -7,7 +7,13 @@ use std::{
 
 use crate::{
     application::{AppService, AppSettings, StartupState, Theme, UiSettingsUpdate},
-    omp_environment::{CommandOutput, ConfigurationFileStatus, OmpEnvironment, TargetAccess},
+    omp_environment::{CommandOutput, OmpEnvironment},
+    target_configuration::{
+        ConfigurationFileDiscovery, ConfigurationFileStatus, InitializationFailurePoint,
+        TargetConfigurationDiscovery, TargetConfigurationStatus, TargetInitializationError,
+        TargetInitializationExpectation, discover_target_configuration,
+        initialize_target_configuration_with_failure,
+    },
 };
 use parking_lot::Mutex;
 use pretty_assertions::assert_eq;
@@ -19,6 +25,10 @@ struct FakeOmpEnvironment {
     path_error: Option<std::io::ErrorKind>,
     calls: Mutex<Vec<(PathBuf, Vec<String>)>>,
     inspect_target_error: Option<std::io::ErrorKind>,
+    config_path: Option<PathBuf>,
+    inspect_real_target: bool,
+    transaction_root: PathBuf,
+    initialization_failure: Option<InitializationFailurePoint>,
 }
 
 impl FakeOmpEnvironment {
@@ -42,6 +52,10 @@ impl FakeOmpEnvironment {
 }
 
 impl OmpEnvironment for FakeOmpEnvironment {
+    fn transaction_root(&self) -> &Path {
+        &self.transaction_root
+    }
+
     fn find_in_path(&self) -> std::io::Result<Option<PathBuf>> {
         if let Some(kind) = self.path_error {
             return Err(std::io::Error::new(kind, "PATH discovery failed"));
@@ -58,6 +72,11 @@ impl OmpEnvironment for FakeOmpEnvironment {
         match (name.as_ref(), arguments) {
             ("saved-omp", ["--version"]) => Ok(CommandOutput::success("17.4.1\n")),
             ("saved-omp", ["config", "path"]) => Ok(CommandOutput::success("/tmp/saved-agent\n")),
+            ("temp-omp", ["--version"]) => Ok(CommandOutput::success("18.1.0\n")),
+            ("temp-omp", ["config", "path"]) => Ok(CommandOutput::success(format!(
+                "{}\n",
+                self.config_path.as_ref().unwrap().display()
+            ))),
             ("path-omp", ["--version"]) => Ok(CommandOutput::success("18.0.0\n")),
             ("path-omp", ["config", "path"]) => Ok(CommandOutput::success("/tmp/path-agent\n")),
             ("broken-version", ["--version"]) => {
@@ -71,16 +90,69 @@ impl OmpEnvironment for FakeOmpEnvironment {
         }
     }
 
-    fn inspect_target(&self, _target: &Path) -> std::io::Result<TargetAccess> {
+    fn inspect_target(&self, target: &Path) -> std::io::Result<TargetConfigurationDiscovery> {
         if let Some(kind) = self.inspect_target_error {
             return Err(std::io::Error::new(kind, "target inspection failed"));
         }
-        Ok(TargetAccess {
-            writable: true,
-            models_yml: ConfigurationFileStatus::Normal,
-            config_yml: ConfigurationFileStatus::Normal,
-        })
+        if self.inspect_real_target {
+            return discover_target_configuration(target);
+        }
+        Ok(writable_target(target))
     }
+
+    fn initialize_target(
+        &self,
+        target: &Path,
+        expectation: &TargetInitializationExpectation,
+    ) -> Result<TargetConfigurationDiscovery, TargetInitializationError> {
+        match self.initialization_failure {
+            Some(failure) => {
+                initialize_target_configuration_with_failure(target, expectation, failure)
+            }
+            None => {
+                crate::target_configuration::initialize_target_configuration(target, expectation)
+            }
+        }
+    }
+}
+
+fn writable_target(target: &Path) -> TargetConfigurationDiscovery {
+    let file = |name: &str| ConfigurationFileDiscovery {
+        canonical_path: target.join(name).to_string_lossy().into_owned(),
+        resolved_path: Some(target.join(name).to_string_lossy().into_owned()),
+        status: ConfigurationFileStatus::Normal,
+    };
+    TargetConfigurationDiscovery {
+        path: target.to_string_lossy().into_owned(),
+        resolved_path: Some(target.to_string_lossy().into_owned()),
+        status: TargetConfigurationStatus::Writable,
+        writable: true,
+        models: file("models.yml"),
+        config: file("config.yml"),
+        recovery_notice: None,
+        create_paths: Vec::new(),
+        discovery_token: format!("test:{}", target.display()),
+        warnings: Vec::new(),
+        issue: None,
+    }
+}
+
+fn initialization_expectation(target: &Path) -> TargetInitializationExpectation {
+    let discovery = discover_target_configuration(target).unwrap();
+    TargetInitializationExpectation {
+        create_paths: discovery.create_paths,
+        discovery_token: discovery.discovery_token,
+    }
+}
+fn service_for_target(target: &Path) -> AppService {
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.to_path_buf()),
+        inspect_real_target: true,
+        transaction_root: target.parent().unwrap().join(".app-transactions"),
+        ..FakeOmpEnvironment::default()
+    });
+    service_with(environment, None)
 }
 
 fn service_with(environment: Arc<FakeOmpEnvironment>, saved: Option<&str>) -> AppService {
@@ -111,12 +183,7 @@ fn startup_detection_prefers_saved_omp_and_runs_only_fixed_commands() {
         StartupState::OmpReady {
             executable_path: "/bin/saved-omp".to_owned(),
             version: "17.4.1".to_owned(),
-            target_configuration: "/tmp/saved-agent".to_owned(),
-            target_access: TargetAccess {
-                writable: true,
-                models_yml: ConfigurationFileStatus::Normal,
-                config_yml: ConfigurationFileStatus::Normal,
-            },
+            target_configuration: Box::new(writable_target(Path::new("/tmp/saved-agent"))),
             requires_confirmation: false,
             previous_target_configuration: None,
         }
@@ -249,7 +316,7 @@ fn valid_manual_replacement_is_saved_only_after_explicit_confirmation() {
             ref target_configuration,
             ref previous_target_configuration,
             ..
-        } if target_configuration == "/tmp/path-agent"
+        } if target_configuration.path == "/tmp/path-agent"
             && previous_target_configuration.as_deref() == Some("/tmp/saved-agent")
     ));
     assert_eq!(
@@ -614,6 +681,418 @@ fn execution_io_failures_keep_a_safe_diagnostic_cause() {
         service.validate_selected_omp(PathBuf::from("/bin/missing-omp")),
         StartupState::InvalidExecutable { ref diagnostic_code, .. }
             if diagnostic_code == "io-not-found"
+    ));
+}
+
+#[test]
+fn application_service_discovers_legacy_json_and_yaml_parse_failures() {
+    let root = tempdir().unwrap();
+    let legacy = root.path().join("legacy-agent");
+    fs::create_dir(&legacy).unwrap();
+    fs::write(legacy.join("models.json"), "{\"providers\":{}}\n").unwrap();
+    fs::write(legacy.join("settings.json"), "{\"modelRoles\":{}}\n").unwrap();
+    let legacy_state = service_for_target(&legacy).detect_omp();
+    assert!(matches!(
+        legacy_state,
+        StartupState::OmpReady { target_configuration, .. }
+            if target_configuration.status == TargetConfigurationStatus::MigrationRequired
+    ));
+
+    let malformed = root.path().join("malformed-agent");
+    fs::create_dir(&malformed).unwrap();
+    fs::write(malformed.join("models.yml"), "providers: [\n").unwrap();
+    fs::write(malformed.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let malformed_state = service_for_target(&malformed).detect_omp();
+    assert!(matches!(
+        malformed_state,
+        StartupState::OmpReady { target_configuration, .. }
+            if target_configuration.status == TargetConfigurationStatus::ParseError
+                && target_configuration.issue.is_some()
+    ));
+}
+
+#[test]
+fn application_service_classifies_yaml_extension_combinations() {
+    let root = tempdir().unwrap();
+    let alternate_only = root.path().join("alternate-agent");
+    fs::create_dir(&alternate_only).unwrap();
+    fs::write(alternate_only.join("models.yaml"), "providers: {}\n").unwrap();
+    fs::write(alternate_only.join("config.yaml"), "modelRoles: {}\n").unwrap();
+    assert!(matches!(
+        service_for_target(&alternate_only).detect_omp(),
+        StartupState::OmpReady { target_configuration, .. }
+            if target_configuration.status == TargetConfigurationStatus::ReadOnly
+                && target_configuration.models.status == ConfigurationFileStatus::AlternateOnly
+                && target_configuration.config.status == ConfigurationFileStatus::AlternateOnly
+    ));
+
+    let canonical_with_alternate = root.path().join("mixed-agent");
+    fs::create_dir(&canonical_with_alternate).unwrap();
+    fs::write(
+        canonical_with_alternate.join("models.yml"),
+        "providers: {}\n",
+    )
+    .unwrap();
+    fs::write(
+        canonical_with_alternate.join("models.yaml"),
+        "providers: {}\n",
+    )
+    .unwrap();
+    fs::write(
+        canonical_with_alternate.join("config.yml"),
+        "modelRoles: {}\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        service_for_target(&canonical_with_alternate).detect_omp(),
+        StartupState::OmpReady { target_configuration, .. }
+            if target_configuration.status == TargetConfigurationStatus::Writable
+                && target_configuration.models.status == ConfigurationFileStatus::CanonicalWithAlternate
+    ));
+}
+
+#[test]
+fn application_service_initializes_missing_target_and_returns_reparsed_state() {
+    let root = tempdir().unwrap();
+    let target = root.path().join("agent");
+    let service = service_for_target(&target);
+
+    assert!(matches!(
+        service.detect_omp(),
+        StartupState::OmpReady { target_configuration, .. }
+            if target_configuration.status == TargetConfigurationStatus::CreationRequired
+    ));
+    let state = service
+        .initialize_target_configuration(
+            PathBuf::from("/bin/temp-omp"),
+            initialization_expectation(&target),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        state,
+        StartupState::OmpReady { target_configuration, .. }
+            if target_configuration.status == TargetConfigurationStatus::Writable
+    ));
+    assert_eq!(
+        fs::read(target.join("models.yml")).unwrap(),
+        b"providers: {}\n"
+    );
+    assert_eq!(
+        fs::read(target.join("config.yml")).unwrap(),
+        b"modelRoles: {}\n"
+    );
+}
+
+#[test]
+fn application_service_rejects_a_changed_confirmed_creation_list() {
+    let root = tempdir().unwrap();
+    let target = root.path().join("changed-agent");
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    let service = service_for_target(&target);
+    let expectation = match service.detect_omp() {
+        StartupState::OmpReady {
+            target_configuration,
+            ..
+        } => TargetInitializationExpectation {
+            create_paths: target_configuration.create_paths.clone(),
+            discovery_token: target_configuration.discovery_token.clone(),
+        },
+        state => panic!("expected creation-required state, got {state:?}"),
+    };
+    assert_eq!(
+        expectation.create_paths,
+        vec![target.join("config.yml").to_string_lossy().into_owned()]
+    );
+    fs::remove_file(target.join("models.yml")).unwrap();
+
+    let error = service
+        .initialize_target_configuration(PathBuf::from("/bin/temp-omp"), expectation)
+        .unwrap_err();
+
+    assert_eq!(error.code, "target-initialization-changed");
+    assert!(!target.join("models.yml").exists());
+    assert!(!target.join("config.yml").exists());
+}
+
+#[test]
+fn application_service_confirms_new_omp_during_target_initialization() {
+    let root = tempdir().unwrap();
+    let target = root.path().join("new-agent");
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.clone()),
+        inspect_real_target: true,
+        transaction_root: target.parent().unwrap().join(".app-transactions"),
+        ..FakeOmpEnvironment::default()
+    });
+    let service = service_with(environment, Some("/bin/saved-omp"));
+    assert!(matches!(
+        service.validate_selected_omp(PathBuf::from("/bin/temp-omp")),
+        StartupState::OmpReady {
+            requires_confirmation: true,
+            ..
+        }
+    ));
+
+    let state = service
+        .initialize_target_configuration(
+            PathBuf::from("/bin/temp-omp"),
+            initialization_expectation(&target),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        state,
+        StartupState::OmpReady {
+            requires_confirmation: false,
+            ..
+        }
+    ));
+    assert_eq!(
+        service
+            .get_ui_settings()
+            .unwrap()
+            .omp_executable_path
+            .as_deref(),
+        Some("/bin/temp-omp")
+    );
+}
+
+#[test]
+fn application_service_saves_first_manual_omp_during_target_initialization() {
+    let root = tempdir().unwrap();
+    let target = root.path().join("manual-agent");
+    let environment = Arc::new(FakeOmpEnvironment {
+        config_path: Some(target.clone()),
+        inspect_real_target: true,
+        transaction_root: target.parent().unwrap().join(".app-transactions"),
+        ..FakeOmpEnvironment::default()
+    });
+    let service = service_with(environment, None);
+    let executable = PathBuf::from("/bin/temp-omp");
+
+    assert!(matches!(
+        service.validate_selected_omp(executable.clone()),
+        StartupState::OmpReady {
+            requires_confirmation: true,
+            ..
+        }
+    ));
+    let state = service
+        .initialize_target_configuration(executable.clone(), initialization_expectation(&target))
+        .unwrap();
+
+    assert!(matches!(
+        state,
+        StartupState::OmpReady {
+            requires_confirmation: false,
+            ..
+        }
+    ));
+    assert_eq!(
+        service.get_ui_settings().unwrap().omp_executable_path,
+        Some(executable.to_string_lossy().into_owned())
+    );
+    assert!(service.confirm_selected_omp(executable).is_err());
+}
+
+#[test]
+fn application_service_rolls_back_partial_target_initialization() {
+    let root = tempdir().unwrap();
+    let target = root.path().join("partial-agent");
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.clone()),
+        inspect_real_target: true,
+        transaction_root: target.parent().unwrap().join(".app-transactions"),
+        initialization_failure: Some(InitializationFailurePoint::AfterFirstCommit),
+        ..FakeOmpEnvironment::default()
+    });
+    let service = service_with(environment, Some("/bin/saved-omp"));
+    assert!(matches!(
+        service.validate_selected_omp(PathBuf::from("/bin/temp-omp")),
+        StartupState::OmpReady {
+            requires_confirmation: true,
+            ..
+        }
+    ));
+
+    let error = service
+        .initialize_target_configuration(
+            PathBuf::from("/bin/temp-omp"),
+            initialization_expectation(&target),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code, "target-initialization-failed");
+    assert!(!target.exists());
+    assert_eq!(
+        service
+            .get_ui_settings()
+            .unwrap()
+            .omp_executable_path
+            .as_deref(),
+        Some("/bin/saved-omp")
+    );
+}
+#[test]
+fn application_service_keeps_new_omp_for_incomplete_crash_recovery() {
+    let root = tempdir().unwrap();
+    let target = root.path().join("crashed-agent");
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.clone()),
+        inspect_real_target: true,
+        transaction_root: target.parent().unwrap().join(".app-transactions"),
+        initialization_failure: Some(InitializationFailurePoint::CrashAfterFirstCommit),
+        ..FakeOmpEnvironment::default()
+    });
+    let service = service_with(environment, Some("/bin/saved-omp"));
+    assert!(matches!(
+        service.validate_selected_omp(PathBuf::from("/bin/temp-omp")),
+        StartupState::OmpReady {
+            requires_confirmation: true,
+            ..
+        }
+    ));
+
+    let error = service
+        .initialize_target_configuration(
+            PathBuf::from("/bin/temp-omp"),
+            initialization_expectation(&target),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code, "target-initialization-failed");
+    assert_eq!(
+        service
+            .get_ui_settings()
+            .unwrap()
+            .omp_executable_path
+            .as_deref(),
+        Some("/bin/temp-omp")
+    );
+    assert!(target.join("models.yml").exists());
+    assert!(!target.join("config.yml").exists());
+
+    let recovered = service.get_startup_state();
+
+    assert!(matches!(
+        recovered,
+        StartupState::OmpReady {
+            target_configuration,
+            requires_confirmation: false,
+            ..
+        } if target_configuration.status == TargetConfigurationStatus::CreationRequired
+            && target_configuration.recovery_notice.is_some()
+    ));
+    assert!(!target.join("models.yml").exists());
+    assert!(matches!(
+        service.get_startup_state(),
+        StartupState::OmpReady {
+            target_configuration,
+            ..
+        } if target_configuration.recovery_notice.is_some()
+    ));
+    assert!(matches!(
+        service.detect_omp(),
+        StartupState::OmpReady {
+            target_configuration,
+            ..
+        } if target_configuration.recovery_notice.is_none()
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn application_service_rejects_a_retargeted_confirmation_identity() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempdir().unwrap();
+    let real_a = root.path().join("real-a");
+    let real_b = root.path().join("real-b");
+    let target = root.path().join("agent");
+    fs::create_dir(&real_a).unwrap();
+    fs::create_dir(&real_b).unwrap();
+    symlink(&real_a, &target).unwrap();
+    let service = service_for_target(&target);
+    let expectation = match service.detect_omp() {
+        StartupState::OmpReady {
+            target_configuration,
+            ..
+        } => TargetInitializationExpectation {
+            create_paths: target_configuration.create_paths.clone(),
+            discovery_token: target_configuration.discovery_token.clone(),
+        },
+        state => panic!("expected creation-required state, got {state:?}"),
+    };
+    fs::remove_file(&target).unwrap();
+    symlink(&real_b, &target).unwrap();
+
+    let error = service
+        .initialize_target_configuration(PathBuf::from("/bin/temp-omp"), expectation)
+        .unwrap_err();
+
+    assert_eq!(error.code, "target-initialization-changed");
+    assert!(!real_a.join("models.yml").exists());
+    assert!(!real_b.join("models.yml").exists());
+}
+#[cfg(unix)]
+#[test]
+fn application_service_reports_symlink_real_target() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempdir().unwrap();
+    let real = root.path().join("real-agent");
+    let linked = root.path().join("linked-agent");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(real.join("config.yml"), "modelRoles: {}\n").unwrap();
+    symlink(&real, &linked).unwrap();
+
+    let state = service_for_target(&linked).detect_omp();
+
+    assert!(matches!(
+        state,
+        StartupState::OmpReady { target_configuration, .. }
+            if target_configuration.resolved_path
+                == Some(real.canonicalize().unwrap().to_string_lossy().into_owned())
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn application_service_reports_junction_real_target() {
+    use std::process::Command;
+
+    let root = tempdir().unwrap();
+    let real = root.path().join("real-agent");
+    let junction = root.path().join("junction-agent");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(real.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let command = format!(
+        "mklink /J \"{}\" \"{}\"",
+        junction.display(),
+        real.display()
+    );
+    assert!(
+        Command::new("cmd")
+            .args(["/C", &command])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let state = service_for_target(&junction).detect_omp();
+
+    assert!(matches!(
+        state,
+        StartupState::OmpReady { target_configuration, .. }
+            if target_configuration.resolved_path
+                == Some(real.canonicalize().unwrap().to_string_lossy().into_owned())
     ));
 }
 

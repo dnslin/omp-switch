@@ -4,7 +4,7 @@ import { Link, NavLink, Navigate, Route, Routes, useNavigate } from "react-route
 import { toast, Toaster } from "sonner";
 import { RedetectionLoader } from "../components/redetection-loader";
 import { Button, Card, NavigationItem, PageTitle, StatusIndicator } from "../components/ui";
-import { asAppError, useTauriClient, type StartupState } from "../lib/tauri-client";
+import { asAppError, useTauriClient, type ConfigurationFileStatus, type StartupState } from "../lib/tauri-client";
 
 const pages = [
   { to: "/overview", label: "概览", icon: LayoutGrid },
@@ -41,78 +41,88 @@ function MainShell({ children }: { children: React.ReactNode }) {
 
 type ReadyState = Extract<StartupState, { kind: "omp-ready" }>;
 type FailureState = Extract<StartupState, { kind: "invalid-executable" | "version-failed" | "config-path-failed" }>;
+type RowStatus = { label: string; tone: "success" | "warning" | "danger" };
+
+type TargetPresentation = {
+  title: string;
+  description: string;
+  statusText: string;
+  tone: "success" | "warning" | "danger";
+  rowStatus: RowStatus;
+  canEnter: boolean;
+  needsExternalRepair: boolean;
+  permissionSummary: string;
+  retryLabel: "重新检测" | "重新读取";
+  createLabel: string | null;
+  enterLabel: string | null;
+  extended: boolean;
+  issueHeading: string | null;
+};
 
 type SetupPresentation = {
   readyState: ReadyState | null;
   failureState: FailureState | null;
   confirmingSwitch: boolean;
+  targetPresentation: TargetPresentation | null;
   title: string;
   description: string;
   statusText: string;
+  tone: "success" | "warning" | "danger";
 };
 
-function getSetupPresentation(state: StartupState): SetupPresentation {
-  switch (state.kind) {
-    case "detecting":
-      return {
-        readyState: null,
-        failureState: null,
-        confirmingSwitch: false,
-        title: "正在检测 OMP…",
-        description: "正在检查可执行文件、版本和权威配置目录。",
-        statusText: "正在检测 OMP…",
-      };
-    case "omp-unavailable":
-      return {
-        readyState: null,
-        failureState: null,
-        confirmingSwitch: false,
-        title: "设置 OMP",
-        description: state.message,
-        statusText: state.message,
-      };
-    case "invalid-executable":
-    case "version-failed":
-      return {
-        readyState: null,
-        failureState: state,
-        confirmingSwitch: false,
-        title: "设置 OMP",
-        description: state.message,
-        statusText: state.message,
-      };
-    case "config-path-failed":
-      return {
-        readyState: null,
-        failureState: state,
-        confirmingSwitch: false,
-        title: "无法获取 OMP 配置目录",
-        description: state.message,
-        statusText: state.message,
-      };
-    case "omp-ready": {
-      const confirmingSwitch = state.requiresConfirmation;
-      return {
-        readyState: state,
-        failureState: null,
-        confirmingSwitch,
-        title: confirmingSwitch ? "确认切换 OMP" : "OMP 已找到",
-        description: confirmingSwitch
-          ? "请确认新的 OMP 及其 Target configuration；确认后才会替换当前选择。"
-          : "OMP Switch 已确认可执行文件和权威配置目录。",
-        statusText: confirmingSwitch ? "等待确认  ·  尚未切换 OMP" : "检测完成  ·  OMP 已可用",
-      };
+function getTargetPresentation(target: ReadyState["targetConfiguration"], confirmingSwitch: boolean): TargetPresentation {
+  switch (target.status) {
+    case "writable":
+      return confirmingSwitch
+        ? { title: "确认切换 OMP", description: "请确认新的 OMP 及其 Target configuration；确认后才会替换当前选择。", statusText: "等待确认  ·  尚未切换 OMP", tone: "warning", rowStatus: { label: "正常", tone: "success" }, canEnter: true, needsExternalRepair: false, permissionSummary: "配置文件可读写，权限正常。", retryLabel: "重新检测", createLabel: null, enterLabel: "确认切换并进入应用", extended: false, issueHeading: null }
+        : { title: "OMP 已找到", description: "OMP Switch 已确认可执行文件和权威配置目录。", statusText: "检测完成  ·  OMP 已可用", tone: "success", rowStatus: { label: "正常", tone: "success" }, canEnter: true, needsExternalRepair: false, permissionSummary: "配置文件可读写，权限正常。", retryLabel: "重新检测", createLabel: null, enterLabel: "进入应用", extended: false, issueHeading: null };
+    case "creation-required":
+      return { title: "需要创建 OMP 配置", description: "请确认以下目录和最小配置文件。已有文件不会被覆盖。", statusText: "等待确认  ·  尚未创建配置", tone: "warning", rowStatus: { label: "待创建", tone: "warning" }, canEnter: false, needsExternalRepair: false, permissionSummary: "确认后将通过可恢复事务创建最小配置；中断将在下次检测时恢复。", retryLabel: "重新检测", createLabel: confirmingSwitch ? "确认切换并创建" : "创建", enterLabel: null, extended: true, issueHeading: null };
+    case "read-only": {
+      const yamlOnly = target.models.status === "alternate-only" || target.config.status === "alternate-only";
+      return yamlOnly
+        ? { title: "当前配置使用 .yaml", description: "OMP Switch MVP 只写入 .yml。当前配置可以查看，但不能修改。", statusText: "配置只读  ·  .yaml 不会被修改", tone: "warning", rowStatus: { label: "只读", tone: "warning" }, canEnter: true, needsExternalRepair: true, permissionSummary: "配置可查看；OMP Switch 不会修改当前文件。", retryLabel: "重新检测", createLabel: null, enterLabel: "进入只读模式", extended: true, issueHeading: null }
+        : { title: "Target configuration 只读", description: "当前目录或规范 .yml 文件不可写。配置可以查看，但不能修改。", statusText: "配置只读  ·  写入已禁用", tone: "warning", rowStatus: { label: "只读", tone: "warning" }, canEnter: true, needsExternalRepair: false, permissionSummary: "配置可查看；OMP Switch 不会修改当前文件。", retryLabel: "重新检测", createLabel: null, enterLabel: "进入只读模式", extended: true, issueHeading: null };
     }
+    case "migration-required":
+      return { title: "需要先由 OMP 迁移配置", description: "请先使用当前 OMP 完成官方 YAML 迁移，然后重新检测。", statusText: "检测到旧 JSON  ·  不会创建空 YAML", tone: "warning", rowStatus: { label: "待迁移", tone: "warning" }, canEnter: false, needsExternalRepair: true, permissionSummary: "配置目录已确认；写入保持禁用，直到外部问题解决。", retryLabel: "重新检测", createLabel: null, enterLabel: null, extended: true, issueHeading: null };
+    case "parse-error": {
+      const file = target.issue?.filePath.split(/[\\/]/).at(-1) ?? "YAML";
+      return { title: `无法读取 ${file}`, description: "请在外部修复 YAML 后重新读取。OMP Switch 不会覆盖错误文件。", statusText: "YAML 解析失败  ·  写入已禁用", tone: "danger", rowStatus: { label: "格式错误", tone: "danger" }, canEnter: false, needsExternalRepair: true, permissionSummary: "配置目录已确认；写入保持禁用，直到外部问题解决。", retryLabel: "重新读取", createLabel: null, enterLabel: null, extended: true, issueHeading: formatIssueLocation(target.issue?.line ?? null, target.issue?.column ?? null) };
+    }
+    case "unsafe":
+      return { title: "无法安全访问 Target configuration", description: "链接、重解析点、路径类型或权限边界无法被安全确认。", statusText: "目标不安全  ·  写入已拒绝", tone: "danger", rowStatus: { label: "不安全", tone: "danger" }, canEnter: false, needsExternalRepair: true, permissionSummary: "配置目录已确认；写入保持禁用，直到外部问题解决。", retryLabel: "重新检测", createLabel: null, enterLabel: null, extended: true, issueHeading: "无法确认真实目标。" };
   }
 }
 
+function getSetupPresentation(state: StartupState): SetupPresentation {
+  const base = { confirmingSwitch: false, targetPresentation: null, tone: "warning" as const };
+  switch (state.kind) {
+    case "detecting":
+      return { ...base, readyState: null, failureState: null, title: "正在检测 OMP…", description: "正在检查可执行文件、版本和权威配置目录。", statusText: "正在检测 OMP…" };
+    case "omp-unavailable":
+      return { ...base, readyState: null, failureState: null, title: "设置 OMP", description: state.message, statusText: state.message };
+    case "invalid-executable":
+    case "version-failed":
+      return { ...base, readyState: null, failureState: state, title: "设置 OMP", description: state.message, statusText: state.message, tone: "danger" };
+    case "config-path-failed":
+      return { ...base, readyState: null, failureState: state, title: "无法获取 OMP 配置目录", description: state.message, statusText: state.message, tone: "danger" };
+    case "omp-ready": {
+      const confirmingSwitch = state.requiresConfirmation;
+      const targetPresentation = getTargetPresentation(state.targetConfiguration, confirmingSwitch);
+      return { readyState: state, failureState: null, confirmingSwitch, targetPresentation, ...targetPresentation };
+    }
+  }
+}
 
 function SetupPage() {
   const client = useTauriClient();
   const navigate = useNavigate();
   const [state, setState] = useState<StartupState>({ kind: "detecting" });
   const [redetecting, setRedetecting] = useState(false);
+  const [initializing, setInitializing] = useState(false);
   const detectionInFlight = useRef(false);
+  const initializationInFlight = useRef(false);
   useEffect(() => {
     let active = true;
     void client.getStartupState().then((next) => {
@@ -120,26 +130,25 @@ function SetupPage() {
     }).catch((error: unknown) => {
       const appError = asAppError(error, "无法读取启动状态");
       toast.error(appError.message, { description: appError.action });
+      if (active) setState({ kind: "omp-unavailable", message: appError.message });
     });
-    return () => {
-      active = false;
-    };
+    return () => { active = false; };
   }, [client]);
 
   async function detect() {
     if (detectionInFlight.current) return;
     detectionInFlight.current = true;
     const preserveReadyState = state.kind === "omp-ready";
-    if (preserveReadyState) {
-      setRedetecting(true);
-    } else {
-      setState({ kind: "detecting" });
-    }
+    if (preserveReadyState) setRedetecting(true);
+    else setState({ kind: "detecting" });
     try {
       let nextState: StartupState;
       if (preserveReadyState) {
+        const redetection = state.requiresConfirmation
+          ? client.validateSelectedOmp(state.executablePath)
+          : client.detectOmp();
         const [detectionResult] = await Promise.allSettled([
-          client.detectOmp(),
+          redetection,
           new Promise<void>((resolve) => setTimeout(resolve, REDETECT_MINIMUM_DURATION_MS)),
         ]);
         if (detectionResult.status === "rejected") throw detectionResult.reason;
@@ -171,76 +180,111 @@ function SetupPage() {
     }
   }
 
-  async function enterApplication() {
+  async function initializeConfiguration() {
+    if (state.kind !== "omp-ready" || initializationInFlight.current) return;
+    initializationInFlight.current = true;
+    setInitializing(true);
+    try {
+      setState(await client.initializeTargetConfiguration(state.executablePath, {
+        createPaths: state.targetConfiguration.createPaths,
+        discoveryToken: state.targetConfiguration.discoveryToken,
+      }));
+    } catch (error: unknown) {
+      const appError = asAppError(error, "无法创建最小 Target configuration");
+      toast.error(appError.message, { description: appError.action });
+      try {
+        setState(await client.validateSelectedOmp(state.executablePath));
+      } catch {
+        setState({ kind: "omp-unavailable", message: appError.message });
+      }
+    }
+    finally {
+      initializationInFlight.current = false;
+      setInitializing(false);
+    }
+  }
+
+  async function openTargetDirectory() {
     if (state.kind !== "omp-ready") return;
     try {
-      if (state.requiresConfirmation) {
-        await client.confirmSelectedOmp(state.executablePath);
-      }
+      await client.openTargetConfigurationDirectory(state.executablePath);
+    } catch (error: unknown) {
+      const appError = asAppError(error, "无法打开配置目录");
+      toast.error(appError.message, { description: appError.action });
+    }
+  }
+
+  async function enterApplication() {
+    if (state.kind !== "omp-ready") return;
+    if (!getTargetPresentation(state.targetConfiguration, state.requiresConfirmation).canEnter) return;
+    try {
+      if (state.requiresConfirmation) await client.confirmSelectedOmp(state.executablePath);
       navigate("/overview");
     } catch (error: unknown) {
       const appError = asAppError(error, "无法保存 OMP 选择");
       toast.error(appError.message, { description: appError.action });
     }
   }
+
   const presentation = getSetupPresentation(state);
-  const { readyState, failureState, confirmingSwitch, title, description, statusText } = presentation;
-  const configurationReady = readyState !== null
-    && readyState.targetAccess.modelsYml !== "missing"
-    && readyState.targetAccess.configYml !== "missing";
+  const { readyState, failureState, confirmingSwitch, targetPresentation, title, description, statusText, tone } = presentation;
+  const target = readyState?.targetConfiguration ?? null;
 
   return (
     <div className="app-frame">
-      <main className="setup-body">
-        <section className="setup-card" aria-busy={redetecting}>
+      <main className={`setup-body ${targetPresentation?.extended ? "setup-body--extended" : ""} ${targetPresentation?.createLabel ? "setup-body--creation" : ""}`}>
+        <section className="setup-card" aria-busy={redetecting || initializing}>
           <header><h1>{title}</h1><p>{description}</p></header>
-          <div className={`setup-state ${readyState ? "setup-state--success" : ""}`} aria-live="polite">
+          <div className={`setup-state setup-state--${tone}`} aria-live="polite">
             <span className="status-dot" aria-hidden="true" />
             {statusText}
           </div>
-          {readyState ? (
+          {readyState && target ? (
             <>
               <div className="setup-table">
                 <SetupRow icon={SquareTerminal} label="可执行文件" value={readyState.executablePath} mono />
                 <SetupRow icon={Info} label="版本" value={readyState.version} />
-                <SetupRow icon={Folder} label="权威配置目录" value={readyState.targetConfiguration} mono status={readyState.targetAccess.writable ? "正常" : "只读"} />
-                <SetupRow icon={File} label="models.yml" value="" status={fileStatusLabel(readyState.targetAccess.modelsYml)} />
-                <SetupRow icon={File} label="config.yml" value="" status={fileStatusLabel(readyState.targetAccess.configYml)} />
+                <SetupRow icon={Folder} label="权威配置目录" value={displayTargetPath(target.path, target.resolvedPath)} mono status={targetPresentation?.rowStatus} />
+                <SetupRow icon={File} label="models.yml" value={displayResolvedPath(target.models.canonicalPath, target.models.resolvedPath)} mono status={fileStatusView(target.models.status)} />
+                <SetupRow icon={File} label="config.yml" value={displayResolvedPath(target.config.canonicalPath, target.config.resolvedPath)} mono status={fileStatusView(target.config.status)} />
               </div>
+              {targetPresentation?.createLabel ? (
+                <div className="setup-notice"><strong>将创建</strong><ul>{target.createPaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul></div>
+              ) : null}
+              {target.warnings.length > 0 ? (
+                <div className="setup-notice setup-notice--warning"><strong>注意</strong><ul>{target.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div>
+              ) : null}
+              {target.recoveryNotice ? (
+                <div className="setup-notice" role="status"><strong>已恢复上次中断操作</strong><p>{target.recoveryNotice}</p></div>
+              ) : null}
+              {target.issue ? (
+                <div className="technical-details" role="alert">
+                  <strong>{targetPresentation?.issueHeading}</strong>
+                  <p className="mono">{target.issue.filePath}</p>
+                  <p>{target.issue.message}</p>
+                </div>
+              ) : null}
               {confirmingSwitch ? (
                 <div className="target-change" aria-label="Target configuration 变更">
                   <div><span>当前 Target configuration</span><code>{readyState.previousTargetConfiguration ?? "当前 OMP 无法读取，配置目录未知"}</code></div>
-                  <div><span>切换后 Target configuration</span><code>{readyState.targetConfiguration}</code></div>
+                  <div><span>切换后 Target configuration</span><code>{target.path}</code></div>
                 </div>
               ) : null}
-              <div className="permission-summary"><CheckCircle2 aria-hidden="true" />{readyState.targetAccess.writable && readyState.targetAccess.modelsYml === "normal" && readyState.targetAccess.configYml === "normal" ? "配置文件可读写，权限正常。" : "配置目录已确认；只读或缺失文件状态如上。"}</div>
+              <div className="permission-summary"><CheckCircle2 aria-hidden="true" />{targetPresentation?.permissionSummary}</div>
             </>
           ) : failureState ? (
             <details className="technical-details"><summary>查看技术详情</summary><p>诊断代码：{failureState.diagnosticCode}</p>{failureState.kind !== "invalid-executable" ? <><p>退出码：{failureState.exitCode ?? "不可用"}</p><p>{failureState.stderr || "命令没有返回 stderr。"}</p></> : null}</details>
           ) : null}
           <div className="setup-actions">
-            <Button size="setup" variant="secondary" onClick={selectExecutable} disabled={state.kind === "detecting" || redetecting}>
-              手动选择 OMP
-            </Button>
-            {readyState ? (
-              <Button size="setup" variant="secondary" onClick={detect} disabled={redetecting} disabledAppearance="stable">
-                重新检测
-              </Button>
-            ) : (
-              <Button size="setup" onClick={detect} disabled={state.kind === "detecting"}>自动检测</Button>
-            )}
-            {readyState ? (
-              <Button size="setup" onClick={enterApplication} disabled={!configurationReady || redetecting} disabledAppearance={configurationReady && redetecting ? "stable" : "muted"}>
-                {confirmingSwitch ? "确认切换并进入应用" : "进入应用"}
-              </Button>
-            ) : null}
+            <Button size="setup" variant="secondary" onClick={selectExecutable} disabled={state.kind === "detecting" || redetecting || initializing}>手动选择 OMP</Button>
+            {readyState ? <Button size="setup" variant="secondary" onClick={detect} disabled={redetecting || initializing} disabledAppearance="stable">{targetPresentation?.retryLabel}</Button> : <Button size="setup" onClick={detect} disabled={state.kind === "detecting"}>自动检测</Button>}
+            {targetPresentation?.needsExternalRepair ? <Button size="setup" variant="secondary" onClick={openTargetDirectory}>打开配置目录</Button> : null}
+            {targetPresentation?.createLabel ? <Button size="setup" onClick={initializeConfiguration} disabled={initializing}>{initializing ? "创建中…" : targetPresentation.createLabel}</Button> : null}
+            {targetPresentation?.canEnter && targetPresentation.enterLabel ? <Button size="setup" onClick={enterApplication} disabled={redetecting || initializing} disabledAppearance={redetecting ? "stable" : "muted"}>{targetPresentation.enterLabel}</Button> : null}
           </div>
           {redetecting ? (
             <div className="redetect-overlay" role="status" aria-live="polite" aria-label="正在重新检测 OMP" data-testid="redetect-progress">
-              <div className="redetect-overlay__content">
-                <RedetectionLoader />
-                <strong>正在重新检测 OMP</strong>
-              </div>
+              <div className="redetect-overlay__content"><RedetectionLoader /><strong>正在重新检测 OMP</strong></div>
             </div>
           ) : null}
         </section>
@@ -249,13 +293,40 @@ function SetupPage() {
   );
 }
 
-function SetupRow({ icon: Icon, label, value, mono = false, status = "正常" }: { icon: typeof File; label: string; value: string; mono?: boolean; status?: string }) {
-  return <div className="setup-row"><span className="setup-row-label"><Icon aria-hidden="true" />{label}</span><span className={mono ? "mono" : ""}>{value}</span><span className="setup-row-status"><span className="status-dot" aria-hidden="true" />{status}</span></div>;
+
+function SetupRow({ icon: Icon, label, value, mono = false, status = { label: "正常", tone: "success" } }: { icon: typeof File; label: string; value: string; mono?: boolean; status?: RowStatus }) {
+  return <div className="setup-row"><span className="setup-row-label"><Icon aria-hidden="true" />{label}</span><span className={mono ? "mono" : ""}>{value}</span><span className={`setup-row-status setup-row-status--${status.tone}`}><span className="status-dot" aria-hidden="true" />{status.label}</span></div>;
 }
 
-function fileStatusLabel(status: "normal" | "missing" | "read-only") {
-  return status === "normal" ? "正常" : status === "missing" ? "缺失" : "只读";
+function displayResolvedPath(canonicalPath: string, resolvedPath: string | null) {
+  return resolvedPath && resolvedPath !== canonicalPath ? resolvedPath : "";
 }
+function displayTargetPath(path: string, resolvedPath: string | null) {
+  return resolvedPath && resolvedPath !== path ? `${path} → ${resolvedPath}` : path;
+}
+
+
+const FILE_STATUS_VIEW: Record<ConfigurationFileStatus, RowStatus> = {
+  normal: { label: "正常", tone: "success" },
+  missing: { label: "缺失", tone: "warning" },
+  "read-only": { label: "只读", tone: "warning" },
+  "alternate-only": { label: ".yaml 只读", tone: "warning" },
+  "canonical-with-alternate": { label: "正常 · 有 .yaml", tone: "success" },
+  "legacy-json": { label: "旧 JSON", tone: "warning" },
+  "parse-error": { label: "格式错误", tone: "danger" },
+  unsafe: { label: "不安全", tone: "danger" },
+};
+
+function fileStatusView(status: ConfigurationFileStatus) {
+  return FILE_STATUS_VIEW[status];
+}
+
+function formatIssueLocation(line: number | null, column: number | null) {
+  if (line !== null && column !== null) return `第 ${line} 行，第 ${column} 列附近存在格式错误。`;
+  if (line !== null) return `第 ${line} 行附近存在格式错误。`;
+  return "YAML 存在格式错误。";
+}
+
 
 const routeCopy = {
   overview: ["概览", "查看当前配置状态并快速验证模型连接。", "尚未检测 OMP。完成首次设置后，这里会显示权威配置状态。"],
