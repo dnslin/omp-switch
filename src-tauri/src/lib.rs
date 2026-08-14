@@ -1,6 +1,8 @@
 mod application;
 mod error;
 mod logging;
+mod omp_environment;
+mod redaction;
 
 use application::{
     AppService, confirm_selected_omp, detect_omp, get_startup_state, get_ui_settings,

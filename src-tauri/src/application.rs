@@ -1,8 +1,7 @@
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
     sync::Arc,
     time::Instant,
 };
@@ -10,23 +9,11 @@ use std::{
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::error::AppError;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ConfigurationFileStatus {
-    Normal,
-    Missing,
-    ReadOnly,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TargetAccess {
-    pub writable: bool,
-    pub models_yml: ConfigurationFileStatus,
-    pub config_yml: ConfigurationFileStatus,
-}
+use crate::{
+    error::AppError,
+    omp_environment::{OmpEnvironment, SystemOmpEnvironment, TargetAccess},
+    redaction::redact_diagnostic,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(
@@ -66,101 +53,6 @@ pub enum StartupState {
         target_access: TargetAccess,
         requires_confirmation: bool,
     },
-}
-
-pub struct CommandOutput {
-    pub success: bool,
-    pub exit_code: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-impl CommandOutput {
-    #[cfg(test)]
-    pub fn success(stdout: impl Into<String>) -> Self {
-        Self {
-            success: true,
-            exit_code: Some(0),
-            stdout: stdout.into(),
-            stderr: String::new(),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn failure(exit_code: i32, stderr: impl Into<String>) -> Self {
-        Self {
-            success: false,
-            exit_code: Some(exit_code),
-            stdout: String::new(),
-            stderr: stderr.into(),
-        }
-    }
-}
-
-pub trait OmpEnvironment: Send + Sync {
-    fn find_in_path(&self) -> Option<PathBuf>;
-    fn run(&self, executable: &Path, arguments: &[&str]) -> std::io::Result<CommandOutput>;
-    fn inspect_target(&self, target: &Path) -> std::io::Result<TargetAccess>;
-}
-
-struct SystemOmpEnvironment;
-
-impl OmpEnvironment for SystemOmpEnvironment {
-    fn find_in_path(&self) -> Option<PathBuf> {
-        which::which("omp").ok()
-    }
-
-    fn run(&self, executable: &Path, arguments: &[&str]) -> std::io::Result<CommandOutput> {
-        let output = Command::new(executable).args(arguments).output()?;
-        Ok(CommandOutput {
-            success: output.status.success(),
-            exit_code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
-    }
-
-    fn inspect_target(&self, target: &Path) -> std::io::Result<TargetAccess> {
-        let access_root = if target.exists() {
-            if !target.is_dir() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "target is not a directory",
-                ));
-            }
-            target
-        } else {
-            target.parent().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "target has no parent")
-            })?
-        };
-        Ok(TargetAccess {
-            writable: probe_directory_write(access_root),
-            models_yml: inspect_configuration_file(&target.join("models.yml"))?,
-            config_yml: inspect_configuration_file(&target.join("config.yml"))?,
-        })
-    }
-}
-
-fn inspect_configuration_file(path: &Path) -> std::io::Result<ConfigurationFileStatus> {
-    match OpenOptions::new().read(true).write(true).open(path) {
-        Ok(_) => Ok(ConfigurationFileStatus::Normal),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(ConfigurationFileStatus::Missing)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            Ok(ConfigurationFileStatus::ReadOnly)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn probe_directory_write(directory: &Path) -> bool {
-    let probe = directory.join(format!(".omp-switch-access-{}", std::process::id()));
-    match OpenOptions::new().write(true).create_new(true).open(&probe) {
-        Ok(_) => fs::remove_file(probe).is_ok(),
-        Err(_) => false,
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,22 +118,37 @@ impl AppService {
     pub fn detect_omp(&self) -> StartupState {
         *self.pending_omp.write() = None;
         let saved = self.settings.read().omp_executable_path.clone();
+        let mut saved_failure = None;
         if let Some(path) = saved.as_ref() {
             let state = self.validate_omp(PathBuf::from(path), false, None);
             if matches!(state, StartupState::OmpReady { .. }) {
                 return state;
             }
+            saved_failure = Some(state);
         }
-        if let Some(path) = self.environment.find_in_path() {
-            let requires_confirmation = saved.is_some();
-            let state = self.validate_omp(path.clone(), requires_confirmation, None);
-            *self.pending_omp.write() =
-                matches!(state, StartupState::OmpReady { .. } if requires_confirmation)
-                    .then_some(path);
-            return state;
-        }
-        StartupState::OmpUnavailable {
-            message: "未在已保存路径或系统 PATH 中找到可用的 OMP。".to_owned(),
+        match self.environment.find_in_path() {
+            Ok(Some(path)) => {
+                let requires_confirmation = saved.is_some();
+                let state = self.validate_omp(path.clone(), requires_confirmation, None);
+                *self.pending_omp.write() =
+                    matches!(state, StartupState::OmpReady { .. } if requires_confirmation)
+                        .then_some(path);
+                state
+            }
+            Ok(None) => saved_failure.unwrap_or_else(|| StartupState::OmpUnavailable {
+                message: "未在已保存路径或系统 PATH 中找到可用的 OMP。".to_owned(),
+            }),
+            Err(error) => {
+                let cause = io_error_cause(error.kind());
+                tracing::warn!(
+                    operation = "find_omp_in_path",
+                    cause,
+                    "OMP PATH discovery failed"
+                );
+                saved_failure.unwrap_or_else(|| StartupState::OmpUnavailable {
+                    message: format!("无法检查系统 PATH 中的 OMP（{cause}）。请手动选择 OMP。"),
+                })
+            }
         }
     }
 
@@ -401,136 +308,6 @@ fn parse_single_line(value: &str) -> Option<String> {
 fn parse_absolute_directory(value: &str) -> Option<PathBuf> {
     let path = PathBuf::from(parse_single_line(value)?);
     path.is_absolute().then_some(path)
-}
-
-pub(crate) fn redact_diagnostic(value: &str) -> String {
-    if contains_structured_secret(value) {
-        return "[诊断信息因可能包含凭据而已脱敏]".to_owned();
-    }
-    let tokens = diagnostic_tokens(value);
-    let mut redacted = Vec::with_capacity(tokens.len().min(32));
-    let mut index = 0;
-    while index < tokens.len() && redacted.len() < 32 {
-        let token = &tokens[index];
-        let lower = token.to_ascii_lowercase();
-        if let Some((key, value)) = token.split_once(['=', ':']) {
-            if is_secret_name(key) {
-                redacted.push(format!("{key}=[已脱敏]"));
-                index += secret_assignment_width(key, value, &tokens[index + 1..]);
-                continue;
-            }
-        }
-        let key = token.trim_end_matches(['=', ':']);
-        if is_secret_name(key) {
-            redacted.push(token.clone());
-            redacted.push("[已脱敏]".to_owned());
-            index += secret_assignment_width(key, "", &tokens[index + 1..]);
-            continue;
-        }
-        if lower.starts_with("sk-") {
-            redacted.push("[已脱敏]".to_owned());
-        } else {
-            redacted.push(token.clone());
-        }
-        index += 1;
-    }
-    redacted.join(" ")
-}
-
-fn diagnostic_tokens(value: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut quote = None;
-    for character in value.chars() {
-        match (quote, character) {
-            (Some(active), value) if value == active => quote = None,
-            (Some(_), value) => current.push(value),
-            (None, '\'' | '"') => quote = Some(character),
-            (None, value) if value.is_whitespace() => {
-                if !current.is_empty() {
-                    tokens.push(std::mem::take(&mut current));
-                }
-            }
-            (None, value) => current.push(value),
-        }
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    tokens
-}
-
-fn contains_structured_secret(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase().replace('-', "_");
-    let structured = value.contains('{')
-        || value.contains('[')
-        || lower.contains("http://")
-        || lower.contains("https://")
-        || lower.contains('?')
-        || lower.contains('&');
-    structured
-        && [
-            "api_key",
-            "apikey",
-            "token",
-            "access_token",
-            "refresh_token",
-            "password",
-            "passwd",
-            "secret",
-            "client_secret",
-            "authorization",
-            "x_api_key",
-        ]
-        .iter()
-        .any(|name| lower.contains(name))
-}
-
-fn is_secret_name(value: &str) -> bool {
-    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
-    matches!(
-        normalized.as_str(),
-        "api_key"
-            | "apikey"
-            | "token"
-            | "access_token"
-            | "refresh_token"
-            | "password"
-            | "passwd"
-            | "secret"
-            | "client_secret"
-            | "authorization"
-            | "proxy_authorization"
-            | "x_api_key"
-    ) || [
-        "_api_key",
-        "_apikey",
-        "_access_token",
-        "_refresh_token",
-        "_password",
-        "_passwd",
-        "_client_secret",
-        "_authorization",
-    ]
-    .iter()
-    .any(|suffix| normalized.ends_with(suffix))
-}
-
-fn secret_assignment_width(key: &str, inline_value: &str, following: &[String]) -> usize {
-    if !inline_value.is_empty() {
-        return 1;
-    }
-    if is_authorization_name(key) {
-        return 1 + following.len().min(2);
-    }
-    1 + usize::from(!following.is_empty())
-}
-
-fn is_authorization_name(value: &str) -> bool {
-    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
-    normalized == "authorization"
-        || normalized == "proxy_authorization"
-        || normalized.ends_with("_authorization")
 }
 
 fn config_path_failure_message() -> String {

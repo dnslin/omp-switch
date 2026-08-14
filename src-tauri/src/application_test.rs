@@ -5,9 +5,9 @@ use std::{
     thread,
 };
 
-use crate::application::{
-    AppService, AppSettings, CommandOutput, ConfigurationFileStatus, OmpEnvironment, StartupState,
-    TargetAccess, Theme, UiSettingsUpdate,
+use crate::{
+    application::{AppService, AppSettings, StartupState, Theme, UiSettingsUpdate},
+    omp_environment::{CommandOutput, ConfigurationFileStatus, OmpEnvironment, TargetAccess},
 };
 use parking_lot::Mutex;
 use pretty_assertions::assert_eq;
@@ -16,6 +16,7 @@ use tempfile::tempdir;
 #[derive(Default)]
 struct FakeOmpEnvironment {
     path_omp: Option<PathBuf>,
+    path_error: Option<std::io::ErrorKind>,
     calls: Mutex<Vec<(PathBuf, Vec<String>)>>,
     inspect_target_error: Option<std::io::ErrorKind>,
 }
@@ -28,14 +29,24 @@ impl FakeOmpEnvironment {
         }
     }
 
+    fn with_path_error(kind: std::io::ErrorKind) -> Self {
+        Self {
+            path_error: Some(kind),
+            ..Self::default()
+        }
+    }
+
     fn calls(&self) -> Vec<(PathBuf, Vec<String>)> {
         self.calls.lock().clone()
     }
 }
 
 impl OmpEnvironment for FakeOmpEnvironment {
-    fn find_in_path(&self) -> Option<PathBuf> {
-        self.path_omp.clone()
+    fn find_in_path(&self) -> std::io::Result<Option<PathBuf>> {
+        if let Some(kind) = self.path_error {
+            return Err(std::io::Error::new(kind, "PATH discovery failed"));
+        }
+        Ok(self.path_omp.clone())
     }
 
     fn run(&self, executable: &Path, arguments: &[&str]) -> std::io::Result<CommandOutput> {
@@ -166,6 +177,35 @@ fn version_failure_returns_redacted_diagnostics_and_exit_code() {
     assert!(
         matches!(state, StartupState::VersionFailed { exit_code: Some(7), ref stderr, .. } if stderr.contains("已脱敏") && !stderr.contains("super-secret"))
     );
+}
+
+#[test]
+fn startup_detection_preserves_saved_executable_failure_when_path_is_empty() {
+    let environment = Arc::new(FakeOmpEnvironment::default());
+    let service = service_with(environment, Some("/bin/broken-version"));
+
+    assert!(matches!(
+        service.detect_omp(),
+        StartupState::VersionFailed {
+            exit_code: Some(7),
+            ref stderr,
+            ..
+        } if stderr.contains("已脱敏") && !stderr.contains("super-secret")
+    ));
+}
+
+#[test]
+fn startup_detection_reports_path_discovery_failure_when_no_saved_candidate_exists() {
+    let environment = Arc::new(FakeOmpEnvironment::with_path_error(
+        std::io::ErrorKind::InvalidInput,
+    ));
+    let service = service_with(environment, None);
+
+    assert!(matches!(
+        service.detect_omp(),
+        StartupState::OmpUnavailable { ref message }
+            if message.contains("无法检查系统 PATH") && message.contains("io-invalid-input")
+    ));
 }
 
 #[test]
@@ -341,7 +381,7 @@ fn automatic_detection_clears_previous_manual_pending_omp() {
 #[test]
 fn diagnostics_redact_common_secret_assignments_and_authorization_headers() {
     let diagnostic = "API_KEY super-secret password=hunter2 Authorization: Bearer abc.def token 'quoted secret' client_secret: hidden access_token= spaced x-api-key: header-secret sk-live-raw safe-context";
-    let redacted = crate::application::redact_diagnostic(diagnostic);
+    let redacted = crate::redaction::redact_diagnostic(diagnostic);
     for secret in [
         "super-secret",
         "hunter2",
@@ -362,12 +402,31 @@ fn diagnostics_redact_common_secret_assignments_and_authorization_headers() {
 }
 
 #[test]
+fn diagnostics_redact_compact_authorization_and_standalone_separators() {
+    for diagnostic in [
+        "Authorization:Bearer abc.def safe-context",
+        "API_KEY = secret safe-context",
+        "API_KEY : colon-secret safe-context",
+        "OPENAI_API_KEY = provider-secret safe-context",
+    ] {
+        let redacted = crate::redaction::redact_diagnostic(diagnostic);
+        for secret in ["abc.def", "secret", "colon-secret", "provider-secret"] {
+            assert!(
+                !redacted.contains(secret),
+                "secret {secret:?} leaked in {redacted:?} for {diagnostic:?}"
+            );
+        }
+        assert!(redacted.contains("safe-context"));
+    }
+}
+
+#[test]
 fn diagnostics_suppress_structured_json_and_url_credentials() {
     for diagnostic in [
         r#"request failed: {\"token\":\"json-secret\",\"message\":\"denied\"}"#,
         "request failed: https://example.test/models?api_key=query-secret&limit=10",
     ] {
-        let redacted = crate::application::redact_diagnostic(diagnostic);
+        let redacted = crate::redaction::redact_diagnostic(diagnostic);
         assert_eq!(redacted, "[诊断信息因可能包含凭据而已脱敏]");
         assert!(!redacted.contains("json-secret"));
         assert!(!redacted.contains("query-secret"));
@@ -377,7 +436,7 @@ fn diagnostics_suppress_structured_json_and_url_credentials() {
 #[test]
 fn diagnostics_redact_provider_prefixed_secret_names() {
     let diagnostic = "OPENAI_API_KEY=sk-openai-live ANTHROPIC_API_KEY anthropic-live AZURE_ACCESS_TOKEN=azure-live OPENAI_AUTHORIZATION: Bearer provider-secret safe-context";
-    let redacted = crate::application::redact_diagnostic(diagnostic);
+    let redacted = crate::redaction::redact_diagnostic(diagnostic);
 
     for secret in [
         "sk-openai-live",

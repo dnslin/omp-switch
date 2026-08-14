@@ -2,8 +2,8 @@ import { CheckCircle2, File, Folder, Info, LayoutGrid, Server, Settings, SquareT
 import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useNavigate } from "react-router";
 import { toast, Toaster } from "sonner";
+import { RedetectionLoader } from "../components/redetection-loader";
 import { Button, Card, NavigationItem, PageTitle, StatusIndicator } from "../components/ui";
-import { DotmSquare3 } from "../components/ui/dotm-square-3";
 import { asAppError, useTauriClient, type StartupState } from "../lib/tauri-client";
 
 const pages = [
@@ -38,6 +38,74 @@ function MainShell({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
+
+type ReadyState = Extract<StartupState, { kind: "omp-ready" }>;
+type FailureState = Extract<StartupState, { kind: "invalid-executable" | "version-failed" | "config-path-failed" }>;
+
+type SetupPresentation = {
+  readyState: ReadyState | null;
+  failureState: FailureState | null;
+  confirmingSwitch: boolean;
+  title: string;
+  description: string;
+  statusText: string;
+};
+
+function getSetupPresentation(state: StartupState): SetupPresentation {
+  switch (state.kind) {
+    case "detecting":
+      return {
+        readyState: null,
+        failureState: null,
+        confirmingSwitch: false,
+        title: "正在检测 OMP…",
+        description: "正在检查可执行文件、版本和权威配置目录。",
+        statusText: "正在检测 OMP…",
+      };
+    case "omp-unavailable":
+      return {
+        readyState: null,
+        failureState: null,
+        confirmingSwitch: false,
+        title: "设置 OMP",
+        description: state.message,
+        statusText: state.message,
+      };
+    case "invalid-executable":
+    case "version-failed":
+      return {
+        readyState: null,
+        failureState: state,
+        confirmingSwitch: false,
+        title: "设置 OMP",
+        description: state.message,
+        statusText: state.message,
+      };
+    case "config-path-failed":
+      return {
+        readyState: null,
+        failureState: state,
+        confirmingSwitch: false,
+        title: "无法获取 OMP 配置目录",
+        description: state.message,
+        statusText: state.message,
+      };
+    case "omp-ready": {
+      const confirmingSwitch = state.requiresConfirmation;
+      return {
+        readyState: state,
+        failureState: null,
+        confirmingSwitch,
+        title: confirmingSwitch ? "确认切换 OMP" : "OMP 已找到",
+        description: confirmingSwitch
+          ? "请确认新的 OMP 及其 Target configuration；确认后才会替换当前选择。"
+          : "OMP Switch 已确认可执行文件和权威配置目录。",
+        statusText: confirmingSwitch ? "等待确认  ·  尚未切换 OMP" : "检测完成  ·  OMP 已可用",
+      };
+    }
+  }
+}
+
 
 function SetupPage() {
   const client = useTauriClient();
@@ -115,60 +183,62 @@ function SetupPage() {
       toast.error(appError.message, { description: appError.action });
     }
   }
-  const ready = state.kind === "omp-ready";
-  const confirmingSwitch = ready && state.requiresConfirmation;
-  const configurationReady = ready && state.targetAccess.modelsYml !== "missing" && state.targetAccess.configYml !== "missing";
-  const failure = state.kind === "invalid-executable" || state.kind === "version-failed" || state.kind === "config-path-failed";
-  const title = confirmingSwitch ? "确认切换 OMP" : ready ? "OMP 已找到" : state.kind === "detecting" ? "正在检测 OMP…" : state.kind === "config-path-failed" ? "无法获取 OMP 配置目录" : "设置 OMP";
-  const description = confirmingSwitch
-    ? "请确认新的 OMP 及其 Target configuration；确认后才会替换当前选择。"
-    : ready
-      ? "OMP Switch 已确认可执行文件和权威配置目录。"
-      : state.kind === "detecting"
-        ? "正在检查可执行文件、版本和权威配置目录。"
-        : state.message;
+  const presentation = getSetupPresentation(state);
+  const { readyState, failureState, confirmingSwitch, title, description, statusText } = presentation;
+  const configurationReady = readyState !== null
+    && readyState.targetAccess.modelsYml !== "missing"
+    && readyState.targetAccess.configYml !== "missing";
 
   return (
     <div className="app-frame">
       <main className="setup-body">
         <section className="setup-card" aria-busy={redetecting}>
           <header><h1>{title}</h1><p>{description}</p></header>
-          <div className={`setup-state ${ready ? "setup-state--success" : ""}`} aria-live="polite">
+          <div className={`setup-state ${readyState ? "setup-state--success" : ""}`} aria-live="polite">
             <span className="status-dot" aria-hidden="true" />
-            {confirmingSwitch ? "等待确认  ·  尚未切换 OMP" : ready ? "检测完成  ·  OMP 已可用" : state.kind === "detecting" ? "正在检测 OMP…" : description}
+            {statusText}
           </div>
-          {ready ? (
+          {readyState ? (
             <>
               <div className="setup-table">
-                <SetupRow icon={SquareTerminal} label="可执行文件" value={state.executablePath} mono />
-                <SetupRow icon={Info} label="版本" value={state.version} />
-                <SetupRow icon={Folder} label="权威配置目录" value={state.targetConfiguration} mono status={state.targetAccess.writable ? "正常" : "只读"} />
-                <SetupRow icon={File} label="models.yml" value="" status={fileStatusLabel(state.targetAccess.modelsYml)} />
-                <SetupRow icon={File} label="config.yml" value="" status={fileStatusLabel(state.targetAccess.configYml)} />
+                <SetupRow icon={SquareTerminal} label="可执行文件" value={readyState.executablePath} mono />
+                <SetupRow icon={Info} label="版本" value={readyState.version} />
+                <SetupRow icon={Folder} label="权威配置目录" value={readyState.targetConfiguration} mono status={readyState.targetAccess.writable ? "正常" : "只读"} />
+                <SetupRow icon={File} label="models.yml" value="" status={fileStatusLabel(readyState.targetAccess.modelsYml)} />
+                <SetupRow icon={File} label="config.yml" value="" status={fileStatusLabel(readyState.targetAccess.configYml)} />
               </div>
               {confirmingSwitch ? (
                 <div className="target-change" aria-label="Target configuration 变更">
-                  <div><span>当前 Target configuration</span><code>{state.previousTargetConfiguration ?? "当前 OMP 无法读取，配置目录未知"}</code></div>
-                  <div><span>切换后 Target configuration</span><code>{state.targetConfiguration}</code></div>
+                  <div><span>当前 Target configuration</span><code>{readyState.previousTargetConfiguration ?? "当前 OMP 无法读取，配置目录未知"}</code></div>
+                  <div><span>切换后 Target configuration</span><code>{readyState.targetConfiguration}</code></div>
                 </div>
               ) : null}
-              <div className="permission-summary"><CheckCircle2 aria-hidden="true" />{state.targetAccess.writable && state.targetAccess.modelsYml === "normal" && state.targetAccess.configYml === "normal" ? "配置文件可读写，权限正常。" : "配置目录已确认；只读或缺失文件状态如上。"}</div>
+              <div className="permission-summary"><CheckCircle2 aria-hidden="true" />{readyState.targetAccess.writable && readyState.targetAccess.modelsYml === "normal" && readyState.targetAccess.configYml === "normal" ? "配置文件可读写，权限正常。" : "配置目录已确认；只读或缺失文件状态如上。"}</div>
             </>
-          ) : failure ? (
-            <details className="technical-details"><summary>查看技术详情</summary><p>诊断代码：{state.diagnosticCode}</p>{state.kind !== "invalid-executable" ? <><p>退出码：{state.exitCode ?? "不可用"}</p><p>{state.stderr || "命令没有返回 stderr。"}</p></> : null}</details>
+          ) : failureState ? (
+            <details className="technical-details"><summary>查看技术详情</summary><p>诊断代码：{failureState.diagnosticCode}</p>{failureState.kind !== "invalid-executable" ? <><p>退出码：{failureState.exitCode ?? "不可用"}</p><p>{failureState.stderr || "命令没有返回 stderr。"}</p></> : null}</details>
           ) : null}
           <div className="setup-actions">
-            {ready ? (
+            <Button size="setup" variant="secondary" onClick={selectExecutable} disabled={state.kind === "detecting" || redetecting}>
+              手动选择 OMP
+            </Button>
+            {readyState ? (
               <Button size="setup" variant="secondary" onClick={detect} disabled={redetecting} disabledAppearance="stable">
                 重新检测
               </Button>
-            ) : <Button size="setup" variant="secondary" onClick={selectExecutable} disabled={state.kind === "detecting"}>手动选择 OMP</Button>}
-            {ready ? <Button size="setup" onClick={enterApplication} disabled={!configurationReady || redetecting} disabledAppearance={configurationReady && redetecting ? "stable" : "muted"}>{confirmingSwitch ? "确认切换并进入应用" : "进入应用"}</Button> : <Button size="setup" onClick={detect} disabled={state.kind === "detecting"}>自动检测</Button>}
+            ) : (
+              <Button size="setup" onClick={detect} disabled={state.kind === "detecting"}>自动检测</Button>
+            )}
+            {readyState ? (
+              <Button size="setup" onClick={enterApplication} disabled={!configurationReady || redetecting} disabledAppearance={configurationReady && redetecting ? "stable" : "muted"}>
+                {confirmingSwitch ? "确认切换并进入应用" : "进入应用"}
+              </Button>
+            ) : null}
           </div>
           {redetecting ? (
             <div className="redetect-overlay" role="status" aria-live="polite" aria-label="正在重新检测 OMP" data-testid="redetect-progress">
               <div className="redetect-overlay__content">
-                <span aria-hidden="true"><DotmSquare3 size={104} dotSize={13} color="var(--color-primary)" speed={1.45} bloom halo={0.32} ariaLabel="正在重新检测 OMP" /></span>
+                <RedetectionLoader />
                 <strong>正在重新检测 OMP</strong>
               </div>
             </div>

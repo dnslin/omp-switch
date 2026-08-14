@@ -91,6 +91,33 @@ describe("React page seam", () => {
     expect(await screen.findByRole("heading", { name: "概览" })).toBeVisible();
   });
 
+  it("allows selecting a replacement while the current OMP is ready", async () => {
+    const user = userEvent.setup();
+    const selectOmpExecutable = vi.fn(async () => "/opt/new/bin/omp");
+    const replacementState: StartupState = {
+      ...readyState,
+      executablePath: "/opt/new/bin/omp",
+      version: "18.0.0",
+      targetConfiguration: "/Users/username/.omp/new-agent",
+      previousTargetConfiguration: readyState.targetConfiguration,
+      requiresConfirmation: true,
+    };
+    const validateSelectedOmp = vi.fn(async () => replacementState);
+    renderRoute("/setup", {
+      ...unavailableClient,
+      getStartupState: async () => readyState,
+      selectOmpExecutable,
+      validateSelectedOmp,
+    });
+
+    expect(await screen.findByRole("heading", { name: "OMP 已找到" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "手动选择 OMP" }));
+
+    expect(selectOmpExecutable).toHaveBeenCalledTimes(1);
+    expect(validateSelectedOmp).toHaveBeenCalledWith("/opt/new/bin/omp");
+    expect(await screen.findByRole("heading", { name: "确认切换 OMP" })).toBeVisible();
+  });
+
   it("keeps the successful setup layout mounted while redetection is pending", async () => {
     const user = userEvent.setup();
     let resolveDetection!: (state: StartupState) => void;
@@ -155,6 +182,7 @@ describe("React page seam", () => {
       expect(detectOmp).toHaveBeenCalledTimes(1);
       expect(retryButton).toBeDisabled();
       expect(screen.getByTestId("redetect-progress")).toHaveClass("redetect-overlay");
+      expect(screen.getByTestId("redetection-loader").children).toHaveLength(25);
       expect(screen.getByTestId("redetect-progress").firstElementChild).toHaveClass("redetect-overlay__content");
       expect(screen.getByText("/Users/username/.omp/agent")).toBeVisible();
       await act(async () => { await vi.advanceTimersByTimeAsync(1199); });
@@ -265,13 +293,16 @@ describe("React page seam", () => {
     expect(screen.getByText("Provider 管理将在后续工单中实现。")).toBeVisible();
   });
 
-  it("fills the application viewport with a bounded sidebar and content region", () => {
+  it("renders navigation and page content as sibling shell regions", () => {
     renderRoute("/overview");
 
     const shell = screen.getByRole("main");
-    expect(shell).toHaveClass("shell-main");
-    expect(shell.parentElement).toHaveClass("app-frame", "app-frame--shell");
-    expect(screen.getByRole("navigation", { name: "主导航" }).closest("aside")).toHaveClass("sidebar");
+    const sidebar = screen.getByRole("navigation", { name: "主导航" }).closest("aside");
+    const content = screen.getByRole("heading", { name: "概览" }).closest("section");
+
+    expect(sidebar?.parentElement).toBe(shell);
+    expect(content?.parentElement).toBe(shell);
+    expect(Array.from(shell.children)).toEqual([sidebar, content]);
   });
 
   it("falls back safely for an unknown route", () => {
