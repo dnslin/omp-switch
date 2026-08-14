@@ -4,7 +4,7 @@ import { Link, NavLink, Navigate, Route, Routes, useNavigate } from "react-route
 import { toast, Toaster } from "sonner";
 import { RedetectionLoader } from "../components/redetection-loader";
 import { Button, Card, NavigationItem, PageTitle, StatusIndicator } from "../components/ui";
-import { asAppError, useTauriClient, type ConfigurationFileStatus, type OverviewDto, type OverviewModel, type OverviewProvider, type StartupState } from "../lib/tauri-client";
+import { asAppError, useTauriClient, type ConfigurationFileStatus, type OverviewDto, type OverviewModel, type OverviewProvider, type StartupState, type TargetConfigurationStatus } from "../lib/tauri-client";
 
 
 const pages = [
@@ -17,10 +17,10 @@ const REDETECT_MINIMUM_DURATION_MS = 1200;
 
 
 
-type ShellStatus = { title: string; path: string; tone: "success" | "warning" | "danger" };
+type ShellStatus = { title: string; path: string; status: string; tone: "success" | "warning" | "danger" };
 
 function MainShell({ children, status }: { children: React.ReactNode; status?: ShellStatus }) {
-  const footer = status ?? { title: "尚未检测 OMP", path: "配置目录不可用", tone: "warning" as const };
+  const footer = status ?? { title: "尚未检测 OMP", path: "配置目录不可用", status: "请先完成 OMP 检测", tone: "warning" as const };
   return (
     <div className="app-frame app-frame--shell">
       <main className="shell-main">
@@ -32,9 +32,10 @@ function MainShell({ children, status }: { children: React.ReactNode; status?: S
               </NavLink>
             ))}
           </nav>
-          <Link className={`sidebar-footer sidebar-footer--${footer.tone}`} to="/settings" aria-label={`${footer.title}，${footer.path}`}>
+          <Link className={`sidebar-footer sidebar-footer--${footer.tone}`} to="/settings#omp-settings" aria-label={`${footer.title}，${footer.path}，${footer.status}`}>
             <strong><span className="status-dot" aria-hidden="true" />{footer.title}</strong>
             <code>{footer.path}</code>
+            <span className="sidebar-footer__status">{footer.status}</span>
           </Link>
         </aside>
         <section className="page-content">{children}</section>
@@ -315,7 +316,7 @@ const FILE_STATUS_VIEW: Record<ConfigurationFileStatus, RowStatus> = {
   missing: { label: "缺失", tone: "warning" },
   "read-only": { label: "只读", tone: "warning" },
   "alternate-only": { label: ".yaml 只读", tone: "warning" },
-  "canonical-with-alternate": { label: "正常 · 有 .yaml", tone: "success" },
+  "canonical-with-alternate": { label: "正常 · 有 .yaml", tone: "warning" },
   "legacy-json": { label: "旧 JSON", tone: "warning" },
   "parse-error": { label: "格式错误", tone: "danger" },
   unsafe: { label: "不安全", tone: "danger" },
@@ -330,17 +331,57 @@ function formatIssueLocation(line: number | null, column: number | null) {
   if (line !== null) return `第 ${line} 行附近存在格式错误。`;
   return "YAML 存在格式错误。";
 }
+
+function targetConfigurationStatusLabel(status: TargetConfigurationStatus) {
+  switch (status) {
+    case "writable": return "配置目录可读写";
+    case "read-only": return "配置目录只读";
+    case "creation-required": return "需要创建配置文件";
+    case "migration-required": return "需要由 OMP 迁移";
+    case "parse-error": return "配置文件格式错误";
+    case "unsafe": return "配置目录不安全";
+  }
+}
+
+function startupShellStatus(state: StartupState): ShellStatus {
+  switch (state.kind) {
+    case "detecting":
+      return { title: "正在检测 OMP", path: "配置目录检测中", status: "请稍候", tone: "warning" };
+    case "omp-unavailable":
+      return { title: "OMP 不可用", path: "配置目录不可用", status: state.message, tone: "warning" };
+    case "invalid-executable":
+    case "version-failed":
+      return { title: "OMP 不可用", path: state.executablePath, status: state.message, tone: "danger" };
+    case "config-path-failed":
+      return { title: "OMP 不可用", path: state.executablePath, status: state.message, tone: "danger" };
+    case "omp-ready":
+      return {
+        title: `OMP 已连接  ·  ${formatOverviewVersion(state.version)}`,
+        path: state.targetConfiguration.resolvedPath ?? state.targetConfiguration.path,
+        status: targetConfigurationStatusLabel(state.targetConfiguration.status),
+        tone: state.targetConfiguration.status === "writable" ? "success" : "warning",
+      };
+  }
+}
+
 function overviewShellStatus(data: OverviewDto): ShellStatus {
+  const filesNeedAttention = [data.files.models, data.files.config].some(
+    (file) => file.contentHash === null || file.status !== "normal",
+  );
+  const targetNeedsAttention = data.targetConfiguration.status !== "writable";
   return {
     title: `OMP 已连接  ·  ${formatOverviewVersion(data.omp.version)}`,
     path: data.targetConfiguration.resolvedPath ?? data.targetConfiguration.path,
-    tone: data.state === "read-only" ? "warning" : "success",
+    status: filesNeedAttention ? "配置文件需注意" : targetConfigurationStatusLabel(data.targetConfiguration.status),
+    tone: data.state === "read-only" || filesNeedAttention || targetNeedsAttention ? "warning" : "success",
   };
 }
 
 function OverviewPage() {
   const client = useTauriClient();
+  const navigate = useNavigate();
   const [data, setData] = useState<OverviewDto | null>(null);
+  const [startupState, setStartupState] = useState<StartupState | null>(null);
   const [error, setError] = useState<ReturnType<typeof asAppError> | null>(null);
   const [loading, setLoading] = useState(true);
   const requestId = useRef(0);
@@ -350,11 +391,29 @@ function OverviewPage() {
     setLoading(true);
     setData(null);
     setError(null);
+
     try {
-      const next = await client.getOverview();
-      if (currentRequest === requestId.current) setData(next);
+      const result = await client.getOverviewLoad();
+      if (currentRequest !== requestId.current) return;
+      setStartupState(result.startupState);
+      if (result.startupState.kind === "omp-ready" && result.startupState.requiresConfirmation) {
+        navigate("/setup", { replace: true });
+        return;
+      }
+      if (result.error) {
+        setError(result.error);
+      } else if (result.overview) {
+        setData(result.overview);
+      } else {
+        setError({
+          code: "overview-empty-response",
+          message: "OMP 没有返回概览数据。",
+          action: "请重新读取；如果问题持续，请查看脱敏日志。",
+        });
+      }
     } catch (cause: unknown) {
-      if (currentRequest === requestId.current) setError(asAppError(cause, "无法读取概览"));
+      if (currentRequest !== requestId.current) return;
+      setError(asAppError(cause, "无法读取概览"));
     } finally {
       if (currentRequest === requestId.current) setLoading(false);
     }
@@ -366,8 +425,9 @@ function OverviewPage() {
   }, [client]);
 
   const pageClass = loading ? "overview-page--loading" : error || !data ? "overview-page--error" : `overview-page--${data.state}`;
+  const shellStatus = data ? overviewShellStatus(data) : startupState ? startupShellStatus(startupState) : undefined;
   return (
-    <MainShell status={data ? overviewShellStatus(data) : undefined}>
+    <MainShell status={shellStatus}>
       <div className={`overview-page ${pageClass}`} aria-busy={loading}>
         <OverviewPageHeader />
         {loading ? <OverviewLoadingBody /> : error ? <OverviewErrorBody error={error} onReload={reload} /> : data ? <OverviewContentBody data={data} /> : <OverviewErrorBody error={{ message: "OMP 没有返回概览数据。", action: "请重新读取；如果问题持续，请查看脱敏日志。" }} onReload={reload} />}
@@ -412,7 +472,11 @@ function OverviewErrorBody({ error, onReload }: { error: { message: string; acti
 }
 
 function OverviewContentBody({ data }: { data: OverviewDto }) {
-  const selectedModel = data.models.find((model) => model.complete) ?? data.models[0] ?? null;
+  const selectedModel = data.models.find((model) => model.complete && model.editable)
+    ?? data.models.find((model) => model.editable)
+    ?? data.models.find((model) => model.complete)
+    ?? data.models[0]
+    ?? null;
   const selectedProvider = selectedModel ? data.providers.find((provider) => provider.id === selectedModel.providerId) ?? null : data.providers[0] ?? null;
   return (
     <>
@@ -421,7 +485,7 @@ function OverviewContentBody({ data }: { data: OverviewDto }) {
       <OverviewMetrics data={data} />
       {data.state === "empty" || data.state === "read-only" ? <OverviewStateBanner data={data} /> : null}
       <div className="overview-test-area">
-        <QuickTestPanel data={data} provider={selectedProvider} model={selectedModel} />
+        <QuickTestPanel provider={selectedProvider} model={selectedModel} />
         <TestResultPanel />
       </div>
     </>
@@ -440,7 +504,7 @@ function OverviewSyncStrip({ data }: { data: OverviewDto }) {
 
 function OverviewFileStatus({ name, file }: { name: string; file: OverviewDto["files"]["models"] }) {
   const status = fileStatusView(file.status);
-  const synced = file.contentHash !== null && (file.status === "normal" || file.status === "canonical-with-alternate");
+  const synced = file.contentHash !== null && file.status === "normal";
   const tone = synced ? "success" : status.tone;
   const StatusIcon = synced ? CircleCheck : tone === "danger" ? CircleAlert : Info;
   return (
@@ -487,8 +551,7 @@ function OverviewStateBanner({ data }: { data: OverviewDto }) {
   );
 }
 
-function QuickTestPanel({ data, provider, model }: { data: OverviewDto; provider: OverviewProvider | null; model: OverviewModel | null }) {
-  const canTest = data.state === "normal" && model?.complete === true && model.editable;
+function QuickTestPanel({ provider, model }: { provider: OverviewProvider | null; model: OverviewModel | null }) {
   const finalAddress = provider && model ? modelEndpoint(provider, model) : "—";
   const protocol = model?.effectiveApi ? `${model.effectiveApi}  ·  ${model.apiSource === "provider" ? "Provider 默认值" : "模型指定"}` : "—";
   const capabilities = model?.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : input).join("  ·  ") || "—";
@@ -501,7 +564,7 @@ function QuickTestPanel({ data, provider, model }: { data: OverviewDto; provider
       <OverviewField label="最终地址" value={finalAddress} mono />
       <OverviewField label="能力" value={capabilities} />
       <OverviewField label="Context Window" value={model?.contextWindow ? formatOverviewCount(model.contextWindow) : "—"} />
-      <div className="overview-panel-actions"><Button disabled={!canTest} aria-label="测试模型">测试模型</Button></div>
+      <div className="overview-panel-actions"><Button disabled aria-label="测试模型（尚未启用）">测试模型</Button></div>
     </section>
   );
 }
@@ -543,15 +606,34 @@ function formatOverviewCount(value: number) {
 }
 
 function modelEndpoint(provider: OverviewProvider, model: OverviewModel) {
-  const base = provider.baseUrl?.replace(/\/+$/, "") ?? "";
+  const base = provider.baseUrl?.trim();
   if (!base || !model.effectiveApi) return "—";
-  switch (model.effectiveApi) {
-    case "openai-completions": return `${base}/chat/completions`;
-    case "openai-responses": return `${base}/responses`;
-    case "anthropic-messages": return `${base}/v1/messages`;
-    case "google-generative-ai": return `${base}/models/${encodeURIComponent(model.id)}:streamGenerateContent?alt=sse`;
-    default: return "—";
+  try {
+    const endpoint = new URL(base);
+    switch (model.effectiveApi) {
+      case "openai-completions":
+        return appendEndpointPath(endpoint, "chat/completions").toString();
+      case "openai-responses":
+        return appendEndpointPath(endpoint, "responses").toString();
+      case "anthropic-messages":
+        return appendEndpointPath(endpoint, "v1/messages").toString();
+      case "google-generative-ai": {
+        const googleEndpoint = appendEndpointPath(endpoint, `models/${encodeURIComponent(model.id)}:streamGenerateContent`);
+        googleEndpoint.searchParams.set("alt", "sse");
+        return googleEndpoint.toString();
+      }
+      default:
+        return "—";
+    }
+  } catch {
+    return "—";
   }
+}
+
+function appendEndpointPath(endpoint: URL, suffix: string) {
+  const basePath = endpoint.pathname.replace(/\/+$/, "");
+  endpoint.pathname = `${basePath}/${suffix}`;
+  return endpoint;
 }
 function formatOverviewVersion(version: string) {
   const normalized = version.trim();
@@ -565,6 +647,46 @@ const routeCopy = {
   roles: ["角色", "管理 OMP 模型角色。", "角色管理将在后续工单中实现。"],
   settings: ["设置", "配置 OMP 路径、主题与轻量界面偏好。", "设置能力将在后续工单中扩展；当前不会保存任何 Provider、Model definition、Model role 或 Direct API Key。"],
 } as const;
+
+function SettingsPage() {
+  const client = useTauriClient();
+  const [state, setState] = useState<StartupState>({ kind: "detecting" });
+
+  useEffect(() => {
+    let active = true;
+    void client.getStartupState().then((next) => {
+      if (active) setState(next);
+    }).catch((cause: unknown) => {
+      if (active) setState({ kind: "omp-unavailable", message: asAppError(cause, "无法读取 OMP 状态").message });
+    });
+    return () => { active = false; };
+  }, [client]);
+
+  const ready = state.kind === "omp-ready";
+  const statusText = ready
+    ? targetConfigurationStatusLabel(state.targetConfiguration.status)
+    : state.kind === "detecting"
+      ? "正在检测 OMP…"
+      : "message" in state
+        ? state.message
+        : "OMP 状态不可用";
+  return (
+    <MainShell status={startupShellStatus(state)}>
+      <PageTitle title="设置" description="配置 OMP 路径、主题与轻量界面偏好。" />
+      <section id="omp-settings" className="settings-section" aria-labelledby="omp-settings-title">
+        <h2 id="omp-settings-title">OMP 与 Target configuration</h2>
+        <StatusIndicator tone={ready && state.targetConfiguration.status === "writable" ? "success" : "warning"}>{statusText}</StatusIndicator>
+        {ready ? (
+          <div className="settings-details">
+            <p><strong>版本</strong><span>{state.version}</span></p>
+            <p><strong>可执行文件</strong><code>{state.executablePath}</code></p>
+            <p><strong>权威配置目录</strong><code>{state.targetConfiguration.resolvedPath ?? state.targetConfiguration.path}</code></p>
+          </div>
+        ) : <p className="placeholder-card">完成 OMP 检测后，这里会显示权威配置目录和文件状态。</p>}
+      </section>
+    </MainShell>
+  );
+}
 
 function PlaceholderPage({ page }: { page: keyof typeof routeCopy }) {
   const [title, description, message] = routeCopy[page];
@@ -617,7 +739,7 @@ export function App() {
         <Route path="/providers" element={<PlaceholderPage page="providers" />} />
         <Route path="/providers/:providerId" element={<ProviderDetailPage />} />
         <Route path="/roles" element={<PlaceholderPage page="roles" />} />
-        <Route path="/settings" element={<PlaceholderPage page="settings" />} />
+        <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
       <Toaster position="bottom-right" richColors />

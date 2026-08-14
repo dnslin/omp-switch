@@ -250,7 +250,7 @@ modelRoles: {}
 - 产品不创建链接。
 
 实现状态（issue #5）：应用服务以 `omp config path` 结果执行完整发现，识别规范 `.yml`、同名 `.yaml`、`models.json`、`settings.json` / `config.json`、缺失路径、YAML 错误及链接或重解析点，并返回无业务配置内容的状态 DTO。初始化只接受已验证 OMP 可执行文件意图与用户已确认的创建清单，不接受前端指定目标目录；写入前重新验证创建清单和最近现有父路径的真实目标。创建失败会回滚本次产生的临时文件、规范文件和目录；回滚不完整时明确报告残留路径，成功后重新解析并重新发现。
-实现状态（issue #6）：概览读取由 Rust application service 完成，先重新验证 `omp config path`，再读取真实目标文件、计算原始 Hash、保留完整 `serde_yaml::Value` 树并生成无密钥 DTO。React 只消费 `get_overview` IPC 返回的 `hasApiKey` 等安全元数据；读取失败先清空业务快照，成功后一次性刷新统计。概览页按 `03 Page / Overview` 的尺寸、密度、组件和响应式规则实现，Windows/其他平台均保留 Tauri 原生标题栏。
+实现状态（issue #6）：概览读取由 Rust application service 的 `get_overview_load` 完成，先重新验证 `omp config path`，再读取真实目标文件、计算原始 Hash、保留完整 `serde_yaml::Value` 树并生成无密钥 DTO。React 只消费 `get_overview_load` IPC 返回的 `hasApiKey` 等安全元数据；读取失败先清空业务快照，成功后一次性刷新统计。概览页按 `03 Page / Overview` 的尺寸、密度、组件和响应式规则实现，Windows/其他平台均保留 Tauri 原生标题栏。
 
 
 ## 8. 配置读取和安全写入

@@ -63,6 +63,7 @@ export type OverviewModel = {
   editable: boolean;
   readOnlyReason: string | null;
 };
+export type OverviewProviderClassification = "custom" | "built-in-override" | "advanced" | "unsupported" | "unavailable";
 export type OverviewProvider = {
   id: string;
   name: string | null;
@@ -71,6 +72,7 @@ export type OverviewProvider = {
   authMode: string;
   hasApiKey: boolean;
   modelCount: number;
+  classification: OverviewProviderClassification;
   editable: boolean;
   readOnlyReason: string | null;
   models: OverviewModel[];
@@ -98,6 +100,11 @@ export type StartupState =
   | { kind: "version-failed"; executablePath: string; message: string; diagnosticCode: string; exitCode: number | null; stderr: string }
   | { kind: "config-path-failed"; executablePath: string; version: string; message: string; diagnosticCode: string; exitCode: number | null; stderr: string }
   | { kind: "omp-ready"; executablePath: string; version: string; targetConfiguration: TargetConfigurationDiscovery; previousTargetConfiguration: string | null; requiresConfirmation: boolean };
+export type OverviewLoad = {
+  startupState: StartupState;
+  overview: OverviewDto | null;
+  error: AppError | null;
+};
 
 export type Theme = "light" | "dark" | "system";
 
@@ -139,7 +146,7 @@ export function asAppError(error: unknown, fallbackMessage: string): AppError {
 
 export interface TauriClient {
   getStartupState(): Promise<StartupState>;
-  getOverview(): Promise<OverviewDto>;
+  getOverviewLoad(): Promise<OverviewLoad>;
   detectOmp(): Promise<StartupState>;
   selectOmpExecutable(): Promise<string | null>;
   validateSelectedOmp(executablePath: string): Promise<StartupState>;
@@ -153,7 +160,7 @@ export interface TauriClient {
 
 export const tauriClient: TauriClient = {
   getStartupState: () => invoke<StartupState>("get_startup_state"),
-  getOverview: () => invoke<OverviewDto>("get_overview"),
+  getOverviewLoad: () => invoke<OverviewLoad>("get_overview_load"),
   detectOmp: () => invoke<StartupState>("detect_omp"),
   selectOmpExecutable: async () => {
     const selected = await open({ multiple: false, directory: false, title: "选择 OMP 可执行文件" });

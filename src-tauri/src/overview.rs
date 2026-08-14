@@ -5,6 +5,7 @@ use serde_yaml::{Mapping, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    bundled_catalog::{self, BundledCatalog},
     error::AppError,
     redaction::{redact_diagnostic, redact_projection},
     target_configuration::{TargetConfigurationDiscovery, TargetConfigurationStatus},
@@ -88,9 +89,19 @@ pub struct ProviderSummaryDto {
     pub auth_mode: String,
     pub has_api_key: bool,
     pub model_count: usize,
+    pub classification: ProviderClassification,
     pub editable: bool,
     pub read_only_reason: Option<String>,
     pub models: Vec<ModelSummaryDto>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ProviderClassification {
+    Custom,
+    BuiltInOverride,
+    Advanced,
+    Unsupported,
+    Unavailable,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -124,7 +135,6 @@ pub(crate) struct ParsedConfiguration {
     pub(crate) tree: Value,
 }
 
-#[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct ConfigurationSnapshot {
     pub(crate) models: ParsedConfiguration,
@@ -173,6 +183,7 @@ pub(crate) fn read_overview(
         | TargetConfigurationStatus::CreationRequired => {}
     }
 
+    let catalog = bundled_catalog::for_version(version)?;
     let models_document = match target.models.resolved_path.as_deref() {
         Some(path) => Some(read_document(path, "models.yml")?),
         None => None,
@@ -184,17 +195,21 @@ pub(crate) fn read_overview(
 
     let models_tree = models_document.as_ref().map(|document| &document.tree);
     let config_tree = config_document.as_ref().map(|document| &document.tree);
-    let providers = models_tree
-        .map(|tree| project_providers(tree))
-        .unwrap_or_default();
+    let (providers, providers_structure_valid) = models_tree
+        .map(|tree| project_providers(tree, catalog))
+        .unwrap_or((Vec::new(), false));
     let models = providers
         .iter()
         .flat_map(|provider| provider.models.iter().cloned())
         .collect::<Vec<_>>();
-    let roles = config_tree
-        .map(|tree| project_roles(tree))
-        .unwrap_or_default();
-    let provider_count = providers.len();
+    let (roles, roles_structure_valid) = config_tree
+        .map(|tree| project_roles(tree, &providers, catalog))
+        .unwrap_or((Vec::new(), false));
+    let structure_invalid = !providers_structure_valid || !roles_structure_valid;
+    let provider_count = providers
+        .iter()
+        .filter(|provider| provider.classification == ProviderClassification::Custom)
+        .count();
     let model_count = models.len();
     let role_count = roles.len();
     let editable_provider_count = providers
@@ -205,6 +220,10 @@ pub(crate) fn read_overview(
     let state = if target.status == TargetConfigurationStatus::CreationRequired {
         OverviewState::Empty
     } else if target.status != TargetConfigurationStatus::Writable {
+        OverviewState::ReadOnly
+    } else if structure_invalid {
+        OverviewState::ReadOnly
+    } else if catalog.is_none() {
         OverviewState::ReadOnly
     } else if providers.is_empty() {
         OverviewState::Empty
@@ -225,7 +244,12 @@ pub(crate) fn read_overview(
         _ => (None, None),
     };
     let read_only_reason = match state {
-        OverviewState::ReadOnly => Some(read_only_reason(target, editable_provider_count == 0)),
+        OverviewState::ReadOnly => Some(read_only_reason(
+            target,
+            editable_provider_count == 0,
+            catalog.is_none(),
+            structure_invalid,
+        )),
         _ => None,
     };
 
@@ -259,7 +283,22 @@ pub(crate) fn read_overview(
     Ok(OverviewReadResult { dto, snapshot })
 }
 
-fn read_only_reason(target: &TargetConfigurationDiscovery, no_editable_provider: bool) -> String {
+fn read_only_reason(
+    target: &TargetConfigurationDiscovery,
+    no_editable_provider: bool,
+    catalog_missing: bool,
+    structure_invalid: bool,
+) -> String {
+    if structure_invalid && target.status == TargetConfigurationStatus::Writable {
+        return "当前配置业务结构无法识别，只能查看；OMP Switch 不会修改未知结构。".to_owned();
+    }
+    if catalog_missing
+        && no_editable_provider
+        && target.status == TargetConfigurationStatus::Writable
+    {
+        return "当前 OMP 版本没有匹配的 bundled Provider 清单，Provider 与模型管理暂时只读。"
+            .to_owned();
+    }
     if no_editable_provider && target.status == TargetConfigurationStatus::Writable {
         return "当前配置包含只读的 OMP 覆盖或高级 Provider。".to_owned();
     }
@@ -284,10 +323,13 @@ fn file_dto(
 }
 
 fn read_document(path: &str, label: &str) -> Result<ParsedConfiguration, AppError> {
-    let bytes = fs::read(path).map_err(|_| {
+    let bytes = fs::read(path).map_err(|error| {
         AppError::new(
             "overview-read-failed",
-            format!("无法读取 {label}。"),
+            format!(
+                "无法读取 {label}。诊断代码：{}。",
+                crate::error::io_error_cause(error.kind())
+            ),
             "请检查配置文件路径和权限后重新读取。",
         )
     })?;
@@ -315,17 +357,34 @@ fn content_hash(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn project_providers(tree: &Value) -> Vec<ProviderSummaryDto> {
-    let Some(providers) = mapping_get_opt(mapping(tree), "providers") else {
-        return Vec::new();
+fn project_providers(
+    tree: &Value,
+    catalog: Option<&BundledCatalog>,
+) -> (Vec<ProviderSummaryDto>, bool) {
+    let Some(root) = mapping(tree) else {
+        return (Vec::new(), false);
     };
-    named_entries(providers)
+    let Some(providers) = mapping_get(root, "providers") else {
+        return (Vec::new(), false);
+    };
+    let Some(providers_map) = mapping(providers) else {
+        return (Vec::new(), false);
+    };
+    let structure_valid = providers_map
+        .keys()
+        .all(|key| matches!(key, Value::String(_)));
+    let providers = named_entries(providers)
         .into_iter()
-        .map(|(provider_id, provider_value)| project_provider(provider_id, provider_value))
-        .collect()
+        .map(|(provider_id, provider_value)| project_provider(provider_id, provider_value, catalog))
+        .collect();
+    (providers, structure_valid)
 }
 
-fn project_provider(provider_id: String, value: &Value) -> ProviderSummaryDto {
+fn project_provider(
+    provider_id: String,
+    value: &Value,
+    catalog: Option<&BundledCatalog>,
+) -> ProviderSummaryDto {
     let Some(provider) = mapping(value) else {
         return ProviderSummaryDto {
             id: provider_id,
@@ -335,36 +394,33 @@ fn project_provider(provider_id: String, value: &Value) -> ProviderSummaryDto {
             auth_mode: "unsupported".to_owned(),
             has_api_key: false,
             model_count: 0,
+            classification: ProviderClassification::Unsupported,
             editable: false,
             read_only_reason: Some("Provider 配置不是可识别的对象。".to_owned()),
             models: Vec::new(),
         };
     };
-    let known = [
-        "id",
-        "name",
-        "baseUrl",
-        "base_url",
-        "api",
-        "defaultApi",
-        "default_api",
-        "apiKey",
-        "api_key",
-        "authMode",
-        "auth_mode",
-        "models",
-    ];
-    let mut read_only_reason = unknown_reason(provider, &known);
-    let default_api_raw = mapping_get_any(provider, &["api", "defaultApi", "default_api"]);
+    let known = ["name", "baseUrl", "api", "apiKey", "models"];
+    let mut field_reason = unknown_reason(provider, &known);
+    let base_url_raw = mapping_get(provider, "baseUrl").and_then(scalar_string);
+    let base_url_valid = base_url_raw.as_deref().is_some_and(valid_http_url);
+    if !base_url_valid {
+        field_reason.get_or_insert_with(|| "Provider 必须包含有效的 HTTP(S) Base URL。".to_owned());
+    }
+    let default_api_raw = mapping_get(provider, "api");
     let default_api = supported_api(default_api_raw);
     if default_api_raw.is_some() && default_api.is_none() {
-        read_only_reason.get_or_insert_with(|| "Provider 使用了不支持的协议。".to_owned());
+        field_reason.get_or_insert_with(|| "Provider 使用了不支持的协议。".to_owned());
     }
     let (auth_mode, has_api_key, unsupported_credential) = credential_projection(provider);
     if unsupported_credential {
-        read_only_reason.get_or_insert_with(|| "Provider 使用了不支持的凭据配置。".to_owned());
+        field_reason.get_or_insert_with(|| "Provider 使用了不支持的凭据配置。".to_owned());
     }
-    let models = mapping_get(provider, "models")
+    let models_value = mapping_get(provider, "models");
+    let provider_fields_read_only = catalog.is_none()
+        || catalog.is_some_and(|catalog| catalog.contains_provider(&provider_id))
+        || field_reason.is_some();
+    let mut models = models_value
         .map(|models| {
             named_entries(models)
                 .into_iter()
@@ -374,28 +430,71 @@ fn project_provider(provider_id: String, value: &Value) -> ProviderSummaryDto {
                         model_id,
                         model_value,
                         default_api.as_deref(),
-                        read_only_reason.is_some(),
+                        provider_fields_read_only,
                     )
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    if mapping_get(provider, "models").is_some() && models.is_empty() {
-        read_only_reason.get_or_insert_with(|| "Provider 没有可识别的模型定义。".to_owned());
+    if models_value.is_none() || models.is_empty() {
+        field_reason.get_or_insert_with(|| "Provider 没有非空模型定义。".to_owned());
     }
-    let editable = read_only_reason.is_none();
+
+    let built_in_override = catalog.is_some_and(|catalog| {
+        catalog.contains_provider(&provider_id)
+            || models
+                .iter()
+                .any(|model| catalog.contains_model(&provider_id, &model.id))
+    });
+    let classification = if catalog.is_none() {
+        ProviderClassification::Unavailable
+    } else if built_in_override {
+        ProviderClassification::BuiltInOverride
+    } else if models_value.is_none() || models.is_empty() || !base_url_valid {
+        ProviderClassification::Unsupported
+    } else if field_reason.is_some() {
+        ProviderClassification::Advanced
+    } else {
+        ProviderClassification::Custom
+    };
+    let editable = classification == ProviderClassification::Custom;
+    let read_only_reason = match classification {
+        ProviderClassification::Custom => None,
+        ProviderClassification::BuiltInOverride => {
+            Some("Provider 或 Model ID 覆盖 OMP bundled catalog，只能查看。".to_owned())
+        }
+        ProviderClassification::Unavailable => Some(
+            "当前 OMP 版本没有匹配的 bundled Provider 清单，Provider 与模型管理暂时只读。"
+                .to_owned(),
+        ),
+        ProviderClassification::Unsupported => field_reason
+            .or_else(|| Some("Provider 配置不符合可管理的 Custom Provider 结构。".to_owned())),
+        ProviderClassification::Advanced => {
+            field_reason.or_else(|| Some("Provider 包含 OMP Switch 不支持的高级配置。".to_owned()))
+        }
+    };
+    if !editable {
+        for model in &mut models {
+            model.editable = false;
+            if model.read_only_reason.is_none() {
+                model.read_only_reason = read_only_reason.clone();
+            }
+        }
+    }
     ProviderSummaryDto {
         id: provider_id,
-        name: mapping_get_any(provider, &["name"])
+        name: mapping_get(provider, "name")
             .and_then(scalar_string)
             .filter(|value| !value.is_empty()),
-        base_url: mapping_get_any(provider, &["baseUrl", "base_url"])
-            .and_then(scalar_string)
-            .map(|value| safe_base_url(&value)),
+        base_url: base_url_raw
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(safe_base_url),
         default_api,
         auth_mode,
         has_api_key,
         model_count: models.len(),
+        classification,
         editable,
         read_only_reason,
         models,
@@ -426,15 +525,12 @@ fn project_model(
         };
     };
     let known = [
-        "id",
         "name",
         "api",
         "input",
         "reasoning",
         "contextWindow",
-        "context_window",
         "maxTokens",
-        "max_tokens",
     ];
     let mut read_only_reason = unknown_reason(model, &known);
     let model_api_raw = mapping_get(model, "api");
@@ -448,18 +544,32 @@ fn project_model(
         Some(api) => (Some(api), Some("provider".to_owned())),
         None => (None, None),
     };
-    let input = mapping_get(model, "input")
-        .map(string_list)
-        .unwrap_or_default();
+    let input = match mapping_get(model, "input") {
+        Some(value) => string_list(value).unwrap_or_else(|| {
+            read_only_reason
+                .get_or_insert_with(|| "Model definition 的 input 字段格式不受支持。".to_owned());
+            Vec::new()
+        }),
+        None => Vec::new(),
+    };
+    if input
+        .iter()
+        .any(|value| !matches!(value.as_str(), "text" | "image"))
+    {
+        read_only_reason
+            .get_or_insert_with(|| "Model definition 使用了不支持的输入能力。".to_owned());
+    }
     let reasoning = mapping_get(model, "reasoning").and_then(scalar_bool);
-    let context_window =
-        mapping_get_any(model, &["contextWindow", "context_window"]).and_then(scalar_u64);
-    let max_tokens = mapping_get_any(model, &["maxTokens", "max_tokens"]).and_then(scalar_u64);
+    let context_window = mapping_get(model, "contextWindow").and_then(scalar_u64);
+    let max_tokens = mapping_get(model, "maxTokens").and_then(scalar_u64);
     let name = mapping_get(model, "name")
         .and_then(scalar_string)
         .filter(|value| !value.trim().is_empty());
     let complete = name.is_some()
         && !input.is_empty()
+        && input
+            .iter()
+            .all(|value| matches!(value.as_str(), "text" | "image"))
         && context_window.is_some_and(|value| value > 0)
         && max_tokens.is_some_and(|value| value > 0)
         && context_window
@@ -488,30 +598,186 @@ fn project_model(
     }
 }
 
-fn project_roles(tree: &Value) -> Vec<RoleSummaryDto> {
-    let Some(roles) = mapping_get_opt(mapping(tree), "modelRoles") else {
-        return Vec::new();
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RoleModelStatus {
+    Configured,
+    ProviderMissing,
+    ModelMissing,
+    Incomplete,
+}
+
+impl RoleModelStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Configured => "configured",
+            Self::ProviderMissing => "provider-missing",
+            Self::ModelMissing => "model-missing",
+            Self::Incomplete => "incomplete",
+        }
+    }
+}
+
+fn project_roles(
+    tree: &Value,
+    providers: &[ProviderSummaryDto],
+    catalog: Option<&BundledCatalog>,
+) -> (Vec<RoleSummaryDto>, bool) {
+    let Some(root) = mapping(tree) else {
+        return (Vec::new(), false);
     };
-    named_entries(roles)
+    let Some(roles) = mapping_get(root, "modelRoles") else {
+        return (Vec::new(), false);
+    };
+    let Some(roles_map) = mapping(roles) else {
+        return (Vec::new(), false);
+    };
+    let structure_valid = roles_map.keys().all(|key| matches!(key, Value::String(_)));
+    let roles = named_entries(roles)
         .into_iter()
-        .filter_map(|(id, value)| match value {
-            Value::String(selector) if !selector.trim().is_empty() => Some(RoleSummaryDto {
+        .map(|(id, value)| match value {
+            Value::Null => RoleSummaryDto {
                 id,
-                status: "configured".to_owned(),
-                selector: Some(safe_projection_text(selector)),
-            }),
-            Value::Sequence(_) | Value::Mapping(_) => Some(RoleSummaryDto {
+                status: "unconfigured".to_owned(),
+                selector: None,
+            },
+            Value::String(selector) => project_role(id, selector, providers, catalog),
+            _ => RoleSummaryDto {
                 id,
                 status: "advanced".to_owned(),
                 selector: None,
-            }),
-            _ => None,
+            },
         })
-        .collect()
+        .collect();
+    (roles, structure_valid)
+}
+
+fn project_role(
+    id: String,
+    selector: &str,
+    providers: &[ProviderSummaryDto],
+    catalog: Option<&BundledCatalog>,
+) -> RoleSummaryDto {
+    let selector = selector.trim();
+    let Some((provider_id, model_and_thinking)) = parse_role_selector(selector) else {
+        return RoleSummaryDto {
+            id,
+            status: if selector.is_empty() {
+                "unconfigured"
+            } else {
+                "advanced"
+            }
+            .to_owned(),
+            selector: None,
+        };
+    };
+    let full_status = resolve_role_model(provider_id, model_and_thinking, providers, catalog);
+    match full_status {
+        RoleModelStatus::Configured | RoleModelStatus::Incomplete => {
+            role_summary(id, full_status, selector)
+        }
+        RoleModelStatus::ProviderMissing | RoleModelStatus::ModelMissing => {
+            let Some((base_model, thinking)) = model_and_thinking.rsplit_once(':') else {
+                return role_summary(id, full_status, selector);
+            };
+            if is_supported_thinking(thinking) {
+                return role_summary(
+                    id,
+                    resolve_role_model(provider_id, base_model, providers, catalog),
+                    selector,
+                );
+            }
+            if matches!(
+                resolve_role_model(provider_id, base_model, providers, catalog),
+                RoleModelStatus::Configured | RoleModelStatus::Incomplete
+            ) {
+                return RoleSummaryDto {
+                    id,
+                    status: "advanced".to_owned(),
+                    selector: None,
+                };
+            }
+            role_summary(id, full_status, selector)
+        }
+    }
+}
+
+fn role_summary(id: String, status: RoleModelStatus, selector: &str) -> RoleSummaryDto {
+    RoleSummaryDto {
+        id,
+        status: status.as_str().to_owned(),
+        selector: Some(safe_projection_text(selector)),
+    }
+}
+
+fn parse_role_selector(selector: &str) -> Option<(&str, &str)> {
+    if selector.is_empty()
+        || selector
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+        || selector.contains(',')
+        || selector.starts_with('@')
+    {
+        return None;
+    }
+    let mut segments = selector.splitn(2, '/');
+    let provider = segments.next()?;
+    let model = segments.next()?;
+    if provider.is_empty() || provider.contains(':') || model.is_empty() {
+        return None;
+    }
+    Some((provider, model))
+}
+
+fn resolve_role_model(
+    provider_id: &str,
+    model_id: &str,
+    providers: &[ProviderSummaryDto],
+    catalog: Option<&BundledCatalog>,
+) -> RoleModelStatus {
+    let provider = providers
+        .iter()
+        .find(|provider| provider.id.eq_ignore_ascii_case(provider_id));
+    match provider {
+        Some(provider) => {
+            if let Some(model) = provider
+                .models
+                .iter()
+                .find(|model| model.id.eq_ignore_ascii_case(model_id))
+            {
+                if model.complete {
+                    RoleModelStatus::Configured
+                } else {
+                    RoleModelStatus::Incomplete
+                }
+            } else if catalog.is_some_and(|catalog| catalog.contains_model(provider_id, model_id)) {
+                RoleModelStatus::Configured
+            } else {
+                RoleModelStatus::ModelMissing
+            }
+        }
+        None => {
+            if catalog.is_some_and(|catalog| catalog.contains_provider(provider_id)) {
+                if catalog.is_some_and(|catalog| catalog.contains_model(provider_id, model_id)) {
+                    RoleModelStatus::Configured
+                } else {
+                    RoleModelStatus::ModelMissing
+                }
+            } else {
+                RoleModelStatus::ProviderMissing
+            }
+        }
+    }
+}
+
+fn is_supported_thinking(value: &str) -> bool {
+    matches!(
+        value,
+        "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "auto"
+    )
 }
 
 fn credential_projection(provider: &Mapping) -> (String, bool, bool) {
-    let value = mapping_get_any(provider, &["apiKey", "api_key"]);
+    let value = mapping_get(provider, "apiKey");
     let has_api_key = value.is_some_and(|value| match value {
         Value::Null => false,
         Value::String(value) => !value.is_empty(),
@@ -522,12 +788,9 @@ fn credential_projection(provider: &Mapping) -> (String, bool, bool) {
         Value::Null => false,
         _ => true,
     });
-    let explicit_mode = mapping_get_any(provider, &["authMode", "auth_mode"])
-        .and_then(scalar_string)
-        .unwrap_or_default();
     let auth_mode = if unsupported_credential {
         "unsupported"
-    } else if has_api_key || explicit_mode.eq_ignore_ascii_case("api-key") {
+    } else if has_api_key {
         "api-key"
     } else {
         "none"
@@ -564,18 +827,6 @@ fn named_entries(value: &Value) -> Vec<(String, &Value)> {
             .iter()
             .filter_map(|(key, value)| scalar_string(key).map(|key| (key, value)))
             .collect(),
-        Value::Sequence(values) => values
-            .iter()
-            .enumerate()
-            .filter_map(|(index, value)| {
-                let id = mapping(value)
-                    .and_then(|map| mapping_get_any(map, &["id", "name"]))
-                    .and_then(scalar_string)
-                    .filter(|id| !id.trim().is_empty())
-                    .unwrap_or_else(|| format!("entry-{}", index + 1));
-                Some((id, value))
-            })
-            .collect(),
         _ => Vec::new(),
     }
 }
@@ -591,27 +842,25 @@ fn mapping_get<'a>(map: &'a Mapping, key: &str) -> Option<&'a Value> {
     mapping_get_in(map, key)
 }
 
-fn mapping_get_opt<'a>(map: Option<&'a Mapping>, key: &str) -> Option<&'a Value> {
-    map.and_then(|map| mapping_get_in(map, key))
-}
-
 fn mapping_get_in<'a>(map: &'a Mapping, key: &str) -> Option<&'a Value> {
     map.get(&Value::String(key.to_owned()))
-}
-fn mapping_get_any<'a>(map: &'a Mapping, keys: &[&str]) -> Option<&'a Value> {
-    keys.iter().find_map(|key| mapping_get_in(map, key))
 }
 
 fn scalar_string(value: &Value) -> Option<String> {
     match value {
         Value::String(value) => Some(value.clone()),
-        Value::Number(value) => Some(value.to_string()),
-        Value::Bool(value) => Some(value.to_string()),
         _ => None,
     }
 }
 fn safe_base_url(value: &str) -> String {
-    redact_projection(value)
+    redact_projection(value.trim())
+}
+
+fn valid_http_url(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value.trim()) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
 }
 
 fn safe_projection_text(value: &str) -> String {
@@ -621,27 +870,20 @@ fn safe_projection_text(value: &str) -> String {
 fn scalar_bool(value: &Value) -> Option<bool> {
     match value {
         Value::Bool(value) => Some(*value),
-        Value::String(value) => match value.to_ascii_lowercase().as_str() {
-            "true" => Some(true),
-            "false" => Some(false),
-            _ => None,
-        },
         _ => None,
     }
 }
 
 fn scalar_u64(value: &Value) -> Option<u64> {
     match value {
-        Value::Number(value) => value.to_string().parse().ok(),
-        Value::String(value) => value.parse().ok(),
+        Value::Number(value) => value.as_u64(),
         _ => None,
     }
 }
 
-fn string_list(value: &Value) -> Vec<String> {
+fn string_list(value: &Value) -> Option<Vec<String>> {
     match value {
-        Value::Sequence(values) => values.iter().filter_map(scalar_string).collect(),
-        Value::String(value) if !value.trim().is_empty() => vec![value.clone()],
-        _ => Vec::new(),
+        Value::Sequence(values) => values.iter().map(scalar_string).collect(),
+        _ => None,
     }
 }

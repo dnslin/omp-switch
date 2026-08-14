@@ -93,37 +93,8 @@ pub(crate) fn redact_projection(value: &str) -> String {
 }
 
 fn url_query_key_is_secret(key: &str) -> bool {
-    const SECRET_QUERY_NAMES: &[&str] = &[
-        "key",
-        "api_key",
-        "apikey",
-        "token",
-        "access_token",
-        "refresh_token",
-        "password",
-        "passwd",
-        "secret",
-        "client_secret",
-        "authorization",
-        "proxy_authorization",
-        "x_api_key",
-    ];
-    const SECRET_QUERY_SUFFIXES: &[&str] = &[
-        "_api_key",
-        "_apikey",
-        "_access_token",
-        "_refresh_token",
-        "_password",
-        "_passwd",
-        "_client_secret",
-        "_authorization",
-    ];
-
     let normalized = key.trim().to_ascii_lowercase().replace('-', "_");
-    SECRET_QUERY_NAMES.contains(&normalized.as_str())
-        || SECRET_QUERY_SUFFIXES
-            .iter()
-            .any(|suffix| normalized.ends_with(suffix))
+    normalized == "key" || classify_secret_name(&normalized).is_some()
 }
 
 fn diagnostic_tokens(value: &str) -> Vec<String> {
