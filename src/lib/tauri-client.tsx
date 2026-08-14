@@ -42,6 +42,54 @@ export type TargetConfigurationDiscovery = {
   warnings: string[];
   issue: ConfigurationIssue | null;
 };
+export type OverviewState = "normal" | "empty" | "read-only";
+export type OverviewFile = {
+  canonicalPath: string;
+  resolvedPath: string | null;
+  status: ConfigurationFileStatus;
+  contentHash: string | null;
+};
+export type OverviewModel = {
+  providerId: string;
+  id: string;
+  name: string | null;
+  effectiveApi: string | null;
+  apiSource: string | null;
+  input: string[];
+  reasoning: boolean | null;
+  contextWindow: number | null;
+  maxTokens: number | null;
+  complete: boolean;
+  editable: boolean;
+  readOnlyReason: string | null;
+};
+export type OverviewProvider = {
+  id: string;
+  name: string | null;
+  baseUrl: string | null;
+  defaultApi: string | null;
+  authMode: string;
+  hasApiKey: boolean;
+  modelCount: number;
+  editable: boolean;
+  readOnlyReason: string | null;
+  models: OverviewModel[];
+};
+export type OverviewRole = { id: string; status: string; selector: string | null };
+export type OverviewDto = {
+  state: OverviewState;
+  omp: { status: "connected"; executablePath: string; version: string };
+  targetConfiguration: TargetConfigurationDiscovery;
+  files: { models: OverviewFile; config: OverviewFile };
+  counts: { providerCount: number; modelCount: number; roleCount: number };
+  providers: OverviewProvider[];
+  models: OverviewModel[];
+  roles: OverviewRole[];
+  emptyReason: string | null;
+  nextAction: string | null;
+  readOnlyReason: string | null;
+};
+
 export type TargetInitializationExpectation = Pick<TargetConfigurationDiscovery, "createPaths" | "discoveryToken">;
 export type StartupState =
   | { kind: "detecting" }
@@ -91,6 +139,7 @@ export function asAppError(error: unknown, fallbackMessage: string): AppError {
 
 export interface TauriClient {
   getStartupState(): Promise<StartupState>;
+  getOverview(): Promise<OverviewDto>;
   detectOmp(): Promise<StartupState>;
   selectOmpExecutable(): Promise<string | null>;
   validateSelectedOmp(executablePath: string): Promise<StartupState>;
@@ -101,8 +150,10 @@ export interface TauriClient {
   saveUiSettings(settings: UiSettingsUpdate): Promise<UiSettings>;
 }
 
+
 export const tauriClient: TauriClient = {
   getStartupState: () => invoke<StartupState>("get_startup_state"),
+  getOverview: () => invoke<OverviewDto>("get_overview"),
   detectOmp: () => invoke<StartupState>("detect_omp"),
   selectOmpExecutable: async () => {
     const selected = await open({ multiple: false, directory: false, title: "选择 OMP 可执行文件" });

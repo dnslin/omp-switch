@@ -13,6 +13,7 @@ use tauri_plugin_opener::OpenerExt;
 use crate::{
     error::AppError,
     omp_environment::{OmpEnvironment, SystemOmpEnvironment},
+    overview::{ConfigurationSnapshot, OverviewDto, read_overview},
     redaction::redact_diagnostic,
     target_configuration::{
         TargetConfigurationDiscovery, TargetConfigurationStatus, TargetInitializationExpectation,
@@ -94,7 +95,9 @@ pub struct AppService {
     environment: Arc<dyn OmpEnvironment>,
     pending_omp: Arc<RwLock<Option<PathBuf>>>,
     recovery_notice: Arc<RwLock<Option<(PathBuf, String)>>>,
+    configuration_snapshot: Arc<RwLock<Option<ConfigurationSnapshot>>>,
 }
+
 impl AppService {
     pub fn new(settings_path: PathBuf) -> Result<Self, AppError> {
         let transaction_root = settings_path
@@ -119,11 +122,46 @@ impl AppService {
             environment,
             pending_omp: Arc::new(RwLock::new(None)),
             recovery_notice: Arc::new(RwLock::new(None)),
+            configuration_snapshot: Arc::new(RwLock::new(None)),
         })
     }
 
     pub fn get_startup_state(&self) -> StartupState {
         self.detect_omp_internal()
+    }
+    pub fn get_overview(&self) -> Result<OverviewDto, AppError> {
+        *self.configuration_snapshot.write() = None;
+        let state = self.get_startup_state();
+        let StartupState::OmpReady {
+            executable_path,
+            version,
+            target_configuration,
+            ..
+        } = state
+        else {
+            return Err(AppError::new(
+                "overview-omp-unavailable",
+                "无法读取 OMP 概览。",
+                "请先完成 OMP 检测并确认有效的 Target configuration。",
+            ));
+        };
+        let result = read_overview(&executable_path, &version, &target_configuration)?;
+        *self.configuration_snapshot.write() = result.snapshot;
+        tracing::info!(
+            operation = "get_overview",
+            status = "success",
+            provider_count = result.dto.counts.provider_count,
+            model_count = result.dto.counts.model_count,
+            role_count = result.dto.counts.role_count,
+            state = ?result.dto.state,
+            "loaded secret-free overview projection"
+        );
+        Ok(result.dto)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configuration_snapshot_for_test(&self) -> Option<ConfigurationSnapshot> {
+        self.configuration_snapshot.read().clone()
     }
 
     pub fn detect_omp(&self) -> StartupState {
@@ -586,6 +624,14 @@ pub fn get_startup_state(service: tauri::State<'_, AppService>) -> StartupState 
         elapsed_ms = started_at.elapsed().as_millis() as u64
     );
     state
+}
+
+#[tauri::command]
+pub fn get_overview(service: tauri::State<'_, AppService>) -> Result<OverviewDto, AppError> {
+    let started_at = Instant::now();
+    let result = service.get_overview();
+    log_command_result("get_overview", started_at, &result);
+    result
 }
 
 #[tauri::command]

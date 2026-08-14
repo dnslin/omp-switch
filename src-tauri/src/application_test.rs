@@ -17,6 +17,7 @@ use crate::{
 };
 use parking_lot::Mutex;
 use pretty_assertions::assert_eq;
+use sha2::Digest;
 use tempfile::tempdir;
 
 #[derive(Default)]
@@ -1112,4 +1113,148 @@ fn target_inspection_failure_does_not_report_the_previous_command_exit_code() {
             ..
         } if diagnostic_code == "io-permission-denied"
     ));
+}
+#[test]
+fn overview_reads_complete_trees_hashes_and_redacts_direct_api_keys() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let models = r#"providers:
+  dnslin:
+    name: Local Provider
+    baseUrl: https://user:user-info-secret@example.com/v1
+    api: openai-responses
+    apiKey: super-secret-api-key
+    providerUnknown:
+      nested: preserve-me
+    models:
+      gpt-5.6-sol:
+        name: Sol
+        api: openai-responses
+        reasoning: true
+        input: [text, image]
+        contextWindow: 356000
+        maxTokens: 32768
+        modelUnknown:
+          nested: preserve-model
+  other:
+    baseUrl: https://example.com/v1?key=query-secret&region=us
+    models:
+      mystery:
+        name: Mystery
+  special:
+    baseUrl: https:user:no-slashes-secret@example.com/v1
+    models: {}
+unrecognizedRoot:
+  nested: untouched
+"#;
+    let config = r#"modelRoles:
+  default: dnslin/gpt-5.6-sol:max
+  advisor: dnslin/gpt-5.6-sol
+otherSettings:
+  nested:
+    value: untouched
+"#;
+    fs::write(target.join("models.yml"), models).unwrap();
+    fs::write(target.join("config.yml"), config).unwrap();
+
+    let service = service_for_target(&target);
+    let overview = service.get_overview().unwrap();
+    let dto = serde_json::to_value(overview).unwrap();
+
+    assert_eq!(dto["state"], "normal");
+    assert_eq!(dto["counts"]["providerCount"], 3);
+    assert_eq!(dto["counts"]["modelCount"], 2);
+    assert_eq!(dto["counts"]["roleCount"], 2);
+    assert_eq!(dto["providers"][0]["hasApiKey"], true);
+    assert!(!dto.to_string().contains("super-secret-api-key"));
+    assert!(!dto.to_string().contains("user-info-secret"));
+    assert!(!dto.to_string().contains("query-secret"));
+    assert!(!dto.to_string().contains("no-slashes-secret"));
+    assert!(!dto.to_string().contains("preserve-me"));
+    assert!(!dto.to_string().contains("preserve-model"));
+    let providers = dto["providers"].as_array().unwrap();
+    let provider = |id: &str| {
+        providers
+            .iter()
+            .find(|provider| provider["id"] == id)
+            .unwrap()
+    };
+    assert_eq!(provider("dnslin")["baseUrl"], "https://example.com/v1");
+    assert_eq!(
+        provider("other")["baseUrl"],
+        "https://example.com/v1?region=us"
+    );
+    assert_eq!(
+        provider("special")["baseUrl"],
+        "[配置地址因无法解析而已脱敏]"
+    );
+
+    let snapshot = service.configuration_snapshot_for_test().unwrap();
+    assert_eq!(
+        snapshot.models.tree["unrecognizedRoot"]["nested"],
+        "untouched"
+    );
+    assert_eq!(
+        snapshot.models.tree["providers"]["dnslin"]["providerUnknown"]["nested"],
+        "preserve-me"
+    );
+    assert_eq!(
+        snapshot.config.tree["otherSettings"]["nested"]["value"],
+        "untouched"
+    );
+    assert_eq!(
+        snapshot.models.raw_hash,
+        sha2::Sha256::digest(models.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+}
+
+#[test]
+fn overview_parse_failure_clears_previous_business_snapshot() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+
+    let service = service_for_target(&target);
+    service.get_overview().unwrap();
+    fs::write(target.join("models.yml"), "providers: [\n").unwrap();
+
+    let error = service.get_overview().unwrap_err();
+    assert_eq!(error.code, "overview-parse-error");
+    assert!(service.configuration_snapshot_for_test().is_none());
+}
+#[test]
+fn overview_reads_yaml_only_targets_as_read_only() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yaml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yaml"), "modelRoles: {}\n").unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview().unwrap()).unwrap();
+    assert_eq!(dto["state"], "read-only");
+    assert_eq!(dto["files"]["models"]["status"], "alternate-only");
+    assert_eq!(dto["files"]["config"]["status"], "alternate-only");
+    assert!(service.configuration_snapshot_for_test().is_some());
+}
+
+#[test]
+fn overview_missing_canonical_files_returns_empty_without_business_snapshot() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview().unwrap()).unwrap();
+    assert_eq!(dto["state"], "empty");
+    assert_eq!(dto["counts"]["providerCount"], 0);
+    assert_eq!(dto["counts"]["modelCount"], 0);
+    assert_eq!(dto["counts"]["roleCount"], 0);
+    assert!(service.configuration_snapshot_for_test().is_none());
 }

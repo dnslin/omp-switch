@@ -4,7 +4,7 @@ import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import { TauriClientProvider, type StartupState, type TargetConfigurationDiscovery, type TauriClient } from "../lib/tauri-client";
+import { TauriClientProvider, type OverviewDto, type StartupState, type TargetConfigurationDiscovery, type TauriClient } from "../lib/tauri-client";
 
 
 function targetConfiguration(
@@ -36,6 +36,7 @@ const unavailableClient: TauriClient = {
     kind: "omp-unavailable",
     message: "未在已保存路径或系统 PATH 中找到可用的 OMP。",
   }),
+  getOverview: async () => overviewDto({ state: "empty", counts: { providerCount: 0, modelCount: 0, roleCount: 0 }, providers: [], models: [], roles: [], emptyReason: "还没有可管理的自定义 Provider。", nextAction: "创建一个 Provider，并同时配置它的第一个模型。" }),
   detectOmp: async () => ({ kind: "omp-unavailable", message: "仍未找到 OMP" }),
   selectOmpExecutable: async () => null,
   validateSelectedOmp: async () => ({ kind: "invalid-executable", executablePath: "/tmp/not-omp", message: "无法运行", diagnosticCode: "io-not-found" }),
@@ -621,5 +622,115 @@ describe("React page seam", () => {
     expect(await screen.findByText("无法读取界面状态")).toBeVisible();
     expect(screen.getByText("请检查应用数据目录权限。")).toBeVisible();
     expect(screen.queryByText("sensitive internal detail")).not.toBeInTheDocument();
+  });
+});
+
+function overviewDto(overrides: Partial<OverviewDto> = {}): OverviewDto {
+  const model = {
+    providerId: "dnslin",
+    id: "gpt-5.6-sol",
+    name: "Sol",
+    effectiveApi: "openai-responses",
+    apiSource: "model",
+    input: ["text", "image"],
+    reasoning: true,
+    contextWindow: 356000,
+    maxTokens: 32768,
+    complete: true,
+    editable: true,
+    readOnlyReason: null,
+  };
+  return {
+    state: "normal",
+    omp: { status: "connected", executablePath: "/usr/local/bin/omp", version: "17.4.1" },
+    targetConfiguration: targetConfiguration(),
+    files: {
+      models: { canonicalPath: "/Users/username/.omp/agent/models.yml", resolvedPath: "/Users/username/.omp/agent/models.yml", status: "normal", contentHash: "models-hash" },
+      config: { canonicalPath: "/Users/username/.omp/agent/config.yml", resolvedPath: "/Users/username/.omp/agent/config.yml", status: "normal", contentHash: "config-hash" },
+    },
+    counts: { providerCount: 1, modelCount: 1, roleCount: 2 },
+    providers: [{ id: "dnslin", name: "Local", baseUrl: "https://example.com", defaultApi: "openai-responses", authMode: "api-key", hasApiKey: true, modelCount: 1, editable: true, readOnlyReason: null, models: [model] }],
+    models: [model],
+    roles: [{ id: "default", status: "configured", selector: "dnslin/gpt-5.6-sol:max" }, { id: "task", status: "configured", selector: "dnslin/gpt-5.6-sol" }],
+    emptyReason: null,
+    nextAction: null,
+    readOnlyReason: null,
+    ...overrides,
+  };
+}
+
+describe("Overview page seam", () => {
+  it("renders the normal overview, safe counts, and connected sidebar status", async () => {
+    const overview = overviewDto();
+    renderRoute("/overview", { ...unavailableClient, getOverview: async () => overview });
+
+    expect(await screen.findByRole("heading", { name: "概览" })).toBeVisible();
+    expect(screen.getByText("查看当前配置状态并快速验证模型连接。")).toBeVisible();
+    expect(screen.getByText("自定义 Provider")).toBeVisible();
+    expect(screen.getAllByText("1")[0]).toBeVisible();
+    expect(screen.getByLabelText(/OMP 已连接.*v17\.4\.1/)).toBeVisible();
+    expect(screen.getAllByText("/Users/username/.omp/agent")[0]).toBeVisible();
+    expect(screen.queryByText("super-secret-api-key")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [overviewDto({ state: "empty", counts: { providerCount: 0, modelCount: 0, roleCount: 0 }, providers: [], models: [], roles: [], emptyReason: "还没有可管理的自定义 Provider。", nextAction: "创建一个 Provider，并同时配置它的第一个模型。" }), "还没有可管理的自定义 Provider", "创建一个 Provider，并同时配置它的第一个模型"],
+    [overviewDto({ state: "read-only", readOnlyReason: "当前配置只能查看；OMP Switch 不会修改 .yaml 或不可写文件。" }), "配置只读", "当前配置只能查看"],
+  ] as const)("renders overview %s state", async (overview, visibleText, detailText) => {
+    renderRoute("/overview", { ...unavailableClient, getOverview: async () => overview });
+    expect((await screen.findAllByText(new RegExp(visibleText)))[0]).toBeVisible();
+    expect(screen.getByText(new RegExp(detailText))).toBeVisible();
+  });
+  it("renders missing files without success indicators", async () => {
+    const overview = overviewDto({
+      state: "empty",
+      files: {
+        models: { ...overviewDto().files.models, resolvedPath: null, status: "missing", contentHash: null },
+        config: { ...overviewDto().files.config, resolvedPath: null, status: "missing", contentHash: null },
+      },
+      counts: { providerCount: 0, modelCount: 0, roleCount: 0 },
+      providers: [],
+      models: [],
+      roles: [],
+      emptyReason: "还没有可管理的自定义 Provider。",
+      nextAction: "创建一个 Provider，并同时配置它的第一个模型。",
+    });
+    const { container } = renderRoute("/overview", { ...unavailableClient, getOverview: async () => overview });
+    expect(await screen.findByText(/models\.yml\s+缺失/)).toBeVisible();
+    expect(screen.getByText(/config\.yml\s+缺失/)).toBeVisible();
+    const strip = screen.getByRole("region", { name: "配置同步状态" });
+    expect(strip.querySelectorAll(".overview-file-status-icon--success")).toHaveLength(0);
+    expect(strip.querySelectorAll(".overview-file-status-icon--warning")).toHaveLength(2);
+    expect(container.querySelectorAll(".overview-file-status-icon--danger")).toHaveLength(0);
+  });
+
+
+  it("renders loading and error states without stale overview data, then retries", async () => {
+    const user = userEvent.setup();
+    let rejectInitial!: (error: unknown) => void;
+    let resolveRetry!: (value: OverviewDto) => void;
+    const getOverview = vi.fn()
+      .mockImplementationOnce(() => new Promise<OverviewDto>((_, reject) => { rejectInitial = reject; }))
+      .mockImplementationOnce(() => new Promise<OverviewDto>((resolve) => { resolveRetry = resolve; }));
+    renderRoute("/overview", { ...unavailableClient, getOverview });
+
+    expect(screen.getByRole("status", { name: "正在读取配置" })).toBeVisible();
+    expect(screen.queryByText("1")).not.toBeInTheDocument();
+    rejectInitial({ code: "overview-parse-error", message: "无法读取配置", action: "请在外部修复 YAML 后重新读取。" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法读取配置");
+    expect(screen.queryByText("1")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "重新读取" }));
+    expect(screen.getByRole("status", { name: "正在读取配置" })).toBeVisible();
+    resolveRetry(overviewDto());
+    expect((await screen.findAllByText("1"))[0]).toBeVisible();
+  });
+
+  it("opens the Settings destination from the overview status footer", async () => {
+    const user = userEvent.setup();
+    renderRoute("/overview", { ...unavailableClient, getOverview: async () => overviewDto() });
+    await screen.findByRole("heading", { name: "概览" });
+    await user.click(screen.getByRole("link", { name: /OMP 已连接/ }));
+    expect(await screen.findByRole("heading", { name: "设置" })).toBeVisible();
   });
 });

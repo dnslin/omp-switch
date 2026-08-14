@@ -1,3 +1,6 @@
+use url::Url;
+const REDACTED_URL: &str = "[配置地址因无法解析而已脱敏]";
+
 const SECRET_NAMES: &[&str] = &[
     "api_key",
     "apikey",
@@ -61,6 +64,66 @@ pub(crate) fn redact_diagnostic(value: &str) -> String {
         index += 1;
     }
     redacted.join(" ")
+}
+pub(crate) fn redact_projection(value: &str) -> String {
+    let Ok(mut url) = Url::parse(value) else {
+        return REDACTED_URL.to_owned();
+    };
+    if value.contains('@') && (!value.contains("://") || url.host_str().is_none()) {
+        return REDACTED_URL.to_owned();
+    }
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+
+    let safe_query_pairs = url
+        .query_pairs()
+        .filter(|(key, _)| !url_query_key_is_secret(key))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    url.set_query(None);
+    if !safe_query_pairs.is_empty() {
+        url.query_pairs_mut().extend_pairs(
+            safe_query_pairs
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
+    }
+
+    redact_diagnostic(url.as_str())
+}
+
+fn url_query_key_is_secret(key: &str) -> bool {
+    const SECRET_QUERY_NAMES: &[&str] = &[
+        "key",
+        "api_key",
+        "apikey",
+        "token",
+        "access_token",
+        "refresh_token",
+        "password",
+        "passwd",
+        "secret",
+        "client_secret",
+        "authorization",
+        "proxy_authorization",
+        "x_api_key",
+    ];
+    const SECRET_QUERY_SUFFIXES: &[&str] = &[
+        "_api_key",
+        "_apikey",
+        "_access_token",
+        "_refresh_token",
+        "_password",
+        "_passwd",
+        "_client_secret",
+        "_authorization",
+    ];
+
+    let normalized = key.trim().to_ascii_lowercase().replace('-', "_");
+    SECRET_QUERY_NAMES.contains(&normalized.as_str())
+        || SECRET_QUERY_SUFFIXES
+            .iter()
+            .any(|suffix| normalized.ends_with(suffix))
 }
 
 fn diagnostic_tokens(value: &str) -> Vec<String> {

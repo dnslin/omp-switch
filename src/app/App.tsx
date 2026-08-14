@@ -1,10 +1,11 @@
-import { CheckCircle2, File, Folder, Info, LayoutGrid, Server, Settings, SquareTerminal, Users } from "lucide-react";
+import { CheckCircle2, ChevronDown, CircleAlert, CircleCheck, File, Folder, Info, LayoutGrid, Server, Settings, SquareTerminal, Users } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useNavigate } from "react-router";
 import { toast, Toaster } from "sonner";
 import { RedetectionLoader } from "../components/redetection-loader";
 import { Button, Card, NavigationItem, PageTitle, StatusIndicator } from "../components/ui";
-import { asAppError, useTauriClient, type ConfigurationFileStatus, type StartupState } from "../lib/tauri-client";
+import { asAppError, useTauriClient, type ConfigurationFileStatus, type OverviewDto, type OverviewModel, type OverviewProvider, type StartupState } from "../lib/tauri-client";
+
 
 const pages = [
   { to: "/overview", label: "概览", icon: LayoutGrid },
@@ -16,7 +17,10 @@ const REDETECT_MINIMUM_DURATION_MS = 1200;
 
 
 
-function MainShell({ children }: { children: React.ReactNode }) {
+type ShellStatus = { title: string; path: string; tone: "success" | "warning" | "danger" };
+
+function MainShell({ children, status }: { children: React.ReactNode; status?: ShellStatus }) {
+  const footer = status ?? { title: "尚未检测 OMP", path: "配置目录不可用", tone: "warning" as const };
   return (
     <div className="app-frame app-frame--shell">
       <main className="shell-main">
@@ -28,9 +32,9 @@ function MainShell({ children }: { children: React.ReactNode }) {
               </NavLink>
             ))}
           </nav>
-          <Link className="sidebar-footer" to="/settings">
-            <strong>尚未检测 OMP</strong>
-            <code>配置目录不可用</code>
+          <Link className={`sidebar-footer sidebar-footer--${footer.tone}`} to="/settings" aria-label={`${footer.title}，${footer.path}`}>
+            <strong><span className="status-dot" aria-hidden="true" />{footer.title}</strong>
+            <code>{footer.path}</code>
           </Link>
         </aside>
         <section className="page-content">{children}</section>
@@ -326,6 +330,233 @@ function formatIssueLocation(line: number | null, column: number | null) {
   if (line !== null) return `第 ${line} 行附近存在格式错误。`;
   return "YAML 存在格式错误。";
 }
+function overviewShellStatus(data: OverviewDto): ShellStatus {
+  return {
+    title: `OMP 已连接  ·  ${formatOverviewVersion(data.omp.version)}`,
+    path: data.targetConfiguration.resolvedPath ?? data.targetConfiguration.path,
+    tone: data.state === "read-only" ? "warning" : "success",
+  };
+}
+
+function OverviewPage() {
+  const client = useTauriClient();
+  const [data, setData] = useState<OverviewDto | null>(null);
+  const [error, setError] = useState<ReturnType<typeof asAppError> | null>(null);
+  const [loading, setLoading] = useState(true);
+  const requestId = useRef(0);
+
+  async function reload() {
+    const currentRequest = ++requestId.current;
+    setLoading(true);
+    setData(null);
+    setError(null);
+    try {
+      const next = await client.getOverview();
+      if (currentRequest === requestId.current) setData(next);
+    } catch (cause: unknown) {
+      if (currentRequest === requestId.current) setError(asAppError(cause, "无法读取概览"));
+    } finally {
+      if (currentRequest === requestId.current) setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void reload();
+    return () => { requestId.current += 1; };
+  }, [client]);
+
+  const pageClass = loading ? "overview-page--loading" : error || !data ? "overview-page--error" : `overview-page--${data.state}`;
+  return (
+    <MainShell status={data ? overviewShellStatus(data) : undefined}>
+      <div className={`overview-page ${pageClass}`} aria-busy={loading}>
+        <OverviewPageHeader />
+        {loading ? <OverviewLoadingBody /> : error ? <OverviewErrorBody error={error} onReload={reload} /> : data ? <OverviewContentBody data={data} /> : <OverviewErrorBody error={{ message: "OMP 没有返回概览数据。", action: "请重新读取；如果问题持续，请查看脱敏日志。" }} onReload={reload} />}
+      </div>
+    </MainShell>
+  );
+}
+
+function OverviewPageHeader() {
+  return (
+    <header className="page-title overview-page-header">
+      <h1>概览</h1>
+      <p>查看当前配置状态并快速验证模型连接。</p>
+    </header>
+  );
+}
+
+function OverviewLoadingBody() {
+  return (
+    <div className="overview-loading" role="status" aria-label="正在读取配置" aria-live="polite">
+      <strong>正在读取配置…</strong>
+      <div className="overview-skeleton overview-skeleton--sync" aria-hidden="true" />
+      <div className="overview-skeleton overview-skeleton--environment" aria-hidden="true" />
+      <div className="overview-skeleton overview-skeleton--metrics" aria-hidden="true" />
+      <div className="overview-skeleton overview-skeleton--test" aria-hidden="true" />
+    </div>
+  );
+}
+
+function OverviewErrorBody({ error, onReload }: { error: { message: string; action: string }; onReload: () => Promise<void> }) {
+  return (
+    <section className="overview-error-card" role="alert" aria-live="assertive">
+      <CircleAlert aria-hidden="true" />
+      <div>
+        <h2>无法读取概览</h2>
+        <p>{error.message}</p>
+        <p className="overview-state-detail">{error.action}</p>
+      </div>
+      <Button variant="secondary" onClick={() => void onReload()}>重新读取</Button>
+    </section>
+  );
+}
+
+function OverviewContentBody({ data }: { data: OverviewDto }) {
+  const selectedModel = data.models.find((model) => model.complete) ?? data.models[0] ?? null;
+  const selectedProvider = selectedModel ? data.providers.find((provider) => provider.id === selectedModel.providerId) ?? null : data.providers[0] ?? null;
+  return (
+    <>
+      <OverviewSyncStrip data={data} />
+      <OverviewEnvironment data={data} />
+      <OverviewMetrics data={data} />
+      {data.state === "empty" || data.state === "read-only" ? <OverviewStateBanner data={data} /> : null}
+      <div className="overview-test-area">
+        <QuickTestPanel data={data} provider={selectedProvider} model={selectedModel} />
+        <TestResultPanel />
+      </div>
+    </>
+  );
+}
+
+function OverviewSyncStrip({ data }: { data: OverviewDto }) {
+  return (
+    <section className="overview-sync-strip" aria-label="配置同步状态">
+      <OverviewFileStatus name="models.yml" file={data.files.models} />
+      <OverviewFileStatus name="config.yml" file={data.files.config} />
+      <div><span>最近备份  —</span></div>
+    </section>
+  );
+}
+
+function OverviewFileStatus({ name, file }: { name: string; file: OverviewDto["files"]["models"] }) {
+  const status = fileStatusView(file.status);
+  const synced = file.contentHash !== null && (file.status === "normal" || file.status === "canonical-with-alternate");
+  const tone = synced ? "success" : status.tone;
+  const StatusIcon = synced ? CircleCheck : tone === "danger" ? CircleAlert : Info;
+  return (
+    <div className={`overview-sync-file overview-sync-file--${tone}`}>
+      <span>{name}  {synced ? "已同步" : status.label}</span>
+      <StatusIcon aria-hidden="true" className={`overview-file-status-icon overview-file-status-icon--${tone}`} />
+    </div>
+  );
+}
+
+function OverviewEnvironment({ data }: { data: OverviewDto }) {
+  const targetPath = data.targetConfiguration.resolvedPath ?? data.targetConfiguration.path;
+  return (
+    <section className="overview-environment" aria-label="OMP 环境">
+      <div className="overview-environment-cell"><span>OMP 环境</span><span className="overview-environment-value"><span className="status-dot" aria-hidden="true" />已连接</span></div>
+      <div className="overview-environment-cell"><span>版本</span><span className="overview-environment-value">{data.omp.version}</span></div>
+      <div className="overview-environment-cell"><span>可执行文件</span><code>{data.omp.executablePath}</code></div>
+      <div className="overview-environment-cell"><span>权威配置目录</span><code>{targetPath}</code></div>
+    </section>
+  );
+}
+
+function OverviewMetrics({ data }: { data: OverviewDto }) {
+  return (
+    <section className="overview-metrics" aria-label="配置统计">
+      <div><span>自定义 Provider</span><strong>{formatOverviewCount(data.counts.providerCount)}</strong></div>
+      <div><span>模型</span><strong>{formatOverviewCount(data.counts.modelCount)}</strong></div>
+      <div><span>已配置角色</span><strong>{formatOverviewCount(data.counts.roleCount)}</strong></div>
+    </section>
+  );
+}
+
+function OverviewStateBanner({ data }: { data: OverviewDto }) {
+  const empty = data.state === "empty";
+  return (
+    <section className={`overview-state-banner overview-state-banner--${empty ? "empty" : "readonly"}`} aria-live="polite">
+      {empty ? <CircleCheck aria-hidden="true" /> : <CircleAlert aria-hidden="true" />}
+      <div>
+        <strong>{empty ? "还没有可管理的自定义 Provider" : "配置只读"}</strong>
+        <p>{empty ? (data.emptyReason ?? "创建一个 Provider，并同时配置它的第一个模型。") : (data.readOnlyReason ?? "当前配置只能查看；OMP Switch 不会修改配置文件。")}</p>
+        {data.nextAction ? <p className="overview-state-detail">{data.nextAction}</p> : null}
+      </div>
+    </section>
+  );
+}
+
+function QuickTestPanel({ data, provider, model }: { data: OverviewDto; provider: OverviewProvider | null; model: OverviewModel | null }) {
+  const canTest = data.state === "normal" && model?.complete === true && model.editable;
+  const finalAddress = provider && model ? modelEndpoint(provider, model) : "—";
+  const protocol = model?.effectiveApi ? `${model.effectiveApi}  ·  ${model.apiSource === "provider" ? "Provider 默认值" : "模型指定"}` : "—";
+  const capabilities = model?.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : input).join("  ·  ") || "—";
+  return (
+    <section className="overview-panel overview-quick-test" aria-label="快速测试">
+      <h2>快速测试</h2>
+      <OverviewField label="Provider" value={provider?.id ?? "暂无 Provider"} select />
+      <OverviewField label="模型" value={model?.id ?? "暂无模型"} select />
+      <OverviewField label="有效协议" value={protocol} />
+      <OverviewField label="最终地址" value={finalAddress} mono />
+      <OverviewField label="能力" value={capabilities} />
+      <OverviewField label="Context Window" value={model?.contextWindow ? formatOverviewCount(model.contextWindow) : "—"} />
+      <div className="overview-panel-actions"><Button disabled={!canTest} aria-label="测试模型">测试模型</Button></div>
+    </section>
+  );
+}
+
+function OverviewField({ label, value, select = false, mono = false }: { label: string; value: string; select?: boolean; mono?: boolean }) {
+  return (
+    <div className="overview-field">
+      <span>{label}</span>
+      <div className={`overview-field-control ${mono ? "overview-field-control--mono" : ""}`}>
+        <span>{value}</span>
+        {select ? <ChevronDown aria-hidden="true" /> : null}
+      </div>
+    </div>
+  );
+}
+
+function TestResultPanel() {
+  return (
+    <section className="overview-panel overview-result" aria-label="测试结果">
+      <header><h2>测试结果</h2><span className="overview-result-status"><span className="status-dot" aria-hidden="true" />尚未测试</span></header>
+      <OverviewResultRow label="模型" value="—" />
+      <OverviewResultRow label="耗时" value="—" />
+      <OverviewResultRow label="状态码" value="—" />
+      <OverviewResultRow label="时间" value="—" />
+    </section>
+  );
+}
+
+function OverviewResultRow({ label, value }: { label: string; value: string }) {
+  return <div className="overview-result-row"><span>{label}</span><span>{value}</span></div>;
+}
+
+function OverviewSkeleton() {
+  return <div className="overview-skeleton" aria-hidden="true" />;
+}
+
+function formatOverviewCount(value: number) {
+  return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+function modelEndpoint(provider: OverviewProvider, model: OverviewModel) {
+  const base = provider.baseUrl?.replace(/\/+$/, "") ?? "";
+  if (!base || !model.effectiveApi) return "—";
+  switch (model.effectiveApi) {
+    case "openai-completions": return `${base}/chat/completions`;
+    case "openai-responses": return `${base}/responses`;
+    case "anthropic-messages": return `${base}/v1/messages`;
+    case "google-generative-ai": return `${base}/models/${encodeURIComponent(model.id)}:streamGenerateContent?alt=sse`;
+    default: return "—";
+  }
+}
+function formatOverviewVersion(version: string) {
+  const normalized = version.trim();
+  return /^(?:v|omp\/)/i.test(normalized) ? normalized : `v${normalized}`;
+}
 
 
 const routeCopy = {
@@ -382,7 +613,7 @@ export function App() {
       <Routes>
         <Route path="/" element={<SetupPage />} />
         <Route path="/setup" element={<SetupPage />} />
-        <Route path="/overview" element={<PlaceholderPage page="overview" />} />
+        <Route path="/overview" element={<OverviewPage />} />
         <Route path="/providers" element={<PlaceholderPage page="providers" />} />
         <Route path="/providers/:providerId" element={<ProviderDetailPage />} />
         <Route path="/roles" element={<PlaceholderPage page="roles" />} />
