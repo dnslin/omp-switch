@@ -7,10 +7,10 @@ export type TargetAccess = { writable: boolean; modelsYml: ConfigurationFileStat
 export type StartupState =
   | { kind: "detecting" }
   | { kind: "omp-unavailable"; message: string }
-  | { kind: "invalid-executable"; executablePath: string; message: string }
-  | { kind: "version-failed"; executablePath: string; message: string; exitCode: number | null; stderr: string }
-  | { kind: "config-path-failed"; executablePath: string; version: string; message: string; exitCode: number | null; stderr: string }
-  | { kind: "omp-ready"; executablePath: string; version: string; targetConfiguration: string; targetAccess: TargetAccess; requiresConfirmation: boolean };
+  | { kind: "invalid-executable"; executablePath: string; message: string; diagnosticCode: string }
+  | { kind: "version-failed"; executablePath: string; message: string; diagnosticCode: string; exitCode: number | null; stderr: string }
+  | { kind: "config-path-failed"; executablePath: string; version: string; message: string; diagnosticCode: string; exitCode: number | null; stderr: string }
+  | { kind: "omp-ready"; executablePath: string; version: string; targetConfiguration: string; previousTargetConfiguration: string | null; targetAccess: TargetAccess; requiresConfirmation: boolean };
 
 export type Theme = "light" | "dark" | "system";
 
@@ -21,6 +21,8 @@ export type UiSettings = {
   selectedModelId: string | null;
   costNoticeAccepted: boolean;
 };
+
+export type UiSettingsUpdate = Omit<UiSettings, "ompExecutablePath">;
 
 export type AppError = {
   code: string;
@@ -55,7 +57,7 @@ export interface TauriClient {
   validateSelectedOmp(executablePath: string): Promise<StartupState>;
   confirmSelectedOmp(executablePath: string): Promise<void>;
   getUiSettings(): Promise<UiSettings>;
-  saveUiSettings(settings: UiSettings): Promise<UiSettings>;
+  saveUiSettings(settings: UiSettingsUpdate): Promise<UiSettings>;
 }
 
 export const tauriClient: TauriClient = {

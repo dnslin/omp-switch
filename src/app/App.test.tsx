@@ -13,7 +13,7 @@ const unavailableClient: TauriClient = {
   }),
   detectOmp: async () => ({ kind: "omp-unavailable", message: "仍未找到 OMP" }),
   selectOmpExecutable: async () => null,
-  validateSelectedOmp: async () => ({ kind: "invalid-executable", executablePath: "/tmp/not-omp", message: "无法运行" }),
+  validateSelectedOmp: async () => ({ kind: "invalid-executable", executablePath: "/tmp/not-omp", message: "无法运行", diagnosticCode: "io-not-found" }),
   confirmSelectedOmp: async () => undefined,
   getUiSettings: async () => ({
     ompExecutablePath: null,
@@ -22,7 +22,7 @@ const unavailableClient: TauriClient = {
     selectedModelId: null,
     costNoticeAccepted: false,
   }),
-  saveUiSettings: async (settings) => settings,
+  saveUiSettings: async (settings) => ({ ompExecutablePath: null, ...settings }),
 };
 
 function renderRoute(route: string, client: TauriClient = unavailableClient) {
@@ -50,9 +50,9 @@ describe("React page seam", () => {
 
   it.each([
     [{ kind: "detecting" } as const, "正在检测 OMP…"],
-    [{ kind: "invalid-executable", executablePath: "/tmp/not-omp", message: "所选文件无法运行" } as const, "所选文件无法运行"],
-    [{ kind: "version-failed", executablePath: "/tmp/omp", message: "版本失败", exitCode: 7, stderr: "技术详情已脱敏" } as const, "版本失败"],
-    [{ kind: "config-path-failed", executablePath: "/tmp/omp", version: "17.4.1", message: "不会猜测目录。该命令可能初始化 OMP Settings、访问 agent.db，或运行 OMP 自身的旧迁移。", exitCode: 9, stderr: "技术详情已脱敏" } as const, "不会猜测目录"],
+    [{ kind: "invalid-executable", executablePath: "/tmp/not-omp", message: "所选文件无法运行", diagnosticCode: "io-not-found" } as const, "所选文件无法运行"],
+    [{ kind: "version-failed", executablePath: "/tmp/omp", message: "版本失败", diagnosticCode: "process-exit", exitCode: 7, stderr: "技术详情已脱敏" } as const, "版本失败"],
+    [{ kind: "config-path-failed", executablePath: "/tmp/omp", version: "17.4.1", message: "不会猜测目录。该命令可能初始化 OMP Settings、访问 agent.db，或运行 OMP 自身的旧迁移。", diagnosticCode: "process-exit", exitCode: 9, stderr: "技术详情已脱敏" } as const, "不会猜测目录"],
   ])("renders setup state %#", async (startupState, visibleText) => {
     renderRoute("/setup", { ...unavailableClient, getStartupState: async () => startupState });
     expect((await screen.findAllByText(new RegExp(visibleText)))[0]).toBeVisible();
@@ -68,6 +68,7 @@ describe("React page seam", () => {
         version: "17.4.1",
         targetConfiguration: "/Users/username/.omp/agent",
         targetAccess: { writable: true, modelsYml: "normal", configYml: "normal" },
+        previousTargetConfiguration: null,
         requiresConfirmation: false,
       }),
     });
@@ -92,6 +93,7 @@ describe("React page seam", () => {
         version: "17.4.1",
         targetConfiguration: "/Users/username/.omp/agent",
         targetAccess: { writable: true, modelsYml: "normal", configYml: "normal" },
+        previousTargetConfiguration: null,
         requiresConfirmation: false,
       }),
       detectOmp,
@@ -117,12 +119,40 @@ describe("React page seam", () => {
         version: "17.4.1",
         targetConfiguration: "/Users/username/.omp/agent",
         targetAccess: { writable: true, modelsYml: "missing", configYml: "normal" },
+        previousTargetConfiguration: null,
         requiresConfirmation: false,
       }),
     });
 
     expect(await screen.findByText("缺失")).toBeVisible();
     expect(screen.getByRole("button", { name: "进入应用" })).toBeDisabled();
+  });
+
+  it("shows and explicitly confirms the Target configuration change before switching OMP", async () => {
+    const user = userEvent.setup();
+    const confirmSelectedOmp = vi.fn(async () => undefined);
+    renderRoute("/setup", {
+      ...unavailableClient,
+      getStartupState: async () => ({
+        kind: "omp-ready",
+        executablePath: "/opt/new/bin/omp",
+        version: "18.0.0",
+        targetConfiguration: "/Users/username/.omp/new-agent",
+        previousTargetConfiguration: "/Users/username/.omp/old-agent",
+        targetAccess: { writable: true, modelsYml: "normal", configYml: "normal" },
+        requiresConfirmation: true,
+      }),
+      confirmSelectedOmp,
+    });
+
+    expect(await screen.findByRole("heading", { name: "确认切换 OMP" })).toBeVisible();
+    expect(screen.getByText("/Users/username/.omp/old-agent")).toBeVisible();
+    expect(screen.getAllByText("/Users/username/.omp/new-agent")).toHaveLength(2);
+    expect(confirmSelectedOmp).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "确认切换并进入应用" }));
+    expect(confirmSelectedOmp).toHaveBeenCalledWith("/opt/new/bin/omp");
+    expect(await screen.findByRole("heading", { name: "概览" })).toBeVisible();
   });
   it("redirects the root route through startup detection", async () => {
     renderRoute("/");

@@ -94,15 +94,16 @@ function SetupPage() {
     }
   }
   const ready = state.kind === "omp-ready";
+  const confirmingSwitch = ready && state.requiresConfirmation;
   const configurationReady = ready && state.targetAccess.modelsYml !== "missing" && state.targetAccess.configYml !== "missing";
-  const failure = state.kind === "version-failed" || state.kind === "config-path-failed";
-  const title = ready ? "OMP 已找到" : state.kind === "detecting" ? "正在检测 OMP…" : state.kind === "config-path-failed" ? "无法获取 OMP 配置目录" : "设置 OMP";
-  const description = ready
-    ? "OMP Switch 已确认可执行文件和权威配置目录。"
-    : state.kind === "detecting"
-      ? "正在检查可执行文件、版本和权威配置目录。"
-      : state.kind === "omp-unavailable"
-        ? state.message
+  const failure = state.kind === "invalid-executable" || state.kind === "version-failed" || state.kind === "config-path-failed";
+  const title = confirmingSwitch ? "确认切换 OMP" : ready ? "OMP 已找到" : state.kind === "detecting" ? "正在检测 OMP…" : state.kind === "config-path-failed" ? "无法获取 OMP 配置目录" : "设置 OMP";
+  const description = confirmingSwitch
+    ? "请确认新的 OMP 及其 Target configuration；确认后才会替换当前选择。"
+    : ready
+      ? "OMP Switch 已确认可执行文件和权威配置目录。"
+      : state.kind === "detecting"
+        ? "正在检查可执行文件、版本和权威配置目录。"
         : state.message;
 
   return (
@@ -112,7 +113,7 @@ function SetupPage() {
           <header><h1>{title}</h1><p>{description}</p></header>
           <div className={`setup-state ${ready ? "setup-state--success" : ""}`} aria-live="polite">
             <span className="status-dot" aria-hidden="true" />
-            {ready ? "检测完成  ·  OMP 已可用" : state.kind === "detecting" ? "正在检测 OMP…" : description}
+            {confirmingSwitch ? "等待确认  ·  尚未切换 OMP" : ready ? "检测完成  ·  OMP 已可用" : state.kind === "detecting" ? "正在检测 OMP…" : description}
           </div>
           {ready ? (
             <>
@@ -123,14 +124,20 @@ function SetupPage() {
                 <SetupRow icon={File} label="models.yml" value="" status={fileStatusLabel(state.targetAccess.modelsYml)} />
                 <SetupRow icon={File} label="config.yml" value="" status={fileStatusLabel(state.targetAccess.configYml)} />
               </div>
+              {confirmingSwitch ? (
+                <div className="target-change" aria-label="Target configuration 变更">
+                  <div><span>当前 Target configuration</span><code>{state.previousTargetConfiguration ?? "当前 OMP 无法读取，配置目录未知"}</code></div>
+                  <div><span>切换后 Target configuration</span><code>{state.targetConfiguration}</code></div>
+                </div>
+              ) : null}
               <div className="permission-summary"><CheckCircle2 aria-hidden="true" />{state.targetAccess.writable && state.targetAccess.modelsYml === "normal" && state.targetAccess.configYml === "normal" ? "配置文件可读写，权限正常。" : "配置目录已确认；只读或缺失文件状态如上。"}</div>
             </>
           ) : failure ? (
-            <details className="technical-details"><summary>查看技术详情</summary><p>退出码：{state.exitCode ?? "不可用"}</p><p>{state.stderr || "命令没有返回 stderr。"}</p></details>
+            <details className="technical-details"><summary>查看技术详情</summary><p>诊断代码：{state.diagnosticCode}</p>{state.kind !== "invalid-executable" ? <><p>退出码：{state.exitCode ?? "不可用"}</p><p>{state.stderr || "命令没有返回 stderr。"}</p></> : null}</details>
           ) : null}
           <div className="setup-actions">
-            {ready ? <Button variant="secondary" onClick={detect} disabled={redetecting}>{redetecting ? "正在重新检测" : "重新检测"}</Button> : <Button variant="secondary" onClick={selectExecutable} disabled={state.kind === "detecting"}>手动选择 OMP</Button>}
-            {ready ? <Button onClick={enterApplication} disabled={!configurationReady || redetecting}>进入应用</Button> : <Button onClick={detect} disabled={state.kind === "detecting"}>自动检测</Button>}
+            {ready ? <Button size="setup" variant="secondary" onClick={detect} disabled={redetecting}>{redetecting ? "正在重新检测" : "重新检测"}</Button> : <Button size="setup" variant="secondary" onClick={selectExecutable} disabled={state.kind === "detecting"}>手动选择 OMP</Button>}
+            {ready ? <Button size="setup" onClick={enterApplication} disabled={!configurationReady || redetecting}>{confirmingSwitch ? "确认切换并进入应用" : "进入应用"}</Button> : <Button size="setup" onClick={detect} disabled={state.kind === "detecting"}>自动检测</Button>}
           </div>
         </section>
       </main>

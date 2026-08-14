@@ -4,23 +4,27 @@ use std::{
     sync::Arc,
 };
 
+use crate::application::{
+    AppService, AppSettings, CommandOutput, ConfigurationFileStatus, OmpEnvironment, StartupState,
+    TargetAccess, Theme, UiSettingsUpdate,
+};
 use parking_lot::Mutex;
 use pretty_assertions::assert_eq;
 use tempfile::tempdir;
-use crate::application::{
-    AppService, AppSettings, CommandOutput, ConfigurationFileStatus, OmpEnvironment,
-    StartupState, TargetAccess, Theme,
-};
 
 #[derive(Default)]
 struct FakeOmpEnvironment {
     path_omp: Option<PathBuf>,
     calls: Mutex<Vec<(PathBuf, Vec<String>)>>,
+    inspect_target_error: Option<std::io::ErrorKind>,
 }
 
 impl FakeOmpEnvironment {
     fn with_path(path: impl Into<PathBuf>) -> Self {
-        Self { path_omp: Some(path.into()), ..Self::default() }
+        Self {
+            path_omp: Some(path.into()),
+            ..Self::default()
+        }
     }
 
     fn calls(&self) -> Vec<(PathBuf, Vec<String>)> {
@@ -44,7 +48,9 @@ impl OmpEnvironment for FakeOmpEnvironment {
             ("saved-omp", ["config", "path"]) => Ok(CommandOutput::success("/tmp/saved-agent\n")),
             ("path-omp", ["--version"]) => Ok(CommandOutput::success("18.0.0\n")),
             ("path-omp", ["config", "path"]) => Ok(CommandOutput::success("/tmp/path-agent\n")),
-            ("broken-version", ["--version"]) => Ok(CommandOutput::failure(7, "API_KEY=super-secret")),
+            ("broken-version", ["--version"]) => {
+                Ok(CommandOutput::failure(7, "API_KEY=super-secret"))
+            }
             ("relative-path", ["--version"]) => Ok(CommandOutput::success("17.4.1")),
             ("relative-path", ["config", "path"]) => Ok(CommandOutput::success("relative/agent")),
             ("noisy-path", ["--version"]) => Ok(CommandOutput::success("17.4.1")),
@@ -54,6 +60,9 @@ impl OmpEnvironment for FakeOmpEnvironment {
     }
 
     fn inspect_target(&self, _target: &Path) -> std::io::Result<TargetAccess> {
+        if let Some(kind) = self.inspect_target_error {
+            return Err(std::io::Error::new(kind, "target inspection failed"));
+        }
         Ok(TargetAccess {
             writable: true,
             models_yml: ConfigurationFileStatus::Normal,
@@ -64,20 +73,20 @@ impl OmpEnvironment for FakeOmpEnvironment {
 
 fn service_with(environment: Arc<FakeOmpEnvironment>, saved: Option<&str>) -> AppService {
     let app_data = tempdir().unwrap().keep();
-    let service = AppService::new_with_environment(
-        app_data.join("settings.json"),
-        environment,
-    )
-    .unwrap();
+    let settings_path = app_data.join("settings.json");
     if let Some(path) = saved {
-        service
-            .save_ui_settings(AppSettings {
+        fs::create_dir_all(&app_data).unwrap();
+        fs::write(
+            &settings_path,
+            serde_json::to_vec_pretty(&AppSettings {
                 omp_executable_path: Some(path.to_owned()),
                 ..AppSettings::default()
             })
-            .unwrap();
+            .unwrap(),
+        )
+        .unwrap();
     }
-    service
+    AppService::new_with_environment(settings_path, environment).unwrap()
 }
 
 #[test]
@@ -97,12 +106,16 @@ fn startup_detection_prefers_saved_omp_and_runs_only_fixed_commands() {
                 config_yml: ConfigurationFileStatus::Normal,
             },
             requires_confirmation: false,
+            previous_target_configuration: None,
         }
     );
     assert_eq!(
         environment.calls(),
         vec![
-            (PathBuf::from("/bin/saved-omp"), vec!["--version".to_owned()]),
+            (
+                PathBuf::from("/bin/saved-omp"),
+                vec!["--version".to_owned()]
+            ),
             (
                 PathBuf::from("/bin/saved-omp"),
                 vec!["config".to_owned(), "path".to_owned()],
@@ -121,10 +134,26 @@ fn startup_detection_requires_confirmation_before_replacing_unusable_saved_execu
         StartupState::OmpReady { executable_path, requires_confirmation: true, .. }
             if executable_path == "/bin/path-omp"
     ));
-    assert_eq!(service.get_ui_settings().unwrap().omp_executable_path.as_deref(), Some("/bin/missing-omp"));
+    assert_eq!(
+        service
+            .get_ui_settings()
+            .unwrap()
+            .omp_executable_path
+            .as_deref(),
+        Some("/bin/missing-omp")
+    );
 
-    service.confirm_selected_omp(PathBuf::from("/bin/path-omp")).unwrap();
-    assert_eq!(service.get_ui_settings().unwrap().omp_executable_path.as_deref(), Some("/bin/path-omp"));
+    service
+        .confirm_selected_omp(PathBuf::from("/bin/path-omp"))
+        .unwrap();
+    assert_eq!(
+        service
+            .get_ui_settings()
+            .unwrap()
+            .omp_executable_path
+            .as_deref(),
+        Some("/bin/path-omp")
+    );
 }
 
 #[test]
@@ -133,7 +162,9 @@ fn version_failure_returns_redacted_diagnostics_and_exit_code() {
     let service = service_with(environment, None);
 
     let state = service.validate_selected_omp(PathBuf::from("/bin/broken-version"));
-    assert!(matches!(state, StartupState::VersionFailed { exit_code: Some(7), ref stderr, .. } if stderr.contains("已脱敏") && !stderr.contains("super-secret")));
+    assert!(
+        matches!(state, StartupState::VersionFailed { exit_code: Some(7), ref stderr, .. } if stderr.contains("已脱敏") && !stderr.contains("super-secret"))
+    );
 }
 
 #[test]
@@ -158,7 +189,11 @@ fn failed_manual_replacement_keeps_current_saved_omp() {
         StartupState::VersionFailed { .. }
     ));
     assert_eq!(
-        service.get_ui_settings().unwrap().omp_executable_path.as_deref(),
+        service
+            .get_ui_settings()
+            .unwrap()
+            .omp_executable_path
+            .as_deref(),
         Some("/bin/saved-omp")
     );
 }
@@ -167,15 +202,35 @@ fn failed_manual_replacement_keeps_current_saved_omp() {
 fn valid_manual_replacement_is_saved_only_after_explicit_confirmation() {
     let environment = Arc::new(FakeOmpEnvironment::default());
     let service = service_with(environment, Some("/bin/saved-omp"));
-
     assert!(matches!(
         service.validate_selected_omp(PathBuf::from("/bin/path-omp")),
-        StartupState::OmpReady { ref target_configuration, .. } if target_configuration == "/tmp/path-agent"
+        StartupState::OmpReady {
+            ref target_configuration,
+            ref previous_target_configuration,
+            ..
+        } if target_configuration == "/tmp/path-agent"
+            && previous_target_configuration.as_deref() == Some("/tmp/saved-agent")
     ));
-    assert_eq!(service.get_ui_settings().unwrap().omp_executable_path.as_deref(), Some("/bin/saved-omp"));
+    assert_eq!(
+        service
+            .get_ui_settings()
+            .unwrap()
+            .omp_executable_path
+            .as_deref(),
+        Some("/bin/saved-omp")
+    );
 
-    service.confirm_selected_omp(PathBuf::from("/bin/path-omp")).unwrap();
-    assert_eq!(service.get_ui_settings().unwrap().omp_executable_path.as_deref(), Some("/bin/path-omp"));
+    service
+        .confirm_selected_omp(PathBuf::from("/bin/path-omp"))
+        .unwrap();
+    assert_eq!(
+        service
+            .get_ui_settings()
+            .unwrap()
+            .omp_executable_path
+            .as_deref(),
+        Some("/bin/path-omp")
+    );
 }
 
 #[test]
@@ -191,8 +246,19 @@ fn failed_revalidation_clears_previous_pending_omp() {
         service.validate_selected_omp(PathBuf::from("/bin/broken-version")),
         StartupState::VersionFailed { .. }
     ));
-    assert!(service.confirm_selected_omp(PathBuf::from("/bin/path-omp")).is_err());
-    assert_eq!(service.get_ui_settings().unwrap().omp_executable_path.as_deref(), Some("/bin/saved-omp"));
+    assert!(
+        service
+            .confirm_selected_omp(PathBuf::from("/bin/path-omp"))
+            .is_err()
+    );
+    assert_eq!(
+        service
+            .get_ui_settings()
+            .unwrap()
+            .omp_executable_path
+            .as_deref(),
+        Some("/bin/saved-omp")
+    );
 }
 
 #[test]
@@ -204,17 +270,46 @@ fn automatic_detection_clears_previous_manual_pending_omp() {
         service.validate_selected_omp(PathBuf::from("/bin/path-omp")),
         StartupState::OmpReady { .. }
     ));
-    assert!(matches!(service.detect_omp(), StartupState::OmpReady { requires_confirmation: false, .. }));
-    assert!(service.confirm_selected_omp(PathBuf::from("/bin/path-omp")).is_err());
-    assert_eq!(service.get_ui_settings().unwrap().omp_executable_path.as_deref(), Some("/bin/saved-omp"));
+    assert!(matches!(
+        service.detect_omp(),
+        StartupState::OmpReady {
+            requires_confirmation: false,
+            ..
+        }
+    ));
+    assert!(
+        service
+            .confirm_selected_omp(PathBuf::from("/bin/path-omp"))
+            .is_err()
+    );
+    assert_eq!(
+        service
+            .get_ui_settings()
+            .unwrap()
+            .omp_executable_path
+            .as_deref(),
+        Some("/bin/saved-omp")
+    );
 }
 
 #[test]
 fn diagnostics_redact_common_secret_assignments_and_authorization_headers() {
     let diagnostic = "API_KEY super-secret password=hunter2 Authorization: Bearer abc.def token 'quoted secret' client_secret: hidden access_token= spaced x-api-key: header-secret sk-live-raw safe-context";
     let redacted = crate::application::redact_diagnostic(diagnostic);
-    for secret in ["super-secret", "hunter2", "abc.def", "quoted secret", "hidden", "spaced", "header-secret", "sk-live-raw"] {
-        assert!(!redacted.contains(secret), "secret {secret:?} leaked in {redacted:?}");
+    for secret in [
+        "super-secret",
+        "hunter2",
+        "abc.def",
+        "quoted secret",
+        "hidden",
+        "spaced",
+        "header-secret",
+        "sk-live-raw",
+    ] {
+        assert!(
+            !redacted.contains(secret),
+            "secret {secret:?} leaked in {redacted:?}"
+        );
     }
     assert!(redacted.contains("safe-context"));
     assert!(redacted.contains("[已脱敏]"));
@@ -233,14 +328,21 @@ fn diagnostics_suppress_structured_json_and_url_credentials() {
     }
 }
 
-
 #[test]
 fn diagnostics_redact_provider_prefixed_secret_names() {
     let diagnostic = "OPENAI_API_KEY=sk-openai-live ANTHROPIC_API_KEY anthropic-live AZURE_ACCESS_TOKEN=azure-live OPENAI_AUTHORIZATION: Bearer provider-secret safe-context";
     let redacted = crate::application::redact_diagnostic(diagnostic);
 
-    for secret in ["sk-openai-live", "anthropic-live", "azure-live", "provider-secret"] {
-        assert!(!redacted.contains(secret), "secret {secret:?} leaked in {redacted:?}");
+    for secret in [
+        "sk-openai-live",
+        "anthropic-live",
+        "azure-live",
+        "provider-secret",
+    ] {
+        assert!(
+            !redacted.contains(secret),
+            "secret {secret:?} leaked in {redacted:?}"
+        );
     }
     assert!(redacted.contains("safe-context"));
 }
@@ -265,8 +367,8 @@ fn settings_seam_persists_only_approved_lightweight_state() {
     let app_data = tempdir().unwrap();
     let settings_path = app_data.path().join("settings.json");
     let service = AppService::new(settings_path.clone()).unwrap();
-    let settings = AppSettings {
-        omp_executable_path: Some("/usr/local/bin/omp".to_owned()),
+    let expected = AppSettings {
+        omp_executable_path: None,
         theme: Theme::Dark,
         selected_provider_id: Some("dnslin".to_owned()),
         selected_model_id: Some("gpt-5.6-sol".to_owned()),
@@ -274,13 +376,87 @@ fn settings_seam_persists_only_approved_lightweight_state() {
     };
 
     assert_eq!(
-        service.save_ui_settings(settings.clone()).unwrap(),
-        settings
+        service
+            .save_ui_settings(UiSettingsUpdate {
+                theme: Theme::Dark,
+                selected_provider_id: Some("dnslin".to_owned()),
+                selected_model_id: Some("gpt-5.6-sol".to_owned()),
+                cost_notice_accepted: true,
+            })
+            .unwrap(),
+        expected
     );
 
     let rebuilt = AppService::new(settings_path).unwrap();
-    assert_eq!(rebuilt.get_ui_settings().unwrap(), settings);
+    assert_eq!(rebuilt.get_ui_settings().unwrap(), expected);
     let persisted = fs::read_to_string(app_data.path().join("settings.json")).unwrap();
     assert!(!persisted.contains("apiKey"));
     assert!(!persisted.contains("modelRoles"));
+}
+
+#[test]
+fn ui_settings_update_cannot_replace_the_confirmed_omp_executable() {
+    let environment = Arc::new(FakeOmpEnvironment::default());
+    let service = service_with(environment, Some("/bin/saved-omp"));
+
+    service
+        .save_ui_settings(UiSettingsUpdate {
+            theme: Theme::Dark,
+            selected_provider_id: Some("dnslin".to_owned()),
+            selected_model_id: Some("gpt-5.6-sol".to_owned()),
+            cost_notice_accepted: true,
+        })
+        .unwrap();
+
+    assert_eq!(
+        service
+            .get_ui_settings()
+            .unwrap()
+            .omp_executable_path
+            .as_deref(),
+        Some("/bin/saved-omp")
+    );
+}
+
+#[test]
+fn ui_settings_update_rejects_omp_executable_path_from_ipc() {
+    let result = serde_json::from_value::<UiSettingsUpdate>(serde_json::json!({
+        "ompExecutablePath": "/bin/unvalidated-omp",
+        "theme": "system",
+        "selectedProviderId": null,
+        "selectedModelId": null,
+        "costNoticeAccepted": false
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn execution_io_failures_keep_a_safe_diagnostic_cause() {
+    let environment = Arc::new(FakeOmpEnvironment::default());
+    let service = service_with(environment, None);
+
+    assert!(matches!(
+        service.validate_selected_omp(PathBuf::from("/bin/missing-omp")),
+        StartupState::InvalidExecutable { ref diagnostic_code, .. }
+            if diagnostic_code == "io-not-found"
+    ));
+}
+
+#[test]
+fn target_inspection_failure_does_not_report_the_previous_command_exit_code() {
+    let environment = Arc::new(FakeOmpEnvironment {
+        inspect_target_error: Some(std::io::ErrorKind::PermissionDenied),
+        ..FakeOmpEnvironment::default()
+    });
+    let service = service_with(environment, None);
+
+    assert!(matches!(
+        service.validate_selected_omp(PathBuf::from("/bin/path-omp")),
+        StartupState::ConfigPathFailed {
+            ref diagnostic_code,
+            exit_code: None,
+            ..
+        } if diagnostic_code == "io-permission-denied"
+    ));
 }
