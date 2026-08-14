@@ -1,8 +1,9 @@
 import { CheckCircle2, File, Folder, Info, LayoutGrid, Server, Settings, SquareTerminal, Users } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useNavigate } from "react-router";
 import { toast, Toaster } from "sonner";
 import { Button, Card, NavigationItem, PageTitle, StatusIndicator } from "../components/ui";
+import { DotmSquare3 } from "../components/ui/dotm-square-3";
 import { asAppError, useTauriClient, type StartupState } from "../lib/tauri-client";
 
 const pages = [
@@ -11,6 +12,8 @@ const pages = [
   { to: "/roles", label: "角色", icon: Users },
   { to: "/settings", label: "设置", icon: Settings },
 ] as const;
+const REDETECT_MINIMUM_DURATION_MS = 1200;
+
 
 
 function MainShell({ children }: { children: React.ReactNode }) {
@@ -41,7 +44,7 @@ function SetupPage() {
   const navigate = useNavigate();
   const [state, setState] = useState<StartupState>({ kind: "detecting" });
   const [redetecting, setRedetecting] = useState(false);
-
+  const detectionInFlight = useRef(false);
   useEffect(() => {
     let active = true;
     void client.getStartupState().then((next) => {
@@ -50,20 +53,39 @@ function SetupPage() {
       const appError = asAppError(error, "无法读取启动状态");
       toast.error(appError.message, { description: appError.action });
     });
-    return () => { active = false; };
+    return () => {
+      active = false;
+    };
   }, [client]);
 
   async function detect() {
+    if (detectionInFlight.current) return;
+    detectionInFlight.current = true;
     const preserveReadyState = state.kind === "omp-ready";
-    if (preserveReadyState) setRedetecting(true);
-    else setState({ kind: "detecting" });
+    if (preserveReadyState) {
+      setRedetecting(true);
+    } else {
+      setState({ kind: "detecting" });
+    }
     try {
-      setState(await client.detectOmp());
+      let nextState: StartupState;
+      if (preserveReadyState) {
+        const [detectionResult] = await Promise.allSettled([
+          client.detectOmp(),
+          new Promise<void>((resolve) => setTimeout(resolve, REDETECT_MINIMUM_DURATION_MS)),
+        ]);
+        if (detectionResult.status === "rejected") throw detectionResult.reason;
+        nextState = detectionResult.value;
+      } else {
+        nextState = await client.detectOmp();
+      }
+      setState(nextState);
     } catch (error: unknown) {
       const appError = asAppError(error, "无法重新检测 OMP");
       toast.error(appError.message, { description: appError.action });
       setState({ kind: "omp-unavailable", message: appError.message });
     } finally {
+      detectionInFlight.current = false;
       setRedetecting(false);
     }
   }
@@ -109,7 +131,7 @@ function SetupPage() {
   return (
     <div className="app-frame">
       <main className="setup-body">
-        <section className="setup-card">
+        <section className="setup-card" aria-busy={redetecting}>
           <header><h1>{title}</h1><p>{description}</p></header>
           <div className={`setup-state ${ready ? "setup-state--success" : ""}`} aria-live="polite">
             <span className="status-dot" aria-hidden="true" />
@@ -136,9 +158,21 @@ function SetupPage() {
             <details className="technical-details"><summary>查看技术详情</summary><p>诊断代码：{state.diagnosticCode}</p>{state.kind !== "invalid-executable" ? <><p>退出码：{state.exitCode ?? "不可用"}</p><p>{state.stderr || "命令没有返回 stderr。"}</p></> : null}</details>
           ) : null}
           <div className="setup-actions">
-            {ready ? <Button size="setup" variant="secondary" onClick={detect} disabled={redetecting}>{redetecting ? "正在重新检测" : "重新检测"}</Button> : <Button size="setup" variant="secondary" onClick={selectExecutable} disabled={state.kind === "detecting"}>手动选择 OMP</Button>}
-            {ready ? <Button size="setup" onClick={enterApplication} disabled={!configurationReady || redetecting}>{confirmingSwitch ? "确认切换并进入应用" : "进入应用"}</Button> : <Button size="setup" onClick={detect} disabled={state.kind === "detecting"}>自动检测</Button>}
+            {ready ? (
+              <Button size="setup" variant="secondary" onClick={detect} disabled={redetecting} disabledAppearance="stable">
+                重新检测
+              </Button>
+            ) : <Button size="setup" variant="secondary" onClick={selectExecutable} disabled={state.kind === "detecting"}>手动选择 OMP</Button>}
+            {ready ? <Button size="setup" onClick={enterApplication} disabled={!configurationReady || redetecting} disabledAppearance={configurationReady && redetecting ? "stable" : "muted"}>{confirmingSwitch ? "确认切换并进入应用" : "进入应用"}</Button> : <Button size="setup" onClick={detect} disabled={state.kind === "detecting"}>自动检测</Button>}
           </div>
+          {redetecting ? (
+            <div className="redetect-overlay" role="status" aria-live="polite" aria-label="正在重新检测 OMP" data-testid="redetect-progress">
+              <div className="redetect-overlay__content">
+                <span aria-hidden="true"><DotmSquare3 size={104} dotSize={13} color="var(--color-primary)" speed={1.45} bloom halo={0.32} ariaLabel="正在重新检测 OMP" /></span>
+                <strong>正在重新检测 OMP</strong>
+              </div>
+            </div>
+          ) : null}
         </section>
       </main>
     </div>

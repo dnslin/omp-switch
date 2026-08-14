@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
@@ -24,6 +24,16 @@ const unavailableClient: TauriClient = {
   }),
   saveUiSettings: async (settings) => ({ ompExecutablePath: null, ...settings }),
 };
+const readyState: StartupState = {
+  kind: "omp-ready",
+  executablePath: "/usr/local/bin/omp",
+  version: "17.4.1",
+  targetConfiguration: "/Users/username/.omp/agent",
+  targetAccess: { writable: true, modelsYml: "normal", configYml: "normal" },
+  previousTargetConfiguration: null,
+  requiresConfirmation: false,
+};
+
 
 function renderRoute(route: string, client: TauriClient = unavailableClient) {
   return render(
@@ -87,45 +97,131 @@ describe("React page seam", () => {
     const detectOmp = vi.fn(() => new Promise<StartupState>((resolve) => { resolveDetection = resolve; }));
     renderRoute("/setup", {
       ...unavailableClient,
-      getStartupState: async () => ({
-        kind: "omp-ready",
-        executablePath: "/usr/local/bin/omp",
-        version: "17.4.1",
-        targetConfiguration: "/Users/username/.omp/agent",
-        targetAccess: { writable: true, modelsYml: "normal", configYml: "normal" },
-        previousTargetConfiguration: null,
-        requiresConfirmation: false,
-      }),
+      getStartupState: async () => readyState,
       detectOmp,
     });
 
     expect(await screen.findByRole("heading", { name: "OMP 已找到" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "重新检测" }));
 
+    const retryButton = screen.getByRole("button", { name: "重新检测" });
+    const enterButton = screen.getByRole("button", { name: "进入应用" });
     expect(screen.getByRole("heading", { name: "OMP 已找到" })).toBeVisible();
     expect(screen.getByText("/Users/username/.omp/agent")).toBeVisible();
-    expect(screen.getByRole("button", { name: "正在重新检测" })).toBeDisabled();
+    expect(retryButton).toBeDisabled();
+    expect(screen.getByTestId("redetect-progress")).toHaveClass("redetect-overlay");
+    expect(screen.getByTestId("redetect-progress")).toHaveTextContent("正在重新检测 OMP");
+    expect(enterButton).toBeDisabled();
+    expect(enterButton).toHaveClass("disabled:opacity-100");
 
+    await screen.findByTestId("redetect-progress");
     resolveDetection({ kind: "omp-unavailable", message: "仍未找到 OMP" });
-    expect((await screen.findAllByText("仍未找到 OMP"))[0]).toBeVisible();
+    await waitFor(() => expect(screen.queryByTestId("redetect-progress")).not.toBeInTheDocument(), { timeout: 2000 });
+    expect(screen.getAllByText("仍未找到 OMP")[0]).toBeVisible();
   });
-
-  it("shows missing files without allowing entry or initializing them", async () => {
+  it("rejects duplicate detection starts before React commits disabled state", async () => {
+    let resolveDetection!: (state: StartupState) => void;
+    const detectOmp = vi.fn(() => new Promise<StartupState>((resolve) => { resolveDetection = resolve; }));
     renderRoute("/setup", {
       ...unavailableClient,
-      getStartupState: async () => ({
-        kind: "omp-ready",
-        executablePath: "/usr/local/bin/omp",
-        version: "17.4.1",
-        targetConfiguration: "/Users/username/.omp/agent",
-        targetAccess: { writable: true, modelsYml: "missing", configYml: "normal" },
-        previousTargetConfiguration: null,
-        requiresConfirmation: false,
-      }),
+      getStartupState: async () => readyState,
+      detectOmp,
+    });
+
+    const retryButton = await screen.findByRole("button", { name: "重新检测" });
+    retryButton.click();
+    retryButton.click();
+
+    expect(detectOmp).toHaveBeenCalledTimes(1);
+    resolveDetection(readyState);
+    await waitFor(() => expect(retryButton).toBeEnabled(), { timeout: 2000 });
+  });
+
+
+  it("keeps fast unchanged redetection visually stable with Dot Matrix feedback", async () => {
+    const detectOmp = vi.fn(async () => readyState);
+    renderRoute("/setup", {
+      ...unavailableClient,
+      getStartupState: async () => readyState,
+      detectOmp,
+    });
+
+    expect(await screen.findByRole("heading", { name: "OMP 已找到" })).toBeVisible();
+    vi.useFakeTimers();
+    try {
+      const retryButton = screen.getByRole("button", { name: "重新检测" });
+      fireEvent.click(retryButton);
+
+      expect(detectOmp).toHaveBeenCalledTimes(1);
+      expect(retryButton).toBeDisabled();
+      expect(screen.getByTestId("redetect-progress")).toHaveClass("redetect-overlay");
+      expect(screen.getByTestId("redetect-progress").firstElementChild).toHaveClass("redetect-overlay__content");
+      expect(screen.getByText("/Users/username/.omp/agent")).toBeVisible();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1199); });
+      expect(retryButton).toBeDisabled();
+      expect(screen.getByTestId("redetect-progress")).toBeInTheDocument();
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(retryButton).toBeEnabled();
+      expect(screen.queryByTestId("redetect-progress")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps fast failed redetection feedback visible for the minimum duration", async () => {
+    const detectOmp = vi.fn(async () => { throw new Error("检测失败"); });
+    renderRoute("/setup", {
+      ...unavailableClient,
+      getStartupState: async () => readyState,
+      detectOmp,
+    });
+
+    expect(await screen.findByRole("heading", { name: "OMP 已找到" })).toBeVisible();
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "重新检测" }));
+
+      expect(screen.getByTestId("redetect-progress")).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1199); });
+      expect(screen.getByTestId("redetect-progress")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "OMP 已找到" })).toBeVisible();
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(screen.queryByTestId("redetect-progress")).not.toBeInTheDocument();
+      expect(screen.getAllByText("无法重新检测 OMP")[0]).toBeVisible();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a configuration-disabled enter button muted during redetection", async () => {
+    const user = userEvent.setup();
+    let resolveDetection!: (state: StartupState) => void;
+    const missingConfigurationState: StartupState = {
+      ...readyState,
+      targetAccess: { writable: true, modelsYml: "missing", configYml: "normal" },
+    };
+    const detectOmp = vi.fn(() => new Promise<StartupState>((resolve) => { resolveDetection = resolve; }));
+    renderRoute("/setup", {
+      ...unavailableClient,
+      getStartupState: async () => missingConfigurationState,
+      detectOmp,
     });
 
     expect(await screen.findByText("缺失")).toBeVisible();
-    expect(screen.getByRole("button", { name: "进入应用" })).toBeDisabled();
+    const enterButton = screen.getByRole("button", { name: "进入应用" });
+    expect(enterButton).toBeDisabled();
+    expect(enterButton).toHaveClass("disabled:opacity-50");
+
+    await user.click(screen.getByRole("button", { name: "重新检测" }));
+    expect(enterButton).toBeDisabled();
+    expect(enterButton).toHaveClass("disabled:opacity-50");
+    expect(enterButton).not.toHaveClass("disabled:opacity-100");
+
+    resolveDetection(missingConfigurationState);
+    await waitFor(() => expect(screen.getByRole("button", { name: "重新检测" })).toBeEnabled(), { timeout: 2000 });
+    expect(enterButton).toHaveClass("disabled:opacity-50");
   });
 
   it("shows and explicitly confirms the Target configuration change before switching OMP", async () => {
