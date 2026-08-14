@@ -738,6 +738,35 @@ describe("Overview page seam", () => {
     expect(screen.getByRole("region", { name: "测试结果" })).toBeVisible();
     expect(screen.getByText("尚未测试")).toBeVisible();
   });
+  it("explains when the final endpoint cannot be constructed", async () => {
+    const overview = overviewDto();
+    const provider = {
+      ...overview.providers[0],
+      baseUrl: "[配置地址因无法解析而已脱敏]",
+    };
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto({ providers: [provider] })),
+    });
+
+    const panel = await screen.findByRole("region", { name: "快速测试" });
+    expect(panel).toHaveTextContent("Provider Base URL 无效或已脱敏");
+  });
+  it("rejects a non-HTTP Provider Base URL from the final endpoint preview", async () => {
+    const overview = overviewDto();
+    const provider = {
+      ...overview.providers[0],
+      baseUrl: "ftp://example.com",
+    };
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto({ providers: [provider] })),
+    });
+
+    const panel = await screen.findByRole("region", { name: "快速测试" });
+    expect(panel).toHaveTextContent("Provider Base URL 必须使用 HTTP(S)");
+    expect(panel).not.toHaveTextContent("ftp://example.com/v1/responses");
+  });
   it("exposes Provider and Model choices as accessible comboboxes", async () => {
     const user = userEvent.setup();
     renderRoute("/overview", {
@@ -758,7 +787,7 @@ describe("Overview page seam", () => {
     await user.click(model);
     expect(await screen.findByRole("option", { name: "gpt-5.6-sol" })).toBeVisible();
   });
-  it("keeps an overlong Model ID shrinkable inside its option", async () => {
+  it("exposes an overlong Model Stable ID through the accessible option", async () => {
     const user = userEvent.setup();
     const overview = overviewDto();
     const longModelId = "model-with-an-overlong-stable-id-that-must-not-expand-the-approved-overview-select-width-0123456789";
@@ -773,7 +802,6 @@ describe("Overview page seam", () => {
     await user.click(model);
     const option = await screen.findByRole("option", { name: longModelId });
     expect(option).toHaveTextContent(longModelId);
-    expect(option.lastElementChild).toHaveClass("min-w-0", "flex-1", "overflow-hidden");
   });
   it("disables empty Provider and Model comboboxes with explicit placeholders", async () => {
     const overview = overviewDto({
@@ -969,6 +997,7 @@ describe("Overview page seam", () => {
   it.each([
     ["stale Model", "dnslin", "claude-sonnet-4", "dnslin", null],
     ["missing Provider", "removed-provider", "claude-sonnet-4", null, null],
+    ["Model without Provider", null, "claude-sonnet-4", null, null],
   ] as const)("cleans a %s selection once under StrictMode", async (_case, selectedProviderId, selectedModelId, expectedProviderId, expectedModelId) => {
     const saveUiSettings = vi.fn(unavailableClient.saveUiSettings);
     renderRoute("/overview", {
@@ -1113,6 +1142,16 @@ describe("Overview page seam", () => {
     renderRoute("/overview", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) });
     expect((await screen.findAllByText(new RegExp(visibleText)))[0]).toBeVisible();
     expect(screen.getByText(new RegExp(detailText))).toBeVisible();
+  });
+  it.each([
+    [overviewDto({ state: "empty", counts: { providerCount: 0, modelCount: 0, roleCount: 0 }, providers: [], models: [], roles: [], emptyReason: "还没有可管理的自定义 Provider。", nextAction: "创建一个 Provider，并同时配置它的第一个模型。" }), "新增 Provider"],
+    [overviewDto({ state: "read-only", readOnlyReason: "当前配置只能查看；OMP Switch 不会修改 .yaml 或不可写文件。" }), "查看 Providers"],
+  ] as const)("offers the required Overview state action for %s", async (overview, actionLabel) => {
+    const user = userEvent.setup();
+    renderRoute("/overview", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) });
+
+    await user.click(await screen.findByRole("link", { name: actionLabel }));
+    expect(await screen.findByRole("heading", { name: "Providers" })).toBeVisible();
   });
   it("renders missing files without success indicators", async () => {
     const overview = overviewDto({

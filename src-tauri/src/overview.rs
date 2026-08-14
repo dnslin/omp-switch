@@ -211,7 +211,10 @@ pub(crate) fn read_overview(
         .filter(|provider| provider.classification == ProviderClassification::Custom)
         .count();
     let model_count = models.len();
-    let role_count = roles.len();
+    let role_count = roles
+        .iter()
+        .filter(|role| role.status != "unconfigured")
+        .count();
     let editable_provider_count = providers
         .iter()
         .filter(|provider| provider.editable)
@@ -426,16 +429,18 @@ fn project_provider(
             models: Vec::new(),
         };
     };
-    let known = ["name", "baseUrl", "api", "apiKey", "models"];
-    let mut field_reason = unknown_reason(provider, &known);
+    let supported_fields = ["name", "baseUrl", "api", "apiKey", "models"];
+    let mut field_reason = unsupported_field_reason(provider, &supported_fields);
     let base_url_raw = mapping_get(provider, "baseUrl").and_then(scalar_string);
     let base_url_valid = base_url_raw.as_deref().is_some_and(valid_http_url);
     if !base_url_valid {
         field_reason.get_or_insert_with(|| "Provider 必须包含有效的 HTTP(S) Base URL。".to_owned());
     }
     let default_api_raw = mapping_get(provider, "api");
+    let default_api_is_configured =
+        default_api_raw.is_some_and(|value| !matches!(value, Value::Null));
     let default_api = supported_api(default_api_raw);
-    if default_api_raw.is_some() && default_api.is_none() {
+    if default_api_is_configured && default_api.is_none() {
         field_reason.get_or_insert_with(|| "Provider 使用了不支持的协议。".to_owned());
     }
     let (auth_mode, has_api_key, unsupported_credential) = credential_projection(provider);
@@ -552,7 +557,7 @@ fn project_model(
             read_only_reason: Some("Model definition 不是可识别的对象。".to_owned()),
         };
     };
-    let known = [
+    let supported_fields = [
         "id",
         "name",
         "api",
@@ -561,17 +566,24 @@ fn project_model(
         "contextWindow",
         "maxTokens",
     ];
-    let mut read_only_reason = unknown_reason(model, &known);
+    let mut read_only_reason = unsupported_field_reason(model, &supported_fields);
     let model_api_raw = mapping_get(model, "api");
+    let model_api_overrides_provider =
+        model_api_raw.is_some_and(|value| !matches!(value, Value::Null));
     let model_api = supported_api(model_api_raw);
-    if model_api_raw.is_some() && model_api.is_none() {
+    if model_api_overrides_provider && model_api.is_none() {
         read_only_reason.get_or_insert_with(|| "Model definition 使用了不支持的协议。".to_owned());
     }
-    let model_api_is_set = model_api.is_some();
-    let (effective_api, api_source) = match model_api.or_else(|| provider_api.map(str::to_owned)) {
-        Some(api) if model_api_is_set => (Some(api), Some("model".to_owned())),
-        Some(api) => (Some(api), Some("provider".to_owned())),
-        None => (None, None),
+    let (effective_api, api_source) = if model_api_overrides_provider {
+        match model_api {
+            Some(api) => (Some(api), Some("model".to_owned())),
+            None => (None, None),
+        }
+    } else {
+        match provider_api {
+            Some(api) => (Some(api.to_owned()), Some("provider".to_owned())),
+            None => (None, None),
+        }
     };
     let input = match mapping_get(model, "input") {
         Some(value) => string_list(value).unwrap_or_else(|| {
@@ -826,10 +838,10 @@ fn credential_projection(provider: &Mapping) -> (String, bool, bool) {
     };
     (auth_mode.to_owned(), has_api_key, unsupported_credential)
 }
-fn unknown_reason(map: &Mapping, known: &[&str]) -> Option<String> {
-    let known = known.iter().copied().collect::<HashSet<_>>();
+fn unsupported_field_reason(map: &Mapping, supported_fields: &[&str]) -> Option<String> {
+    let supported_fields = supported_fields.iter().copied().collect::<HashSet<_>>();
     if map.keys().any(|key| match key {
-        Value::String(key) => !known.contains(key.as_str()),
+        Value::String(key) => !supported_fields.contains(key.as_str()),
         _ => true,
     }) {
         Some("包含 OMP Switch 不支持的高级配置。".to_owned())

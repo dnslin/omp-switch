@@ -1577,6 +1577,160 @@ fn overview_reads_standard_omp_model_definition_lists() {
 }
 
 #[test]
+fn overview_does_not_inherit_provider_api_past_unsupported_model_override() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  custom:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: unsupported-override
+        name: Unsupported Override
+        api: unsupported-custom-api
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: custom/unsupported-override\n",
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    let model = &dto["models"][0];
+
+    assert_eq!(model["effectiveApi"], serde_json::Value::Null);
+    assert_eq!(model["apiSource"], serde_json::Value::Null);
+    assert_eq!(model["editable"], false);
+    assert_eq!(
+        model["readOnlyReason"],
+        "Model definition 使用了不支持的协议。"
+    );
+}
+
+#[test]
+fn overview_inherits_provider_api_for_null_model_api() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  custom:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: null-api
+        name: Null API
+        api: null
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: custom/null-api\n",
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    let model = &dto["models"][0];
+
+    assert_eq!(model["effectiveApi"], "openai-responses");
+    assert_eq!(model["apiSource"], "provider");
+    assert_eq!(model["complete"], true);
+    assert_eq!(model["editable"], true);
+    assert_eq!(model["readOnlyReason"], serde_json::Value::Null);
+}
+
+#[test]
+fn overview_allows_null_provider_api_with_supported_model_override() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  custom:
+    baseUrl: https://example.com/v1
+    api: null
+    models:
+      - id: model-override
+        name: Model Override
+        api: openai-responses
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: custom/model-override\n",
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    let provider = &dto["providers"][0];
+    let model = &dto["models"][0];
+
+    assert_eq!(dto["state"], "normal");
+    assert_eq!(provider["defaultApi"], serde_json::Value::Null);
+    assert_eq!(provider["classification"], "custom");
+    assert_eq!(provider["editable"], true);
+    assert_eq!(provider["readOnlyReason"], serde_json::Value::Null);
+    assert_eq!(model["effectiveApi"], "openai-responses");
+    assert_eq!(model["apiSource"], "model");
+    assert_eq!(model["complete"], true);
+    assert_eq!(model["editable"], true);
+}
+
+#[test]
+fn overview_excludes_unconfigured_roles_from_configured_role_count() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  custom:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: configured
+        name: Configured
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: custom/configured\n  empty: ''\n  unset: null\n",
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+
+    assert_eq!(dto["roles"].as_array().unwrap().len(), 3);
+    assert_eq!(dto["counts"]["roleCount"], 1);
+}
+
+#[test]
 fn overview_read_only_reason_identifies_unsupported_provider_shapes() {
     let app_data = tempdir().unwrap().keep();
     let target = app_data.join("agent");
