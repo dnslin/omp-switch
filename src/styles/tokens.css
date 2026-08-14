@@ -49,6 +49,5 @@
   --shadow-blur: 24px;
   --shadow-offset-y: 8px;
   --shadow-card: 0 var(--shadow-offset-y) var(--shadow-blur) var(--color-shadow);
-  --titlebar-height: 64px;
   --sidebar-width: 276px;
 }

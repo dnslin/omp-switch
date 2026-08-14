@@ -9,9 +9,12 @@
     "cssVariables": true
   },
   "aliases": {
-    "components": "./src/components",
-    "utils": "./src/lib/utils",
-    "ui": "./src/components/ui"
+    "components": "@/components",
+    "utils": "@/lib/utils",
+    "ui": "@/components/ui"
   },
-  "iconLibrary": "lucide"
+  "iconLibrary": "lucide",
+  "registries": {
+    "@dotmatrix": "https://dotmatrix.zzzzshawn.cloud/r/{name}.json"
+  }
 }

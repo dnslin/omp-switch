@@ -18,8 +18,12 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.145"
 tauri = { version = "2.11.5", features = [] }
 thiserror = "2.0.17"
+parking_lot = "0.12.5"
+which = "8.0.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.20", features = ["fmt"] }
+tauri-plugin-dialog = "2.4.2"
+atomic-write-file = "0.3.1"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
