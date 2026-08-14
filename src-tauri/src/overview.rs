@@ -246,7 +246,7 @@ pub(crate) fn read_overview(
     let read_only_reason = match state {
         OverviewState::ReadOnly => Some(read_only_reason(
             target,
-            editable_provider_count == 0,
+            &providers,
             catalog.is_none(),
             structure_invalid,
         )),
@@ -285,10 +285,11 @@ pub(crate) fn read_overview(
 
 fn read_only_reason(
     target: &TargetConfigurationDiscovery,
-    no_editable_provider: bool,
+    providers: &[ProviderSummaryDto],
     catalog_missing: bool,
     structure_invalid: bool,
 ) -> String {
+    let no_editable_provider = providers.iter().all(|provider| !provider.editable);
     if structure_invalid && target.status == TargetConfigurationStatus::Writable {
         return "当前配置业务结构无法识别，只能查看；OMP Switch 不会修改未知结构。".to_owned();
     }
@@ -299,8 +300,33 @@ fn read_only_reason(
         return "当前 OMP 版本没有匹配的 bundled Provider 清单，Provider 与模型管理暂时只读。"
             .to_owned();
     }
-    if no_editable_provider && target.status == TargetConfigurationStatus::Writable {
-        return "当前配置包含只读的 OMP 覆盖或高级 Provider。".to_owned();
+    if target.status == TargetConfigurationStatus::Writable && no_editable_provider {
+        let mut classifications = Vec::new();
+        if providers
+            .iter()
+            .any(|provider| provider.classification == ProviderClassification::BuiltInOverride)
+        {
+            classifications.push("OMP 内置 Provider/Model 覆盖");
+        }
+        if providers
+            .iter()
+            .any(|provider| provider.classification == ProviderClassification::Advanced)
+        {
+            classifications.push("高级 Provider");
+        }
+        if providers
+            .iter()
+            .any(|provider| provider.classification == ProviderClassification::Unsupported)
+        {
+            classifications.push("不支持的 Provider/Model 结构");
+        }
+        if !classifications.is_empty() {
+            return format!(
+                "当前配置包含以下只读 Provider 分类：{}。",
+                classifications.join("、")
+            );
+        }
+        return "当前配置包含无法编辑的 Provider，只能查看。".to_owned();
     }
     match target.status {
         TargetConfigurationStatus::ReadOnly => {
@@ -420,22 +446,24 @@ fn project_provider(
     let provider_fields_read_only = catalog.is_none()
         || catalog.is_some_and(|catalog| catalog.contains_provider(&provider_id))
         || field_reason.is_some();
-    let mut models = models_value
-        .map(|models| {
-            named_entries(models)
-                .into_iter()
-                .map(|(model_id, model_value)| {
-                    project_model(
-                        provider_id.clone(),
-                        model_id,
-                        model_value,
-                        default_api.as_deref(),
-                        provider_fields_read_only,
-                    )
-                })
-                .collect::<Vec<_>>()
+    let (entries, models_structure_valid) = models_value
+        .map(model_entries)
+        .unwrap_or((Vec::new(), false));
+    let mut models = entries
+        .into_iter()
+        .map(|(model_id, model_value)| {
+            project_model(
+                provider_id.clone(),
+                model_id,
+                model_value,
+                default_api.as_deref(),
+                provider_fields_read_only,
+            )
         })
-        .unwrap_or_default();
+        .collect::<Vec<_>>();
+    if !models_structure_valid {
+        field_reason.get_or_insert_with(|| "Model definition 列表结构无法识别。".to_owned());
+    }
     if models_value.is_none() || models.is_empty() {
         field_reason.get_or_insert_with(|| "Provider 没有非空模型定义。".to_owned());
     }
@@ -525,6 +553,7 @@ fn project_model(
         };
     };
     let known = [
+        "id",
         "name",
         "api",
         "input",
@@ -797,6 +826,17 @@ fn credential_projection(provider: &Mapping) -> (String, bool, bool) {
     };
     (auth_mode.to_owned(), has_api_key, unsupported_credential)
 }
+fn unknown_reason(map: &Mapping, known: &[&str]) -> Option<String> {
+    let known = known.iter().copied().collect::<HashSet<_>>();
+    if map.keys().any(|key| match key {
+        Value::String(key) => !known.contains(key.as_str()),
+        _ => true,
+    }) {
+        Some("包含 OMP Switch 不支持的高级配置。".to_owned())
+    } else {
+        None
+    }
+}
 
 fn supported_api(value: Option<&Value>) -> Option<String> {
     let value = value.and_then(scalar_string)?;
@@ -809,16 +849,29 @@ fn supported_api(value: Option<&Value>) -> Option<String> {
     }
 }
 
-fn unknown_reason(map: &Mapping, known: &[&str]) -> Option<String> {
-    let known = known.iter().copied().collect::<HashSet<_>>();
-    if map.keys().any(|key| match key {
-        Value::String(key) => !known.contains(key.as_str()),
-        _ => true,
-    }) {
-        Some("包含 OMP Switch 不支持的高级配置。".to_owned())
-    } else {
-        None
-    }
+fn model_entries(value: &Value) -> (Vec<(String, &Value)>, bool) {
+    let Value::Sequence(values) = value else {
+        return (Vec::new(), false);
+    };
+    let mut structure_valid = true;
+    let entries = values
+        .iter()
+        .filter_map(|value| {
+            let Some(model) = mapping(value) else {
+                structure_valid = false;
+                return None;
+            };
+            let Some(id) = mapping_get(model, "id")
+                .and_then(scalar_string)
+                .filter(|id| !id.trim().is_empty())
+            else {
+                structure_valid = false;
+                return None;
+            };
+            Some((id, value))
+        })
+        .collect();
+    (entries, structure_valid)
 }
 
 fn named_entries(value: &Value) -> Vec<(String, &Value)> {

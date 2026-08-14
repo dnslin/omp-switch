@@ -182,7 +182,7 @@ modelRoles: {}
 - OMP Switch 不创建新的链接。
 
 实现状态（issue #5）：Rust 启动状态现已返回 Target configuration 的规范路径、真实目标、文件分类、创建清单、警告和 YAML 错误位置；React 首次设置页据此展示创建确认、`.yaml` 只读、旧 JSON 迁移、解析错误和不安全目标状态。创建前会重新比对用户确认的文件清单和现有父路径真实目标；最小配置通过同目录临时文件验证、无覆盖提交、失败回滚和重新发现完成，回滚不完整时会明确报告残留风险。本工单不读取配置业务投影，也不提供编辑。
-实现状态（issue #6）：Rust 概览读取保留 `models.yml` 与 `config.yml` 的完整 YAML 树、原始 Hash、真实目标路径和安全领域投影；未知根路径、Provider/Model 未知字段及其他配置路径留在后端快照，不进入 DTO。React 概览通过类型化 Tauri IPC 呈现统计、文件同步状态和快速测试摘要，Direct API Key 仅以存在性元数据存在于 DTO/前端状态；Loading、Empty、Error、Normal、Read-only 共用 `.pen` 骨架和 token。
+实现状态（issue #6）：Rust 概览读取保留 `models.yml` 与 `config.yml` 的完整 YAML 树、原始 Hash、真实目标路径和安全领域投影；未知根路径、Provider/Model 未知字段及其他配置路径留在后端快照，不进入 DTO。React 概览通过类型化 Tauri IPC 呈现统计、文件同步状态和快速测试摘要，Direct API Key 仅以存在性元数据存在于 DTO/前端状态；Loading、Empty、Error、Normal、Read-only 共用 `.pen` 骨架和 token。Provider/Model 选择按所属 Provider 内完整 pair hydration、验证和持久化；失效选择精确清理，快速变更串行保存完整 UI settings，读取失败时保持会话内选择但不写盘。安全投影中的只读和不完整条目仍可查看摘要，模型测试继续禁用。
 
 
 ## 6. 安全结构化写入

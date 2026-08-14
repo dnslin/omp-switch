@@ -1,10 +1,12 @@
-import { CheckCircle2, ChevronDown, CircleAlert, CircleCheck, File, Folder, Info, LayoutGrid, Server, Settings, SquareTerminal, Users } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { CheckCircle2, CircleAlert, CircleCheck, File, Folder, Info, LayoutGrid, Server, Settings, SquareTerminal, Users } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useNavigate } from "react-router";
 import { toast, Toaster } from "sonner";
 import { RedetectionLoader } from "../components/redetection-loader";
 import { Button, Card, NavigationItem, PageTitle, StatusIndicator } from "../components/ui";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { asAppError, useTauriClient, type ConfigurationFileStatus, type OverviewDto, type OverviewModel, type OverviewProvider, type StartupState, type TargetConfigurationStatus } from "../lib/tauri-client";
+import { useUiSettings } from "../store/ui-settings";
 
 
 const pages = [
@@ -377,9 +379,54 @@ function overviewShellStatus(data: OverviewDto): ShellStatus {
   };
 }
 
+type OverviewSelection = {
+  providerId: string | null;
+  modelId: string | null;
+  staleSavedSelection: boolean;
+};
+
+function preferredOverviewModel(models: readonly OverviewModel[]): OverviewModel | null {
+  return models.find((model) => model.complete && model.editable)
+    ?? models.find((model) => model.editable)
+    ?? models.find((model) => model.complete)
+    ?? models[0]
+    ?? null;
+}
+
+function defaultOverviewSelection(data: OverviewDto): OverviewSelection {
+  const preferredModel = preferredOverviewModel(data.models);
+  if (preferredModel) {
+    const provider = data.providers.find((candidate) => candidate.id === preferredModel.providerId);
+    const model = provider?.models.find((candidate) => candidate.id === preferredModel.id);
+    if (provider && model) {
+      return { providerId: provider.id, modelId: model.id, staleSavedSelection: false };
+    }
+  }
+  return { providerId: data.providers[0]?.id ?? null, modelId: null, staleSavedSelection: false };
+}
+
+function resolveInitialOverviewSelection(
+  data: OverviewDto,
+  hydrationState: "loading" | "ready" | "error",
+  selectedProviderId: string | null,
+  selectedModelId: string | null,
+): OverviewSelection {
+  if (hydrationState !== "ready") return defaultOverviewSelection(data);
+  if (selectedProviderId === null && selectedModelId === null) return defaultOverviewSelection(data);
+
+  const provider = data.providers.find((candidate) => candidate.id === selectedProviderId);
+  if (!provider) return { providerId: null, modelId: null, staleSavedSelection: true };
+  if (selectedModelId === null) return { providerId: provider.id, modelId: null, staleSavedSelection: false };
+
+  const model = provider.models.find((candidate) => candidate.id === selectedModelId);
+  if (!model) return { providerId: provider.id, modelId: null, staleSavedSelection: true };
+  return { providerId: provider.id, modelId: model.id, staleSavedSelection: false };
+}
+
 function OverviewPage() {
   const client = useTauriClient();
   const navigate = useNavigate();
+  const hydrationState = useUiSettings((state) => state.hydrationState);
   const [data, setData] = useState<OverviewDto | null>(null);
   const [startupState, setStartupState] = useState<StartupState | null>(null);
   const [error, setError] = useState<ReturnType<typeof asAppError> | null>(null);
@@ -424,13 +471,14 @@ function OverviewPage() {
     return () => { requestId.current += 1; };
   }, [client]);
 
-  const pageClass = loading ? "overview-page--loading" : error || !data ? "overview-page--error" : `overview-page--${data.state}`;
+  const pageLoading = loading || hydrationState === "loading";
+  const pageClass = pageLoading ? "overview-page--loading" : error || !data ? "overview-page--error" : `overview-page--${data.state}`;
   const shellStatus = data ? overviewShellStatus(data) : startupState ? startupShellStatus(startupState) : undefined;
   return (
     <MainShell status={shellStatus}>
-      <div className={`overview-page ${pageClass}`} aria-busy={loading}>
+      <div className={`overview-page ${pageClass}`} aria-busy={pageLoading}>
         <OverviewPageHeader />
-        {loading ? <OverviewLoadingBody /> : error ? <OverviewErrorBody error={error} onReload={reload} /> : data ? <OverviewContentBody data={data} /> : <OverviewErrorBody error={{ message: "OMP 没有返回概览数据。", action: "请重新读取；如果问题持续，请查看脱敏日志。" }} onReload={reload} />}
+        {pageLoading ? <OverviewLoadingBody /> : error ? <OverviewErrorBody error={error} onReload={reload} /> : data ? <OverviewContentBody data={data} /> : <OverviewErrorBody error={{ message: "OMP 没有返回概览数据。", action: "请重新读取；如果问题持续，请查看脱敏日志。" }} onReload={reload} />}
       </div>
     </MainShell>
   );
@@ -472,12 +520,58 @@ function OverviewErrorBody({ error, onReload }: { error: { message: string; acti
 }
 
 function OverviewContentBody({ data }: { data: OverviewDto }) {
-  const selectedModel = data.models.find((model) => model.complete && model.editable)
-    ?? data.models.find((model) => model.editable)
-    ?? data.models.find((model) => model.complete)
-    ?? data.models[0]
-    ?? null;
-  const selectedProvider = selectedModel ? data.providers.find((provider) => provider.id === selectedModel.providerId) ?? null : data.providers[0] ?? null;
+  const client = useTauriClient();
+  const hydrationState = useUiSettings((state) => state.hydrationState);
+  const storedProviderId = useUiSettings((state) => state.selectedProviderId);
+  const storedModelId = useUiSettings((state) => state.selectedModelId);
+  const setStoredSelection = useUiSettings((state) => state.setSelection);
+  const saveQueue = useRef<Promise<void>>(Promise.resolve());
+  const staleSavedSelectionHandled = useRef(false);
+  const [initialSelection] = useState(() => resolveInitialOverviewSelection(data, hydrationState, storedProviderId, storedModelId));
+  const [selection, setSelection] = useState(() => ({ providerId: initialSelection.providerId, modelId: initialSelection.modelId }));
+  const enqueueSelectionSave = useCallback((providerId: string | null, modelId: string | null) => {
+    const { theme, costNoticeAccepted } = useUiSettings.getState();
+    const settings = { theme, selectedProviderId: providerId, selectedModelId: modelId, costNoticeAccepted };
+    saveQueue.current = saveQueue.current.catch(() => undefined).then(async () => {
+      try {
+        await client.saveUiSettings(settings);
+      } catch (cause: unknown) {
+        const appError = asAppError(cause, "无法保存快速测试选择");
+        toast.error(appError.message, { description: appError.action });
+      }
+    });
+  }, [client]);
+
+  useEffect(() => {
+    setStoredSelection(initialSelection.providerId, initialSelection.modelId);
+    if (!initialSelection.staleSavedSelection || staleSavedSelectionHandled.current) return;
+    staleSavedSelectionHandled.current = true;
+    enqueueSelectionSave(initialSelection.providerId, initialSelection.modelId);
+    toast.warning("之前选择的模型已不存在，请重新选择。");
+  }, [enqueueSelectionSave, initialSelection.modelId, initialSelection.providerId, initialSelection.staleSavedSelection, setStoredSelection]);
+
+  const selectedProvider = data.providers.find((provider) => provider.id === selection.providerId) ?? null;
+  const selectedModel = selectedProvider?.models.find((model) => model.id === selection.modelId) ?? null;
+
+  function handleProviderChange(providerId: string) {
+    const nextProvider = data.providers.find((provider) => provider.id === providerId);
+    if (!nextProvider) return;
+    const retainedModel = nextProvider.models.find((model) => model.id === selection.modelId) ?? null;
+    const nextModelId = retainedModel?.id ?? null;
+    if (selection.providerId === nextProvider.id && selection.modelId === nextModelId) return;
+    setSelection({ providerId: nextProvider.id, modelId: nextModelId });
+    setStoredSelection(nextProvider.id, nextModelId);
+    if (hydrationState === "ready") enqueueSelectionSave(nextProvider.id, nextModelId);
+  }
+
+  function handleModelChange(modelId: string) {
+    if (!selectedProvider) return;
+    const nextModel = selectedProvider.models.find((model) => model.id === modelId);
+    if (!nextModel || selection.modelId === nextModel.id) return;
+    setSelection({ providerId: selectedProvider.id, modelId: nextModel.id });
+    setStoredSelection(selectedProvider.id, nextModel.id);
+    if (hydrationState === "ready") enqueueSelectionSave(selectedProvider.id, nextModel.id);
+  }
   return (
     <>
       <OverviewSyncStrip data={data} />
@@ -485,7 +579,7 @@ function OverviewContentBody({ data }: { data: OverviewDto }) {
       <OverviewMetrics data={data} />
       {data.state === "empty" || data.state === "read-only" ? <OverviewStateBanner data={data} /> : null}
       <div className="overview-test-area">
-        <QuickTestPanel provider={selectedProvider} model={selectedModel} />
+        <QuickTestPanel providers={data.providers} provider={selectedProvider} model={selectedModel} onProviderChange={handleProviderChange} onModelChange={handleModelChange} />
         <TestResultPanel />
       </div>
     </>
@@ -551,15 +645,43 @@ function OverviewStateBanner({ data }: { data: OverviewDto }) {
   );
 }
 
-function QuickTestPanel({ provider, model }: { provider: OverviewProvider | null; model: OverviewModel | null }) {
+function QuickTestPanel({
+  providers,
+  provider,
+  model,
+  onProviderChange,
+  onModelChange,
+}: {
+  providers: readonly OverviewProvider[];
+  provider: OverviewProvider | null;
+  model: OverviewModel | null;
+  onProviderChange(value: string): void;
+  onModelChange(value: string): void;
+}) {
   const finalAddress = provider && model ? modelEndpoint(provider, model) : "—";
   const protocol = model?.effectiveApi ? `${model.effectiveApi}  ·  ${model.apiSource === "provider" ? "Provider 默认值" : "模型指定"}` : "—";
-  const capabilities = model?.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : input).join("  ·  ") || "—";
+  const capabilities = model
+    ? [...model.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : input), ...(model.reasoning === true ? ["Reasoning"] : [])].join("  ·  ") || "—"
+    : "—";
   return (
     <section className="overview-panel overview-quick-test" aria-label="快速测试">
       <h2>快速测试</h2>
-      <OverviewField label="Provider" value={provider?.id ?? "暂无 Provider"} select />
-      <OverviewField label="模型" value={model?.id ?? "暂无模型"} select />
+      <OverviewSelectField
+        label="Provider"
+        value={provider?.id ?? null}
+        placeholder={providers.length === 0 ? "暂无 Provider" : "请选择 Provider"}
+        options={providers.map((option) => ({ value: option.id, label: option.id }))}
+        disabled={providers.length === 0}
+        onValueChange={onProviderChange}
+      />
+      <OverviewSelectField
+        label="模型"
+        value={model?.id ?? null}
+        placeholder={!provider || provider.models.length === 0 ? "暂无模型" : "请选择模型"}
+        options={provider?.models.map((option) => ({ value: option.id, label: option.id })) ?? []}
+        disabled={!provider || provider.models.length === 0}
+        onValueChange={onModelChange}
+      />
       <OverviewField label="有效协议" value={protocol} />
       <OverviewField label="最终地址" value={finalAddress} mono />
       <OverviewField label="能力" value={capabilities} />
@@ -569,13 +691,49 @@ function QuickTestPanel({ provider, model }: { provider: OverviewProvider | null
   );
 }
 
-function OverviewField({ label, value, select = false, mono = false }: { label: string; value: string; select?: boolean; mono?: boolean }) {
+function OverviewSelectField({
+  label,
+  value,
+  placeholder,
+  options,
+  disabled,
+  onValueChange,
+}: {
+  label: string;
+  value: string | null;
+  placeholder: string;
+  options: readonly { value: string; label: string }[];
+  disabled: boolean;
+  onValueChange(value: string): void;
+}) {
+  return (
+    <div className="overview-field">
+      <span>{label}</span>
+      <Select value={value ?? ""} onValueChange={onValueChange} disabled={disabled}>
+        <SelectTrigger
+          aria-label={label}
+          className="h-10 min-h-10 w-full min-w-0 px-3.5 text-base text-[var(--color-text-primary)] data-[placeholder]:text-[var(--color-text-disabled)] disabled:cursor-not-allowed disabled:opacity-100 disabled:text-[var(--color-text-disabled)] [&>span]:min-w-0 [&>span]:truncate"
+        >
+          <SelectValue placeholder={placeholder} />
+        </SelectTrigger>
+        <SelectContent position="popper" sideOffset={4} className="max-h-80 w-[var(--radix-select-trigger-width)] overflow-y-auto">
+          {options.map((option) => (
+            <SelectItem key={option.value} value={option.value} className="min-w-0 text-[var(--color-text-primary)]">
+              <span className="block min-w-0 truncate">{option.label}</span>
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+function OverviewField({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
     <div className="overview-field">
       <span>{label}</span>
       <div className={`overview-field-control ${mono ? "overview-field-control--mono" : ""}`}>
         <span>{value}</span>
-        {select ? <ChevronDown aria-hidden="true" /> : null}
       </div>
     </div>
   );
@@ -722,13 +880,23 @@ function NotFoundPage() {
 
 export function App() {
   const client = useTauriClient();
+  const beginHydration = useUiSettings((state) => state.beginHydration);
+  const hydrate = useUiSettings((state) => state.hydrate);
+  const failHydration = useUiSettings((state) => state.failHydration);
 
   useEffect(() => {
-    void client.getUiSettings().catch((error: unknown) => {
+    let active = true;
+    beginHydration();
+    void client.getUiSettings().then((settings) => {
+      if (active) hydrate(settings);
+    }).catch((error: unknown) => {
+      if (!active) return;
+      failHydration();
       const appError = asAppError(error, "无法读取界面状态");
       toast.error(appError.message, { description: appError.action });
     });
-  }, [client]);
+    return () => { active = false; };
+  }, [beginHydration, client, failHydration, hydrate]);
 
   return (
     <div className="window">

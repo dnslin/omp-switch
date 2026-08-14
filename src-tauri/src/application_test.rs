@@ -391,7 +391,7 @@ fn malformed_provider_and_role_roots_are_read_only() {
         ("providers-sequence", "providers: []\n", "modelRoles: {}\n"),
         (
             "providers-non-string-key",
-            "providers:\n  42:\n    models: {}\n",
+            "providers:\n  42:\n    models: []\n",
             "modelRoles: {}\n",
         ),
         ("roles-missing", "providers: {}\n", "settings: {}\n"),
@@ -1393,7 +1393,7 @@ fn overview_reads_complete_trees_hashes_and_redacts_direct_api_keys() {
     providerUnknown:
       nested: preserve-me
     models:
-      gpt-5.6-sol:
+      - id: gpt-5.6-sol
         name: Sol
         api: openai-responses
         reasoning: true
@@ -1402,36 +1402,36 @@ fn overview_reads_complete_trees_hashes_and_redacts_direct_api_keys() {
         maxTokens: 32768
         modelUnknown:
           nested: preserve-model
-      "gpt-5.6-sol:ultra":
+      - id: "gpt-5.6-sol:ultra"
         name: Ultra Model
         api: openai-responses
         input: [text]
         contextWindow: 356000
         maxTokens: 32768
-      "gpt-5.6-sol:turbo":
+      - id: "gpt-5.6-sol:turbo"
         name: Turbo Model
         api: openai-responses
         input: [text]
         contextWindow: 356000
         maxTokens: 32768
-      "gpt-5.6-sol/high/extra":
+      - id: gpt-5.6-sol/high/extra
         name: Slash Model
         api: openai-responses
         input: [text]
         contextWindow: 356000
         maxTokens: 32768
-      incomplete:
+      - id: incomplete
         name: Incomplete
         api: openai-responses
         input: [text]
   other:
     baseUrl: https://example.com/v1?key=query-secret&region=us
     models:
-      mystery:
+      - id: mystery
         name: Mystery
   special:
     baseUrl: https:user:no-slashes-secret@example.com/v1
-    models: {}
+    models: []
 unrecognizedRoot:
   nested: untouched
 "#;
@@ -1535,6 +1535,122 @@ otherSettings:
 }
 
 #[test]
+fn overview_reads_standard_omp_model_definition_lists() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  standard:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: standard-model
+        name: Standard Model
+        api: openai-responses
+        reasoning: true
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: standard/standard-model\n",
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+
+    assert_eq!(dto["state"], "normal");
+    assert_eq!(dto["counts"]["providerCount"], 1);
+    assert_eq!(dto["counts"]["modelCount"], 1);
+    assert_eq!(dto["providers"][0]["classification"], "custom");
+    assert_eq!(dto["providers"][0]["editable"], true);
+    assert_eq!(dto["providers"][0]["modelCount"], 1);
+    assert_eq!(dto["models"][0]["id"], "standard-model");
+    assert_eq!(dto["models"][0]["complete"], true);
+    assert_eq!(dto["models"][0]["editable"], true);
+}
+
+#[test]
+fn overview_read_only_reason_identifies_unsupported_provider_shapes() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        "providers:\n  unsupported:\n    baseUrl: ftp://example.com\n    models:\n      - id: local\n        name: Local\n        api: openai-responses\n        input: [text]\n        contextWindow: 100\n        maxTokens: 10\n",
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+
+    assert_eq!(dto["state"], "read-only");
+    assert_eq!(dto["providers"][0]["classification"], "unsupported");
+    assert_eq!(
+        dto["readOnlyReason"],
+        "当前配置包含以下只读 Provider 分类：不支持的 Provider/Model 结构。"
+    );
+}
+
+#[test]
+fn overview_read_only_reason_enumerates_mixed_provider_classifications() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  openai:
+    models:
+      - id: gpt-5.6-sol
+        name: Bundled
+        api: openai-responses
+        input: [text]
+        contextWindow: 100
+        maxTokens: 10
+  advanced:
+    baseUrl: https://example.com/v1
+    headers:
+      x-test: value
+    models:
+      - id: advanced-model
+        name: Advanced
+        api: openai-responses
+        input: [text]
+        contextWindow: 100
+        maxTokens: 10
+  unsupported:
+    baseUrl: ftp://example.com
+    models:
+      - id: unsupported-model
+        name: Unsupported
+        api: openai-responses
+        input: [text]
+        contextWindow: 100
+        maxTokens: 10
+"#,
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+
+    assert_eq!(dto["state"], "read-only");
+    assert_eq!(
+        dto["readOnlyReason"],
+        "当前配置包含以下只读 Provider 分类：OMP 内置 Provider/Model 覆盖、高级 Provider、不支持的 Provider/Model 结构。"
+    );
+}
+
+#[test]
 fn overview_counts_only_custom_providers_and_marks_overrides() {
     let app_data = tempdir().unwrap().keep();
     let target = app_data.join("agent");
@@ -1544,7 +1660,7 @@ fn overview_counts_only_custom_providers_and_marks_overrides() {
         r#"providers:
   openai:
     models:
-      gpt-5.6-sol:
+      - id: gpt-5.6-sol
         name: Bundled
         api: openai-responses
         input: [text]
@@ -1552,7 +1668,7 @@ fn overview_counts_only_custom_providers_and_marks_overrides() {
         maxTokens: 10
   missing:
     models:
-      local:
+      - id: local
         name: Missing URL
         api: openai-responses
         input: [text]
@@ -1561,7 +1677,7 @@ fn overview_counts_only_custom_providers_and_marks_overrides() {
   malformed:
     baseUrl: ftp://example.com
     models:
-      local:
+      - id: local
         name: Malformed URL
         api: openai-responses
         input: [text]
@@ -1570,18 +1686,18 @@ fn overview_counts_only_custom_providers_and_marks_overrides() {
   nonString:
     baseUrl: 42
     models:
-      local:
+      - id: local
         name: Non-string URL
         api: openai-responses
         input: [text]
         contextWindow: 100
         maxTokens: 10
   empty:
-    models: {}
+    models: []
   custom:
     baseUrl: https://example.com
     models:
-      local:
+      - id: local
         name: Local
         api: openai-responses
         input: [text]

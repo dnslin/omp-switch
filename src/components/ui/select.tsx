@@ -42,7 +42,9 @@ export const SelectItem = React.forwardRef<
 >(({ className, children, ...props }, ref) => (
   <SelectPrimitive.Item ref={ref} className={cn("relative flex cursor-default select-none items-center rounded-[var(--radius-sm)] py-2 pl-8 pr-3 outline-none focus:bg-[var(--color-bg-selected)]", className)} {...props}>
     <span className="absolute left-2"><SelectPrimitive.ItemIndicator><Check aria-hidden="true" size={16} /></SelectPrimitive.ItemIndicator></span>
-    <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+    <SelectPrimitive.ItemText asChild>
+      <span className="min-w-0 flex-1 overflow-hidden">{children}</span>
+    </SelectPrimitive.ItemText>
   </SelectPrimitive.Item>
 ));
 SelectItem.displayName = SelectPrimitive.Item.displayName;
