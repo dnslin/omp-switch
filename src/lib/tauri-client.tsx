@@ -36,10 +36,13 @@ export type TargetConfigurationDiscovery = {
   writable: boolean;
   models: ConfigurationFileDiscovery;
   config: ConfigurationFileDiscovery;
+  recoveryNotice: string | null;
   createPaths: string[];
+  discoveryToken: string;
   warnings: string[];
   issue: ConfigurationIssue | null;
 };
+export type TargetInitializationExpectation = Pick<TargetConfigurationDiscovery, "createPaths" | "discoveryToken">;
 export type StartupState =
   | { kind: "detecting" }
   | { kind: "omp-unavailable"; message: string }
@@ -92,7 +95,7 @@ export interface TauriClient {
   selectOmpExecutable(): Promise<string | null>;
   validateSelectedOmp(executablePath: string): Promise<StartupState>;
   confirmSelectedOmp(executablePath: string): Promise<void>;
-  initializeTargetConfiguration(executablePath: string, expectedCreatePaths: string[]): Promise<StartupState>;
+  initializeTargetConfiguration(executablePath: string, expectation: TargetInitializationExpectation): Promise<StartupState>;
   openTargetConfigurationDirectory(executablePath: string): Promise<void>;
   getUiSettings(): Promise<UiSettings>;
   saveUiSettings(settings: UiSettingsUpdate): Promise<UiSettings>;
@@ -107,7 +110,7 @@ export const tauriClient: TauriClient = {
   },
   validateSelectedOmp: (executablePath) => invoke<StartupState>("validate_selected_omp", { executablePath }),
   confirmSelectedOmp: async (executablePath) => { await invoke("confirm_selected_omp", { executablePath }); },
-  initializeTargetConfiguration: (executablePath, expectedCreatePaths) => invoke<StartupState>("initialize_target_configuration", { executablePath, expectedCreatePaths }),
+  initializeTargetConfiguration: (executablePath, expectation) => invoke<StartupState>("initialize_target_configuration", { executablePath, expectation }),
   openTargetConfigurationDirectory: async (executablePath) => { await invoke("open_target_configuration_directory", { executablePath }); },
   getUiSettings: () => invoke<UiSettings>("get_ui_settings"),
   saveUiSettings: (settings) => invoke<UiSettings>("save_ui_settings", { settings }),

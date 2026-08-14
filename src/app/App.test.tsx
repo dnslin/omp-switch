@@ -23,7 +23,9 @@ function targetConfiguration(
     writable: true,
     models: file("models.yml"),
     config: file("config.yml"),
+    recoveryNotice: null,
     createPaths: [],
+    discoveryToken: `discovery:${path}`,
     warnings: [],
     issue: null,
     ...overrides,
@@ -81,6 +83,16 @@ describe("React page seam", () => {
     expect(detectOmp).toHaveBeenCalledTimes(1);
     expect((await screen.findAllByText("仍未找到 OMP"))[0]).toBeVisible();
   });
+  it("leaves startup detection failure actionable", async () => {
+    renderRoute("/setup", {
+      ...unavailableClient,
+      getStartupState: async () => { throw new Error("invoke failed"); },
+    });
+
+    expect(await screen.findByRole("heading", { name: "设置 OMP" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "自动检测" })).toBeEnabled();
+  });
+
 
   it.each([
     [{ kind: "detecting" } as const, "正在检测 OMP…"],
@@ -113,6 +125,21 @@ describe("React page seam", () => {
     await user.click(screen.getByRole("button", { name: "进入应用" }));
     expect(await screen.findByRole("heading", { name: "概览" })).toBeVisible();
   });
+  it("shows an interrupted initialization recovery result", async () => {
+    renderRoute("/setup", {
+      ...unavailableClient,
+      getStartupState: async () => ({
+        ...readyState,
+        targetConfiguration: targetConfiguration(undefined, {
+          recoveryNotice: "已回滚上次中断的 Target configuration 初始化；未保留部分创建结果。",
+        }),
+      }),
+    });
+
+    expect(await screen.findByText("已恢复上次中断操作")).toBeVisible();
+    expect(screen.getByText(/已回滚上次中断/)).toBeVisible();
+  });
+
 
   it("allows selecting a replacement while the current OMP is ready", async () => {
     const user = userEvent.setup();
@@ -276,7 +303,10 @@ describe("React page seam", () => {
     expect(screen.queryByRole("button", { name: "进入应用" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "创建" }));
-    expect(initializeTargetConfiguration).toHaveBeenCalledWith("/usr/local/bin/omp", creationState.targetConfiguration.createPaths);
+    expect(initializeTargetConfiguration).toHaveBeenCalledWith("/usr/local/bin/omp", {
+      createPaths: creationState.targetConfiguration.createPaths,
+      discoveryToken: creationState.targetConfiguration.discoveryToken,
+    });
     expect(await screen.findByRole("heading", { name: "OMP 已找到" })).toBeVisible();
     expect(screen.getByRole("button", { name: "进入应用" })).toBeEnabled();
   });
@@ -305,9 +335,64 @@ describe("React page seam", () => {
 
     await user.click(await screen.findByRole("button", { name: "确认切换并创建" }));
 
-    expect(initializeTargetConfiguration).toHaveBeenCalledWith("/usr/local/bin/omp", creationState.targetConfiguration.createPaths);
+    expect(initializeTargetConfiguration).toHaveBeenCalledWith("/usr/local/bin/omp", {
+      createPaths: creationState.targetConfiguration.createPaths,
+      discoveryToken: creationState.targetConfiguration.discoveryToken,
+    });
     expect(await screen.findByRole("heading", { name: "OMP 已找到" })).toBeVisible();
   });
+  it("refreshes the pending OMP after initialization fails", async () => {
+    const user = userEvent.setup();
+    const creationState: StartupState = {
+      ...readyState,
+      requiresConfirmation: true,
+      previousTargetConfiguration: "/Users/username/.omp/old-agent",
+      targetConfiguration: targetConfiguration("/Users/username/.omp/new-agent", {
+        status: "creation-required",
+        writable: false,
+        resolvedPath: null,
+        models: { canonicalPath: "/Users/username/.omp/new-agent/models.yml", resolvedPath: null, status: "missing" },
+        config: { canonicalPath: "/Users/username/.omp/new-agent/config.yml", resolvedPath: null, status: "missing" },
+        createPaths: ["/Users/username/.omp/new-agent/models.yml", "/Users/username/.omp/new-agent/config.yml"],
+      }),
+    };
+    const initializeTargetConfiguration = vi.fn(async () => {
+      throw { code: "target-initialization-failed", message: "创建失败", action: "原 OMP 选择已恢复" };
+    });
+    const validateSelectedOmp = vi.fn(async () => creationState);
+    renderRoute("/setup", {
+      ...unavailableClient,
+      getStartupState: async () => creationState,
+      initializeTargetConfiguration,
+      validateSelectedOmp,
+    });
+
+    await user.click(await screen.findByRole("button", { name: "确认切换并创建" }));
+
+    expect(validateSelectedOmp).toHaveBeenCalledWith("/usr/local/bin/omp");
+    expect(await screen.findByRole("heading", { name: "需要创建 OMP 配置" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "确认切换并创建" })).toBeEnabled();
+  });
+
+  it("offers creation instead of overview when alternate yaml is mixed with a missing canonical file", async () => {
+    const mixedState: StartupState = {
+      ...readyState,
+      targetConfiguration: targetConfiguration(undefined, {
+        status: "creation-required",
+        writable: false,
+        models: { ...readyState.targetConfiguration.models, status: "alternate-only", resolvedPath: "/Users/username/.omp/agent/models.yaml" },
+        config: { ...readyState.targetConfiguration.config, status: "missing", resolvedPath: null },
+        createPaths: [readyState.targetConfiguration.config.canonicalPath],
+      }),
+    };
+
+    renderRoute("/setup", { ...unavailableClient, getStartupState: async () => mixedState });
+
+    expect(await screen.findByRole("heading", { name: "需要创建 OMP 配置" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "创建" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /进入/ })).not.toBeInTheDocument();
+  });
+
 
   it("enters read-only mode for yaml-only configuration without creating yml", async () => {
     const user = userEvent.setup();
