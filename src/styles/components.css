@@ -1,5 +1,18 @@
 button, input { font: inherit; }
 button { touch-action: manipulation; }
+.app-button { border-radius: var(--radius-md); display: inline-flex; align-items: center; justify-content: center; white-space: nowrap; padding: 0 20px; font-weight: var(--font-weight-medium); transition: background-color 160ms ease, border-color 160ms ease, opacity 160ms ease; }
+.app-button--default { min-height: var(--control-height); font-size: var(--font-size-body); }
+.app-button--setup { min-height: 52px; padding-inline: 32px; font-size: 17px; }
+.app-button--primary { border: 1px solid var(--color-transparent); background: var(--color-primary); color: #ffffff; }
+.app-button--primary:hover:not(:disabled) { background: var(--color-primary-hover); }
+.app-button--secondary { border: 1px solid var(--color-border); background: var(--color-bg-surface); color: var(--color-text-primary); font-weight: var(--font-weight-regular); }
+.app-button--secondary:hover:not(:disabled) { border-color: var(--color-border-strong); }
+.app-button:focus-visible { outline: 3px solid var(--color-primary-soft); outline-offset: 2px; }
+.app-button:disabled { pointer-events: none; cursor: default; }
+.app-button--disabled-muted:disabled { opacity: 0.5; }
+.app-button--disabled-stable:disabled { opacity: 1; }
+.app-button--primary.app-button--disabled-stable:disabled { background: var(--color-primary); }
+.app-button--secondary.app-button--disabled-stable:disabled { border-color: var(--color-border); }
 .input-shell, .select { min-height: var(--control-height); border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-bg-surface); display: flex; align-items: center; gap: 10px; padding: 0 14px; color: var(--color-text-secondary); }
 .input-shell input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--color-text-primary); }
 .status-indicator--neutral .status-dot { background: var(--color-text-disabled); }

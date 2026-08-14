@@ -21,6 +21,8 @@ MVP → PRD → Flow
 - 范围发生变化时，三份文档必须同步修改。
 - 批准的视觉权威文件为 `designs/omp-switch.pen`。实现必须按该文件中的 Foundations、Components 和对应页面画板 1:1 还原；Flow 负责交互约束，不替代视觉稿。
 
+Issue #5 的 Setup 页面存在一项经产品负责人确认的明确例外：保留 `.pen` Foundations、Components、检测表格、状态行、间距和操作区，但移除最外层整页卡片的背景、边框、圆角、阴影和内边距。该修订后的基准以 `.artifacts/issue-5/implementation-1536x1024.png` 和 `.artifacts/issue-5/responsive-cardless-1100x720.png` 为准，并覆盖 `02 Page / Setup Success` 对最外层卡片装饰的要求；其他页面和 Setup 内部组件仍按 `.pen` 还原。
+
 ## 2. 产品定义
 
 OMP Switch 是 OMP 配置的安全结构化编辑器。
@@ -178,6 +180,8 @@ modelRoles: {}
 - 在真实目标所在目录创建临时文件并执行替换。
 - 链接循环、目标变化、权限边界异常或无法确认目标时拒绝写入。
 - OMP Switch 不创建新的链接。
+
+实现状态（issue #5）：Rust 启动状态现已返回 Target configuration 的规范路径、真实目标、文件分类、创建清单、警告和 YAML 错误位置；React 首次设置页据此展示创建确认、`.yaml` 只读、旧 JSON 迁移、解析错误和不安全目标状态。创建前会重新比对用户确认的文件清单和现有父路径真实目标；最小配置通过同目录临时文件验证、无覆盖提交、失败回滚和重新发现完成，回滚不完整时会明确报告残留风险。本工单不读取配置业务投影，也不提供编辑。
 
 ## 6. 安全结构化写入
 
@@ -624,6 +628,8 @@ Provider 详情
 
 `designs/omp-switch.pen` 是 MVP 已批准的视觉实现契约。页面布局、窗口尺寸基准、导航、组件形态、层级、文案、字体、字号、字重、颜色、间距、圆角、边框、阴影、图标、表格、Dialog/Sheet 尺寸和状态表现必须 1:1 还原。不得以 shadcn/ui 或平台默认样式替代设计；组件库只作为实现基础。
 
+上述 1:1 规则适用 issue #5 已确认的 Setup 最外层卡片例外；该例外不授权修改共享 token、检测表格、状态行、按钮或其他页面卡片。
+
 ## 14. 技术栈
 
 | 用途 | 技术 |
@@ -752,10 +758,10 @@ MVP 不引入数据库、ORM、嵌入式终端、多窗口架构或 OMP Sidecar�
 ### 视觉还原
 
 - [ ] `designs/omp-switch.pen` 中的 Foundations 和 Components 已实现为唯一设计 token 与共享组件来源。
-- [ ] Setup Success、Overview、Providers List、Provider Detail、Roles Dirty、Settings 画板在 1536×1024 基准视口 1:1 还原。
+- [ ] Setup 按 issue #5 经确认的无外层卡片基准还原，Overview、Providers List、Provider Detail、Roles Dirty、Settings 画板在 1536×1024 基准视口 1:1 还原。
 - [ ] 原型中定义的 Provider 创建步骤与 Model 创建 Sheet 按对应设计 1:1 还原。
 - [ ] 每个已实现画板都有实现截图和 Pencil 导出截图的视觉对比证据；可见偏差在关闭工单前修复。
-- [ ] 仅允许操作系统原生窗口控件、文件选择器、路径格式和快捷键标签产生平台差异；其他视觉差异必须先更新并重新批准 `.pen` 文件。
+- [ ] 除 issue #5 已记录并由产品负责人确认的 Setup 最外层卡片例外外，仅允许操作系统原生窗口控件、文件选择器、路径格式和快捷键标签产生平台差异；其他视觉差异必须先更新并重新批准 `.pen` 文件。
 
 ### 范围
 

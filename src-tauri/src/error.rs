@@ -11,6 +11,13 @@ pub struct AppError {
 }
 
 impl AppError {
+    pub fn new(code: &'static str, message: impl Into<String>, action: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            action: action.into(),
+        }
+    }
     pub fn internal(message: impl Into<String>) -> Self {
         Self {
             code: "internal-error",

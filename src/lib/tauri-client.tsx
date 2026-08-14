@@ -2,15 +2,51 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { createContext, useContext, type PropsWithChildren } from "react";
 
-export type ConfigurationFileStatus = "normal" | "missing" | "read-only";
-export type TargetAccess = { writable: boolean; modelsYml: ConfigurationFileStatus; configYml: ConfigurationFileStatus };
+export type ConfigurationFileStatus =
+  | "normal"
+  | "missing"
+  | "read-only"
+  | "alternate-only"
+  | "canonical-with-alternate"
+  | "legacy-json"
+  | "parse-error"
+  | "unsafe";
+export type TargetConfigurationStatus =
+  | "writable"
+  | "read-only"
+  | "creation-required"
+  | "migration-required"
+  | "parse-error"
+  | "unsafe";
+export type ConfigurationFileDiscovery = {
+  canonicalPath: string;
+  resolvedPath: string | null;
+  status: ConfigurationFileStatus;
+};
+export type ConfigurationIssue = {
+  filePath: string;
+  line: number | null;
+  column: number | null;
+  message: string;
+};
+export type TargetConfigurationDiscovery = {
+  path: string;
+  resolvedPath: string | null;
+  status: TargetConfigurationStatus;
+  writable: boolean;
+  models: ConfigurationFileDiscovery;
+  config: ConfigurationFileDiscovery;
+  createPaths: string[];
+  warnings: string[];
+  issue: ConfigurationIssue | null;
+};
 export type StartupState =
   | { kind: "detecting" }
   | { kind: "omp-unavailable"; message: string }
   | { kind: "invalid-executable"; executablePath: string; message: string; diagnosticCode: string }
   | { kind: "version-failed"; executablePath: string; message: string; diagnosticCode: string; exitCode: number | null; stderr: string }
   | { kind: "config-path-failed"; executablePath: string; version: string; message: string; diagnosticCode: string; exitCode: number | null; stderr: string }
-  | { kind: "omp-ready"; executablePath: string; version: string; targetConfiguration: string; previousTargetConfiguration: string | null; targetAccess: TargetAccess; requiresConfirmation: boolean };
+  | { kind: "omp-ready"; executablePath: string; version: string; targetConfiguration: TargetConfigurationDiscovery; previousTargetConfiguration: string | null; requiresConfirmation: boolean };
 
 export type Theme = "light" | "dark" | "system";
 
@@ -56,6 +92,8 @@ export interface TauriClient {
   selectOmpExecutable(): Promise<string | null>;
   validateSelectedOmp(executablePath: string): Promise<StartupState>;
   confirmSelectedOmp(executablePath: string): Promise<void>;
+  initializeTargetConfiguration(executablePath: string, expectedCreatePaths: string[]): Promise<StartupState>;
+  openTargetConfigurationDirectory(executablePath: string): Promise<void>;
   getUiSettings(): Promise<UiSettings>;
   saveUiSettings(settings: UiSettingsUpdate): Promise<UiSettings>;
 }
@@ -69,6 +107,8 @@ export const tauriClient: TauriClient = {
   },
   validateSelectedOmp: (executablePath) => invoke<StartupState>("validate_selected_omp", { executablePath }),
   confirmSelectedOmp: async (executablePath) => { await invoke("confirm_selected_omp", { executablePath }); },
+  initializeTargetConfiguration: (executablePath, expectedCreatePaths) => invoke<StartupState>("initialize_target_configuration", { executablePath, expectedCreatePaths }),
+  openTargetConfigurationDirectory: async (executablePath) => { await invoke("open_target_configuration_directory", { executablePath }); },
   getUiSettings: () => invoke<UiSettings>("get_ui_settings"),
   saveUiSettings: (settings) => invoke<UiSettings>("save_ui_settings", { settings }),
 };
