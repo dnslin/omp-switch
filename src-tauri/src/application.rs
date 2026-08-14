@@ -194,6 +194,7 @@ pub struct UiSettingsUpdate {
 pub struct AppService {
     settings_path: Arc<PathBuf>,
     settings: Arc<RwLock<AppSettings>>,
+    settings_write: Arc<parking_lot::Mutex<()>>,
     environment: Arc<dyn OmpEnvironment>,
     pending_omp: Arc<RwLock<Option<PathBuf>>>,
 }
@@ -211,6 +212,7 @@ impl AppService {
         Ok(Self {
             settings_path: Arc::new(settings_path),
             settings: Arc::new(RwLock::new(settings)),
+            settings_write: Arc::new(parking_lot::Mutex::new(())),
             environment,
             pending_omp: Arc::new(RwLock::new(None)),
         })
@@ -352,9 +354,9 @@ impl AppService {
         if pending.as_ref() != Some(&executable) {
             return Err(AppError::internal("OMP 验证状态已变化，请重新检测"));
         }
-        let mut settings = self.settings.read().clone();
-        settings.omp_executable_path = Some(executable.to_string_lossy().into_owned());
-        self.persist_settings(settings)
+        self.update_settings(|settings| {
+            settings.omp_executable_path = Some(executable.to_string_lossy().into_owned());
+        })
     }
 
     pub fn get_ui_settings(&self) -> Result<AppSettings, AppError> {
@@ -362,15 +364,21 @@ impl AppService {
     }
 
     pub fn save_ui_settings(&self, update: UiSettingsUpdate) -> Result<AppSettings, AppError> {
-        let mut settings = self.settings.read().clone();
-        settings.theme = update.theme;
-        settings.selected_provider_id = update.selected_provider_id;
-        settings.selected_model_id = update.selected_model_id;
-        settings.cost_notice_accepted = update.cost_notice_accepted;
-        self.persist_settings(settings)
+        self.update_settings(|settings| {
+            settings.theme = update.theme;
+            settings.selected_provider_id = update.selected_provider_id;
+            settings.selected_model_id = update.selected_model_id;
+            settings.cost_notice_accepted = update.cost_notice_accepted;
+        })
     }
 
-    fn persist_settings(&self, settings: AppSettings) -> Result<AppSettings, AppError> {
+    fn update_settings(
+        &self,
+        mutate: impl FnOnce(&mut AppSettings),
+    ) -> Result<AppSettings, AppError> {
+        let _transaction = self.settings_write.lock();
+        let mut settings = self.settings.read().clone();
+        mutate(&mut settings);
         persist_settings(&self.settings_path, &settings)?;
         *self.settings.write() = settings.clone();
         Ok(settings)

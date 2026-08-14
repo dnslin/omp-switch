@@ -1,7 +1,8 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Barrier},
+    thread,
 };
 
 use crate::application::{
@@ -416,6 +417,47 @@ fn ui_settings_update_cannot_replace_the_confirmed_omp_executable() {
             .as_deref(),
         Some("/bin/saved-omp")
     );
+}
+
+#[test]
+fn concurrent_settings_update_and_omp_confirmation_preserve_both_changes() {
+    for _ in 0..100 {
+        let environment = Arc::new(FakeOmpEnvironment::default());
+        let service = Arc::new(service_with(environment, Some("/bin/saved-omp")));
+        assert!(matches!(
+            service.validate_selected_omp(PathBuf::from("/bin/path-omp")),
+            StartupState::OmpReady { .. }
+        ));
+
+        let barrier = Arc::new(Barrier::new(3));
+        let settings_service = Arc::clone(&service);
+        let settings_barrier = Arc::clone(&barrier);
+        let settings_thread = thread::spawn(move || {
+            settings_barrier.wait();
+            settings_service.save_ui_settings(UiSettingsUpdate {
+                theme: Theme::Dark,
+                selected_provider_id: Some("dnslin".to_owned()),
+                selected_model_id: None,
+                cost_notice_accepted: false,
+            })
+        });
+        let confirmation_service = Arc::clone(&service);
+        let confirmation_barrier = Arc::clone(&barrier);
+        let confirmation_thread = thread::spawn(move || {
+            confirmation_barrier.wait();
+            confirmation_service.confirm_selected_omp(PathBuf::from("/bin/path-omp"))
+        });
+
+        barrier.wait();
+        assert!(settings_thread.join().unwrap().is_ok());
+        assert!(confirmation_thread.join().unwrap().is_ok());
+        let settings = service.get_ui_settings().unwrap();
+        assert_eq!(settings.theme, Theme::Dark);
+        assert_eq!(
+            settings.omp_executable_path.as_deref(),
+            Some("/bin/path-omp")
+        );
+    }
 }
 
 #[test]
