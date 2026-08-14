@@ -247,22 +247,24 @@ fn failed_confirmation_persistence_can_retry_without_revalidation() {
         .unwrap(),
     )
     .unwrap();
-    let temporary_path = settings_path.with_extension("json.tmp");
-    let service =
-        AppService::new_with_environment(settings_path, Arc::new(FakeOmpEnvironment::default()))
-            .unwrap();
+    let service = AppService::new_with_environment(
+        settings_path.clone(),
+        Arc::new(FakeOmpEnvironment::default()),
+    )
+    .unwrap();
     assert!(matches!(
         service.validate_selected_omp(PathBuf::from("/bin/path-omp")),
         StartupState::OmpReady { .. }
     ));
 
-    fs::create_dir(&temporary_path).unwrap();
+    fs::remove_file(&settings_path).unwrap();
+    fs::create_dir(&settings_path).unwrap();
     assert!(
         service
             .confirm_selected_omp(PathBuf::from("/bin/path-omp"))
             .is_err()
     );
-    fs::remove_dir(&temporary_path).unwrap();
+    fs::remove_dir(&settings_path).unwrap();
 
     service
         .confirm_selected_omp(PathBuf::from("/bin/path-omp"))
@@ -404,6 +406,34 @@ fn malformed_settings_return_safe_diagnostic_error() {
     assert_eq!(error.code, "internal-error");
     assert_eq!(error.message, "界面设置文件无法解析");
     assert!(!error.to_string().contains("secret"));
+}
+
+#[test]
+fn settings_update_atomically_replaces_an_existing_settings_file() {
+    let app_data = tempdir().unwrap();
+    let settings_path = app_data.path().join("settings.json");
+    fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&AppSettings {
+            theme: Theme::Light,
+            ..AppSettings::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let service = AppService::new(settings_path.clone()).unwrap();
+
+    service
+        .save_ui_settings(UiSettingsUpdate {
+            theme: Theme::Dark,
+            selected_provider_id: None,
+            selected_model_id: None,
+            cost_notice_accepted: false,
+        })
+        .unwrap();
+
+    let persisted: AppSettings = serde_json::from_slice(&fs::read(settings_path).unwrap()).unwrap();
+    assert_eq!(persisted.theme, Theme::Dark);
 }
 
 #[test]

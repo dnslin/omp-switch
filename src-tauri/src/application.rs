@@ -1,5 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -574,15 +575,23 @@ fn persist_settings(path: &Path, settings: &AppSettings) -> Result<(), AppError>
             "无法序列化界面设置",
         )
     })?;
-    let temporary_path = path.with_extension("json.tmp");
-    fs::write(&temporary_path, bytes).map_err(|error| {
+    let mut file = atomic_write_file::AtomicWriteFile::options()
+        .open(path)
+        .map_err(|error| {
+            internal_error_with_cause(
+                "persist_ui_settings",
+                io_error_cause(error.kind()),
+                "无法创建界面设置临时文件",
+            )
+        })?;
+    file.write_all(&bytes).map_err(|error| {
         internal_error_with_cause(
             "persist_ui_settings",
             io_error_cause(error.kind()),
             "无法写入界面设置",
         )
     })?;
-    fs::rename(&temporary_path, path).map_err(|error| {
+    file.commit().map_err(|error| {
         internal_error_with_cause(
             "persist_ui_settings",
             io_error_cause(error.kind()),
