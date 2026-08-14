@@ -235,6 +235,49 @@ fn valid_manual_replacement_is_saved_only_after_explicit_confirmation() {
 }
 
 #[test]
+fn failed_confirmation_persistence_can_retry_without_revalidation() {
+    let app_data = tempdir().unwrap();
+    let settings_path = app_data.path().join("settings.json");
+    fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&AppSettings {
+            omp_executable_path: Some("/bin/saved-omp".to_owned()),
+            ..AppSettings::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let temporary_path = settings_path.with_extension("json.tmp");
+    let service =
+        AppService::new_with_environment(settings_path, Arc::new(FakeOmpEnvironment::default()))
+            .unwrap();
+    assert!(matches!(
+        service.validate_selected_omp(PathBuf::from("/bin/path-omp")),
+        StartupState::OmpReady { .. }
+    ));
+
+    fs::create_dir(&temporary_path).unwrap();
+    assert!(
+        service
+            .confirm_selected_omp(PathBuf::from("/bin/path-omp"))
+            .is_err()
+    );
+    fs::remove_dir(&temporary_path).unwrap();
+
+    service
+        .confirm_selected_omp(PathBuf::from("/bin/path-omp"))
+        .unwrap();
+    assert_eq!(
+        service
+            .get_ui_settings()
+            .unwrap()
+            .omp_executable_path
+            .as_deref(),
+        Some("/bin/path-omp")
+    );
+}
+
+#[test]
 fn failed_revalidation_clears_previous_pending_omp() {
     let environment = Arc::new(FakeOmpEnvironment::default());
     let service = service_with(environment, Some("/bin/saved-omp"));

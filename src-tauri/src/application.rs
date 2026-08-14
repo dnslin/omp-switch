@@ -350,13 +350,15 @@ impl AppService {
     }
 
     pub fn confirm_selected_omp(&self, executable: PathBuf) -> Result<AppSettings, AppError> {
-        let pending = self.pending_omp.write().take();
+        let mut pending = self.pending_omp.write();
         if pending.as_ref() != Some(&executable) {
             return Err(AppError::internal("OMP 验证状态已变化，请重新检测"));
         }
-        self.update_settings(|settings| {
+        let settings = self.update_settings(|settings| {
             settings.omp_executable_path = Some(executable.to_string_lossy().into_owned());
-        })
+        })?;
+        *pending = None;
+        Ok(settings)
     }
 
     pub fn get_ui_settings(&self) -> Result<AppSettings, AppError> {
