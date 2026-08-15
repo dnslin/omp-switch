@@ -8,6 +8,7 @@ import { type AppError, type OverviewDto, type OverviewProvider } from "../lib/t
 import { MainShell } from "./MainShell";
 import { ProviderCreateDialog } from "./ProviderCreateDialog";
 import { useOverviewLoad } from "./overview-load";
+import { providerAuthSummary } from "./omp-presentation";
 
 type ProviderStatus = {
   label: string;
@@ -42,11 +43,6 @@ function providerStatus(provider: OverviewProvider): ProviderStatus {
   }
 }
 
-export function providerAuthSummary(provider: OverviewProvider): string {
-  if (provider.authMode === "api-key") return provider.hasApiKey ? "API Key 已配置" : "API Key 未配置";
-  if (provider.authMode === "none") return "无认证";
-  return "不支持的认证";
-}
 
 function matchesProvider(provider: OverviewProvider, query: string): boolean {
   if (!query) return true;

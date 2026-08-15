@@ -22,9 +22,10 @@ use crate::{
         initialize_target_configuration_with_failure,
     },
 };
+use fs4::FileExt;
 use parking_lot::Mutex;
 use pretty_assertions::assert_eq;
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
 #[derive(Default)]
@@ -2457,9 +2458,11 @@ providers:
     );
 
     let backup_root = app_data.path().join("target-configuration-backups");
+    let lock_directory = backup_root.join(".locks");
     let backup_targets = fs::read_dir(&backup_root)
         .unwrap()
         .map(Result::unwrap)
+        .filter(|entry| entry.file_name() != ".locks")
         .collect::<Vec<_>>();
     assert_eq!(backup_targets.len(), 1);
     let model_backup_directory = backup_targets[0].path().join("models.yml");
@@ -2472,6 +2475,11 @@ providers:
         fs::read(model_backups[0].path()).unwrap(),
         original.as_bytes()
     );
+    let lock_files = fs::read_dir(&lock_directory)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    assert_eq!(lock_files.len(), 1);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -2479,6 +2487,8 @@ providers:
         let mode =
             |path: &std::path::Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&backup_root), 0o700);
+        assert_eq!(mode(&lock_directory), 0o700);
+        assert_eq!(mode(&lock_files[0].path()), 0o600);
         assert_eq!(mode(&backup_targets[0].path()), 0o700);
         assert_eq!(mode(&model_backup_directory), 0o700);
         assert_eq!(mode(&model_backups[0].path()), 0o600);
@@ -2605,6 +2615,49 @@ fn custom_provider_creation_rejects_a_changed_models_hash_before_creating_a_back
 }
 
 #[test]
+fn custom_provider_creation_stops_when_another_writer_holds_the_target_lock() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original = b"providers: {}\n";
+    fs::write(target.join("models.yml"), original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let resolved_target = fs::canonicalize(&target).unwrap();
+    let fingerprint = Sha256::digest(resolved_target.to_string_lossy().as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let lock_directory = app_data
+        .path()
+        .join("target-configuration-backups")
+        .join(".locks");
+    fs::create_dir_all(&lock_directory).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(lock_directory.join(format!("{fingerprint}.lock")))
+        .unwrap();
+    FileExt::lock(&lock).unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap();
+
+    let error = service
+        .create_custom_provider(provider_creation_input(opened_models_hash))
+        .unwrap_err();
+
+    assert_eq!(error.code, "models-write-in-progress");
+    assert_eq!(fs::read(target.join("models.yml")).unwrap(), original);
+}
+
+#[test]
 fn custom_provider_creation_rejects_invalid_and_colliding_values_without_writing() {
     let app_data = tempdir().unwrap();
     let target = app_data.path().join("agent");
@@ -2719,11 +2772,7 @@ fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
         ),
         (
             "replacement commit failure",
-            ProviderCreationFailurePoint::CommitFailureAfterReplacement,
-        ),
-        (
-            "after replacement",
-            ProviderCreationFailurePoint::AfterReplacement,
+            ProviderCreationFailurePoint::BeforeCommit,
         ),
     ] {
         let app_data = tempdir().unwrap();

@@ -1,4 +1,4 @@
-import type { ConfigurationFileStatus, OverviewDto, StartupState, TargetConfigurationStatus } from "../lib/tauri-client";
+import type { ConfigurationFileStatus, OverviewDto, OverviewProvider, StartupState, TargetConfigurationStatus } from "../lib/tauri-client";
 
 export type StatusTone = "success" | "warning" | "danger";
 export type RowStatus = { label: string; tone: StatusTone };
@@ -72,6 +72,12 @@ export function overviewShellStatus(data: OverviewDto): ShellStatus {
     status: targetView.tone === "danger" ? targetView.label : filesNeedAttention ? "配置文件需注意" : targetView.label,
     tone,
   };
+}
+
+export function providerAuthSummary(provider: OverviewProvider): string {
+  if (provider.authMode === "api-key") return provider.hasApiKey ? "API Key 已配置" : "API Key 未配置";
+  if (provider.authMode === "none") return "无认证";
+  return "不支持的认证";
 }
 
 function formatOmpVersion(version: string) {

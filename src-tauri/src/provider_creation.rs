@@ -9,6 +9,8 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+use fs4::{FileExt, TryLockError};
+
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
@@ -119,8 +121,7 @@ pub(crate) enum ProviderCreationFailurePoint {
     CorruptTemporaryFile,
     MutateUntouchedValue,
     BeforeReplacement,
-    CommitFailureAfterReplacement,
-    AfterReplacement,
+    BeforeCommit,
 }
 
 struct ValidatedCreate {
@@ -161,6 +162,7 @@ pub(crate) fn create_custom_provider(
     if failure == Some(ProviderCreationFailurePoint::BeforeBackup) {
         return Err(injected_failure("创建当前备份前发生故障。"));
     }
+    let _write_lock = acquire_models_write_lock(backup_root, &expected_target)?;
     create_current_backup(backup_root, &expected_target, &original_bytes)?;
     if failure == Some(ProviderCreationFailurePoint::AfterBackup) {
         return Err(injected_failure("创建当前备份后发生故障。"));
@@ -232,53 +234,14 @@ pub(crate) fn create_custom_provider(
     if failure == Some(ProviderCreationFailurePoint::BeforeReplacement) {
         return Err(injected_failure("原子替换前发生故障。"));
     }
-    let replacement = temporary
+    if failure == Some(ProviderCreationFailurePoint::BeforeCommit) {
+        return Err(injected_failure("原子替换提交前发生故障。"));
+    }
+    // Commit is deliberately last: a fallible postwrite check would require a
+    // second write to recover and could expose the candidate if recovery failed.
+    temporary
         .commit()
-        .map_err(|error| write_error("replace_models", error))
-        .and_then(|()| {
-            if failure == Some(ProviderCreationFailurePoint::CommitFailureAfterReplacement) {
-                Err(injected_failure("原子替换在提交后报告故障。"))
-            } else {
-                Ok(())
-            }
-        });
-    if let Err(error) = replacement {
-        return Err(restore_after_postwrite_failure(
-            &models_path,
-            &expected_target,
-            serialized.as_bytes(),
-            &original_bytes,
-            error,
-        ));
-    }
-
-    let postwrite = (|| -> Result<(), AppError> {
-        if failure == Some(ProviderCreationFailurePoint::AfterReplacement) {
-            return Err(injected_failure("原子替换后发生故障。"));
-        }
-        let committed_bytes =
-            fs::read(&models_path).map_err(|error| write_error("reread_models", error))?;
-        let committed = serde_yaml::from_slice::<Value>(&committed_bytes).map_err(|error| {
-            yaml_error(
-                "parse_committed_models",
-                "models-postwrite-parse-error",
-                "写入后的 models.yml 无法重新解析",
-                "OMP Switch 将恢复原文件；请检查 YAML 后重试。",
-                error,
-            )
-        })?;
-        validate_created_provider(&committed, &validated)?;
-        ensure_untouched_paths_equal(&original_tree, &committed, &validated.provider_id)
-    })();
-    if let Err(error) = postwrite {
-        return Err(restore_after_postwrite_failure(
-            &models_path,
-            &expected_target,
-            serialized.as_bytes(),
-            &original_bytes,
-            error,
-        ));
-    }
+        .map_err(|error| write_error("replace_models", error))?;
 
     Ok(CreateCustomProviderResult {
         provider_id: validated.provider_id,
@@ -286,96 +249,36 @@ pub(crate) fn create_custom_provider(
     })
 }
 
-fn restore_after_postwrite_failure(
-    models_path: &Path,
-    expected_target: &Path,
-    candidate_bytes: &[u8],
-    original_bytes: &[u8],
-    postwrite_error: AppError,
-) -> AppError {
-    match restore_original_models(
-        models_path,
-        expected_target,
-        candidate_bytes,
-        original_bytes,
-    ) {
-        Ok(()) => postwrite_error,
-        Err(recovery_error) => {
-            tracing::error!(
-                operation = "restore_models_after_postwrite_failure",
-                postwrite_code = postwrite_error.code,
-                recovery_code = recovery_error.code,
-                "Provider creation postwrite recovery failed"
-            );
-            recovery_error
-        }
+fn acquire_models_write_lock(
+    backup_root: &Path,
+    resolved_target: &Path,
+) -> Result<fs::File, AppError> {
+    let lock_directory = backup_root.join(".locks");
+    create_private_backup_directory(&lock_directory)
+        .map_err(|error| write_error("create_models_lock_directory", error))?;
+    let target_fingerprint = content_hash(resolved_target.to_string_lossy().as_bytes());
+    let lock_path = lock_directory.join(format!("{target_fingerprint}.lock"));
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let lock = options
+        .open(&lock_path)
+        .map_err(|error| write_error("open_models_write_lock", error))?;
+    set_private_backup_file_permissions(&lock_path)
+        .map_err(|error| write_error("secure_models_write_lock", error))?;
+    match FileExt::try_lock(&lock) {
+        Ok(()) => Ok(lock),
+        Err(TryLockError::WouldBlock) => Err(models_write_in_progress()),
+        Err(TryLockError::Error(error)) => Err(write_error("lock_models_write", error)),
     }
 }
 
-fn restore_original_models(
-    models_path: &Path,
-    expected_target: &Path,
-    candidate_bytes: &[u8],
-    original_bytes: &[u8],
-) -> Result<(), AppError> {
-    if let Err(error) = ensure_resolved_models_path(models_path, expected_target) {
-        tracing::error!(
-            operation = "verify_models_path_before_recovery",
-            code = error.code,
-            "Provider creation recovery target changed"
-        );
-        return Err(postwrite_recovery_error());
-    }
-    let current = fs::read(models_path)
-        .map_err(|error| postwrite_recovery_io_error("read_models_for_recovery", error))?;
-    if current == original_bytes {
-        return Ok(());
-    }
-    if current != candidate_bytes {
-        tracing::error!(
-            operation = "verify_models_before_recovery",
-            "Provider creation recovery refuses to overwrite changed models.yml"
-        );
-        return Err(postwrite_recovery_error());
-    }
-
-    let mut recovery = AtomicWriteFile::options()
-        .read(true)
-        .open(models_path)
-        .map_err(|error| postwrite_recovery_io_error("open_models_recovery", error))?;
-    recovery
-        .write_all(original_bytes)
-        .and_then(|()| recovery.sync_all())
-        .map_err(|error| postwrite_recovery_io_error("write_models_recovery", error))?;
-    recovery
-        .commit()
-        .map_err(|error| postwrite_recovery_io_error("replace_models_recovery", error))?;
-    let restored = fs::read(models_path)
-        .map_err(|error| postwrite_recovery_io_error("verify_models_recovery", error))?;
-    if restored != original_bytes {
-        tracing::error!(
-            operation = "verify_models_recovery",
-            "Provider creation recovery did not restore the original models.yml"
-        );
-        return Err(postwrite_recovery_error());
-    }
-    Ok(())
-}
-
-fn postwrite_recovery_io_error(operation: &'static str, error: std::io::Error) -> AppError {
-    tracing::error!(
-        operation,
-        cause = io_error_cause(error.kind()),
-        "Provider creation rollback failed"
-    );
-    postwrite_recovery_error()
-}
-
-fn postwrite_recovery_error() -> AppError {
+fn models_write_in_progress() -> AppError {
     AppError::new(
-        "models-postwrite-recovery-failed",
-        "写入后验证失败，且 OMP Switch 无法安全恢复原 models.yml。",
-        "请立即停止写入，并从 Target configuration 的当前备份恢复 models.yml。",
+        "models-write-in-progress",
+        "另一项 OMP Switch Provider 创建正在写入 models.yml。",
+        "请等待当前写入完成后重新读取配置，再检查表单并重试。",
     )
 }
 

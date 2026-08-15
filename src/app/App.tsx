@@ -8,9 +8,9 @@ import { asAppError, useTauriClient, type StartupState } from "../lib/tauri-clie
 import { useUiSettings } from "../store/ui-settings";
 import { MainShell } from "./MainShell";
 import { OverviewPage } from "./OverviewPage";
-import { ProvidersPage, providerAuthSummary } from "./ProvidersPage";
+import { ProvidersPage } from "./ProvidersPage";
 import { useOverviewLoad } from "./overview-load";
-import { fileStatusView, startupShellStatus, targetConfigurationStatusView, type RowStatus } from "./omp-presentation";
+import { fileStatusView, providerAuthSummary, startupShellStatus, targetConfigurationStatusView, type RowStatus } from "./omp-presentation";
 
 
 const REDETECT_MINIMUM_DURATION_MS = 1200;
