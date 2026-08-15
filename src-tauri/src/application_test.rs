@@ -1,12 +1,17 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Barrier},
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     thread,
 };
 
 use crate::{
-    application::{AppService, AppSettings, StartupState, Theme, UiSettingsUpdate},
+    application::{
+        AppService, AppSettings, OverviewLoadDto, StartupState, Theme, UiSettingsUpdate,
+    },
     omp_environment::{CommandOutput, OmpEnvironment},
     target_configuration::{
         ConfigurationFileDiscovery, ConfigurationFileStatus, InitializationFailurePoint,
@@ -17,6 +22,7 @@ use crate::{
 };
 use parking_lot::Mutex;
 use pretty_assertions::assert_eq;
+use sha2::Digest;
 use tempfile::tempdir;
 
 #[derive(Default)]
@@ -29,6 +35,9 @@ struct FakeOmpEnvironment {
     inspect_real_target: bool,
     transaction_root: PathBuf,
     initialization_failure: Option<InitializationFailurePoint>,
+    block_first_version: Option<(Arc<Barrier>, Arc<AtomicBool>)>,
+    vary_temp_version: bool,
+    temp_version_calls: AtomicUsize,
 }
 
 impl FakeOmpEnvironment {
@@ -68,12 +77,27 @@ impl OmpEnvironment for FakeOmpEnvironment {
             executable.to_path_buf(),
             arguments.iter().map(|value| (*value).to_owned()).collect(),
         ));
+        if arguments == ["--version"]
+            && let Some((barrier, used)) = &self.block_first_version
+            && !used.swap(true, Ordering::AcqRel)
+        {
+            barrier.wait();
+        }
         let name = executable.file_name().unwrap().to_string_lossy();
         match (name.as_ref(), arguments) {
             ("saved-omp", ["--version"]) => Ok(CommandOutput::success("17.4.1\n")),
             ("saved-omp", ["config", "path"]) => Ok(CommandOutput::success("/tmp/saved-agent\n")),
-            ("temp-omp", ["--version"]) => Ok(CommandOutput::success("18.1.0\n")),
+            ("temp-omp", ["--version"]) if self.vary_temp_version => {
+                let sequence = self.temp_version_calls.fetch_add(1, Ordering::AcqRel);
+                Ok(CommandOutput::success(format!("17.2.{}\n", 15 + sequence)))
+            }
+            ("temp-omp", ["--version"]) => Ok(CommandOutput::success("17.2.15\n")),
             ("temp-omp", ["config", "path"]) => Ok(CommandOutput::success(format!(
+                "{}\n",
+                self.config_path.as_ref().unwrap().display()
+            ))),
+            ("unknown-omp", ["--version"]) => Ok(CommandOutput::success("99.0.0\n")),
+            ("unknown-omp", ["config", "path"]) => Ok(CommandOutput::success(format!(
                 "{}\n",
                 self.config_path.as_ref().unwrap().display()
             ))),
@@ -174,6 +198,233 @@ fn service_with(environment: Arc<FakeOmpEnvironment>, saved: Option<&str>) -> Ap
 }
 
 #[test]
+fn overview_load_detects_omp_once_and_returns_shell_metadata() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.clone()),
+        inspect_real_target: true,
+        transaction_root: target.parent().unwrap().join(".app-transactions"),
+        ..FakeOmpEnvironment::default()
+    });
+    let service = service_with(environment.clone(), None);
+
+    let load = service.get_overview_load();
+
+    assert!(load.error.is_none());
+    assert!(load.overview.is_some());
+    assert!(matches!(load.startup_state, StartupState::OmpReady { .. }));
+    assert_eq!(
+        environment.calls(),
+        vec![
+            (PathBuf::from("/bin/temp-omp"), vec!["--version".to_owned()]),
+            (
+                PathBuf::from("/bin/temp-omp"),
+                vec!["config".to_owned(), "path".to_owned()]
+            ),
+        ]
+    );
+}
+#[test]
+fn concurrent_overview_loads_share_one_detection_and_snapshot_update() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let release_first_version = Arc::new(Barrier::new(2));
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.clone()),
+        inspect_real_target: true,
+        transaction_root: target.parent().unwrap().join(".app-transactions"),
+        block_first_version: Some((
+            release_first_version.clone(),
+            Arc::new(AtomicBool::new(false)),
+        )),
+        ..FakeOmpEnvironment::default()
+    });
+    let service = Arc::new(service_with(environment.clone(), None));
+
+    let first_service = service.clone();
+    let first = thread::spawn(move || first_service.get_overview_load());
+    assert!((0..10_000).any(|_| {
+        if environment.calls().len() == 1 {
+            true
+        } else {
+            thread::yield_now();
+            false
+        }
+    }));
+
+    let second_service = service.clone();
+    let second = thread::spawn(move || second_service.get_overview_load());
+    assert!((0..10_000).any(|_| {
+        if service.overview_waiters_for_test() == 1 {
+            true
+        } else {
+            thread::yield_now();
+            false
+        }
+    }));
+    release_first_version.wait();
+
+    let first = first.join().unwrap();
+    let second = second.join().unwrap();
+    assert!(first.error.is_none());
+    assert!(first.overview.is_some());
+    assert!(second.error.is_none());
+
+    assert!(second.overview.is_some());
+    assert_eq!(environment.calls().len(), 2);
+}
+#[test]
+fn overview_coalescing_preserves_joined_generation_when_a_new_load_starts() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let release_first_version = Arc::new(Barrier::new(2));
+    let waiter_reached = Arc::new(Barrier::new(2));
+    let release_waiter = Arc::new(Barrier::new(2));
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.clone()),
+        inspect_real_target: true,
+        transaction_root: target.parent().unwrap().join(".app-transactions"),
+        block_first_version: Some((
+            release_first_version.clone(),
+            Arc::new(AtomicBool::new(false)),
+        )),
+        vary_temp_version: true,
+        ..FakeOmpEnvironment::default()
+    });
+    let service = Arc::new(service_with(environment.clone(), None));
+    service.pause_next_overview_waiter_for_test(waiter_reached.clone(), release_waiter.clone());
+
+    let first_service = service.clone();
+    let first = thread::spawn(move || first_service.get_overview_load());
+    assert!((0..10_000).any(|_| {
+        if environment.calls().len() == 1 {
+            true
+        } else {
+            thread::yield_now();
+            false
+        }
+    }));
+
+    let second_service = service.clone();
+    let second = thread::spawn(move || second_service.get_overview_load());
+    assert!((0..10_000).any(|_| {
+        if service.overview_waiters_for_test() == 1 {
+            true
+        } else {
+            thread::yield_now();
+            false
+        }
+    }));
+    release_first_version.wait();
+    waiter_reached.wait();
+
+    let third_service = service.clone();
+    let third = thread::spawn(move || third_service.get_overview_load());
+    assert!((0..10_000).any(|_| {
+        if environment.calls().len() == 4 {
+            true
+        } else {
+            thread::yield_now();
+            false
+        }
+    }));
+    let third = third.join().unwrap();
+    release_waiter.wait();
+    let first = first.join().unwrap();
+    let second = second.join().unwrap();
+
+    let version = |load: &OverviewLoadDto| match &load.startup_state {
+        StartupState::OmpReady { version, .. } => version.clone(),
+        state => panic!("unexpected startup state: {state:?}"),
+    };
+    assert_eq!(version(&first), "17.2.15");
+    assert_eq!(version(&second), "17.2.15");
+    assert_eq!(version(&third), "17.2.16");
+    assert_eq!(environment.calls().len(), 4);
+}
+#[test]
+fn unknown_catalog_with_empty_configuration_is_read_only() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/unknown-omp")),
+        config_path: Some(target),
+        inspect_real_target: true,
+        transaction_root: app_data.join(".app-transactions"),
+        ..FakeOmpEnvironment::default()
+    });
+    let service = service_with(environment, None);
+
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+
+    assert_eq!(dto["state"], "read-only");
+    assert_eq!(dto["counts"]["providerCount"], 0);
+    assert!(
+        dto["readOnlyReason"]
+            .as_str()
+            .unwrap()
+            .contains("没有匹配的 bundled Provider 清单")
+    );
+    assert_eq!(dto["emptyReason"], serde_json::Value::Null);
+}
+#[test]
+fn malformed_provider_and_role_roots_are_read_only() {
+    let app_data = tempdir().unwrap().keep();
+    let cases = [
+        ("providers-missing", "root: {}\n", "modelRoles: {}\n"),
+        ("providers-sequence", "providers: []\n", "modelRoles: {}\n"),
+        (
+            "providers-non-string-key",
+            "providers:\n  42:\n    models: []\n",
+            "modelRoles: {}\n",
+        ),
+        ("roles-missing", "providers: {}\n", "settings: {}\n"),
+        ("roles-sequence", "providers: {}\n", "modelRoles: []\n"),
+        (
+            "roles-non-string-key",
+            "providers: {}\n",
+            "modelRoles:\n  42: dnslin/model\n",
+        ),
+    ];
+
+    for (name, models, config) in cases {
+        let target = app_data.join(name);
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("models.yml"), models).unwrap();
+        fs::write(target.join("config.yml"), config).unwrap();
+
+        let dto = serde_json::to_value(
+            service_for_target(&target)
+                .get_overview_load()
+                .overview
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(dto["state"], "read-only", "{name}");
+        assert!(
+            dto["readOnlyReason"].as_str().unwrap().contains("业务结构"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn startup_detection_prefers_saved_omp_and_runs_only_fixed_commands() {
     let environment = Arc::new(FakeOmpEnvironment::with_path("/bin/path-omp"));
     let service = service_with(environment.clone(), Some("/bin/saved-omp"));
@@ -213,6 +464,21 @@ fn startup_detection_requires_confirmation_before_replacing_unusable_saved_execu
         StartupState::OmpReady { executable_path, requires_confirmation: true, .. }
             if executable_path == "/bin/path-omp"
     ));
+    let load = service.get_overview_load();
+    assert!(matches!(
+        load.startup_state,
+        StartupState::OmpReady {
+            requires_confirmation: true,
+            ..
+        }
+    ));
+    assert_eq!(
+        load.error.as_ref().unwrap().code,
+        "overview-confirmation-required"
+    );
+    assert!(load.overview.is_none());
+    assert!(service.configuration_snapshot_for_test().is_none());
+
     assert_eq!(
         service
             .get_ui_settings()
@@ -1112,4 +1378,570 @@ fn target_inspection_failure_does_not_report_the_previous_command_exit_code() {
             ..
         } if diagnostic_code == "io-permission-denied"
     ));
+}
+#[test]
+fn overview_reads_complete_trees_hashes_and_redacts_direct_api_keys() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let models = r#"providers:
+  dnslin:
+    name: Local Provider
+    baseUrl: https://user:user-info-secret@example.com/v1
+    api: openai-responses
+    apiKey: super-secret-api-key
+    providerUnknown:
+      nested: preserve-me
+    models:
+      - id: gpt-5.6-sol
+        name: Sol
+        api: openai-responses
+        reasoning: true
+        input: [text, image]
+        contextWindow: 356000
+        maxTokens: 32768
+        modelUnknown:
+          nested: preserve-model
+      - id: "gpt-5.6-sol:ultra"
+        name: Ultra Model
+        api: openai-responses
+        input: [text]
+        contextWindow: 356000
+        maxTokens: 32768
+      - id: "gpt-5.6-sol:turbo"
+        name: Turbo Model
+        api: openai-responses
+        input: [text]
+        contextWindow: 356000
+        maxTokens: 32768
+      - id: gpt-5.6-sol/high/extra
+        name: Slash Model
+        api: openai-responses
+        input: [text]
+        contextWindow: 356000
+        maxTokens: 32768
+      - id: incomplete
+        name: Incomplete
+        api: openai-responses
+        input: [text]
+  other:
+    baseUrl: https://example.com/v1?key=query-secret&region=us
+    models:
+      - id: mystery
+        name: Mystery
+  special:
+    baseUrl: https:user:no-slashes-secret@example.com/v1
+    models: []
+unrecognizedRoot:
+  nested: untouched
+"#;
+    let config = r#"modelRoles:
+  default: dnslin/gpt-5.6-sol:max
+  advisor: dnslin/gpt-5.6-sol
+  maxConfigured: dnslin/gpt-5.6-sol:max
+  ultra: dnslin/gpt-5.6-sol:ultra
+  turboModel: dnslin/gpt-5.6-sol:turbo
+  extraSlash: dnslin/gpt-5.6-sol/high/extra
+  unknown: dnslin/gpt-5.6-sol:unknown
+  missingModel: dnslin/does-not-exist
+  missingProvider: absent/model
+  incompleteRole: dnslin/incomplete
+otherSettings:
+  nested:
+    value: untouched
+"#;
+    fs::write(target.join("models.yml"), models).unwrap();
+    fs::write(target.join("config.yml"), config).unwrap();
+
+    let service = service_for_target(&target);
+    let overview = service.get_overview_load().overview.unwrap();
+    let dto = serde_json::to_value(overview).unwrap();
+
+    assert_eq!(dto["state"], "normal");
+    assert_eq!(dto["counts"]["providerCount"], 1);
+    assert_eq!(dto["counts"]["modelCount"], 6);
+    assert_eq!(dto["counts"]["roleCount"], 10);
+    assert_eq!(dto["providers"][0]["hasApiKey"], true);
+    assert!(!dto.to_string().contains("super-secret-api-key"));
+    assert!(!dto.to_string().contains("user-info-secret"));
+    assert!(!dto.to_string().contains("query-secret"));
+    assert!(!dto.to_string().contains("no-slashes-secret"));
+    assert!(!dto.to_string().contains("preserve-me"));
+    assert!(!dto.to_string().contains("preserve-model"));
+    let providers = dto["providers"].as_array().unwrap();
+    let provider = |id: &str| {
+        providers
+            .iter()
+            .find(|provider| provider["id"] == id)
+            .unwrap()
+    };
+    assert_eq!(provider("dnslin")["classification"], "advanced");
+    assert_eq!(provider("other")["classification"], "custom");
+    assert_eq!(provider("special")["classification"], "unsupported");
+    assert_eq!(provider("dnslin")["baseUrl"], "https://example.com/v1");
+    assert_eq!(
+        provider("other")["baseUrl"],
+        "https://example.com/v1?region=us"
+    );
+    assert_eq!(
+        provider("special")["baseUrl"],
+        "[配置地址因无法解析而已脱敏]"
+    );
+    let roles = dto["roles"].as_array().unwrap();
+    let role = |id: &str| roles.iter().find(|role| role["id"] == id).unwrap();
+    for id in [
+        "default",
+        "advisor",
+        "maxConfigured",
+        "ultra",
+        "extraSlash",
+        "turboModel",
+    ] {
+        assert_eq!(role(id)["status"], "configured");
+        assert!(role(id)["selector"].is_string());
+    }
+    assert_eq!(role("unknown")["status"], "advanced");
+    assert_eq!(role("unknown")["selector"], serde_json::Value::Null);
+    assert_eq!(role("missingModel")["status"], "model-missing");
+    assert_eq!(role("missingProvider")["status"], "provider-missing");
+    assert_eq!(role("incompleteRole")["status"], "incomplete");
+    assert_eq!(role("ultra")["selector"], "dnslin/gpt-5.6-sol:ultra");
+    assert_eq!(role("turboModel")["selector"], "dnslin/gpt-5.6-sol:turbo");
+    assert_eq!(
+        role("extraSlash")["selector"],
+        "dnslin/gpt-5.6-sol/high/extra"
+    );
+
+    let snapshot = service.configuration_snapshot_for_test().unwrap();
+    assert_eq!(
+        snapshot.models.tree["unrecognizedRoot"]["nested"],
+        "untouched"
+    );
+    assert_eq!(
+        snapshot.models.tree["providers"]["dnslin"]["providerUnknown"]["nested"],
+        "preserve-me"
+    );
+    assert_eq!(
+        snapshot.config.tree["otherSettings"]["nested"]["value"],
+        "untouched"
+    );
+    assert_eq!(
+        snapshot.models.raw_hash,
+        sha2::Sha256::digest(models.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+}
+
+#[test]
+fn overview_reads_standard_omp_model_definition_lists() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  standard:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: standard-model
+        name: Standard Model
+        api: openai-responses
+        reasoning: true
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: standard/standard-model\n",
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+
+    assert_eq!(dto["state"], "normal");
+    assert_eq!(dto["counts"]["providerCount"], 1);
+    assert_eq!(dto["counts"]["modelCount"], 1);
+    assert_eq!(dto["providers"][0]["classification"], "custom");
+    assert_eq!(dto["providers"][0]["editable"], true);
+    assert_eq!(dto["providers"][0]["modelCount"], 1);
+    assert_eq!(dto["models"][0]["id"], "standard-model");
+    assert_eq!(dto["models"][0]["complete"], true);
+    assert_eq!(dto["models"][0]["editable"], true);
+}
+
+#[test]
+fn overview_does_not_inherit_provider_api_past_unsupported_model_override() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  custom:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: unsupported-override
+        name: Unsupported Override
+        api: unsupported-custom-api
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: custom/unsupported-override\n",
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    let model = &dto["models"][0];
+
+    assert_eq!(model["effectiveApi"], serde_json::Value::Null);
+    assert_eq!(model["apiSource"], serde_json::Value::Null);
+    assert_eq!(model["editable"], false);
+    assert_eq!(
+        model["readOnlyReason"],
+        "Model definition 使用了不支持的协议。"
+    );
+}
+
+#[test]
+fn overview_inherits_provider_api_for_null_model_api() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  custom:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: null-api
+        name: Null API
+        api: null
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: custom/null-api\n",
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    let model = &dto["models"][0];
+
+    assert_eq!(model["effectiveApi"], "openai-responses");
+    assert_eq!(model["apiSource"], "provider");
+    assert_eq!(model["complete"], true);
+    assert_eq!(model["editable"], true);
+    assert_eq!(model["readOnlyReason"], serde_json::Value::Null);
+}
+
+#[test]
+fn overview_allows_null_provider_api_with_supported_model_override() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  custom:
+    baseUrl: https://example.com/v1
+    api: null
+    models:
+      - id: model-override
+        name: Model Override
+        api: openai-responses
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: custom/model-override\n",
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    let provider = &dto["providers"][0];
+    let model = &dto["models"][0];
+
+    assert_eq!(dto["state"], "normal");
+    assert_eq!(provider["defaultApi"], serde_json::Value::Null);
+    assert_eq!(provider["classification"], "custom");
+    assert_eq!(provider["editable"], true);
+    assert_eq!(provider["readOnlyReason"], serde_json::Value::Null);
+    assert_eq!(model["effectiveApi"], "openai-responses");
+    assert_eq!(model["apiSource"], "model");
+    assert_eq!(model["complete"], true);
+    assert_eq!(model["editable"], true);
+}
+
+#[test]
+fn overview_excludes_unconfigured_roles_from_configured_role_count() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  custom:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: configured
+        name: Configured
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: custom/configured\n  empty: ''\n  unset: null\n",
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+
+    assert_eq!(dto["roles"].as_array().unwrap().len(), 3);
+    assert_eq!(dto["counts"]["roleCount"], 1);
+}
+
+#[test]
+fn overview_read_only_reason_identifies_unsupported_provider_shapes() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        "providers:\n  unsupported:\n    baseUrl: ftp://example.com\n    models:\n      - id: local\n        name: Local\n        api: openai-responses\n        input: [text]\n        contextWindow: 100\n        maxTokens: 10\n",
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+
+    assert_eq!(dto["state"], "read-only");
+    assert_eq!(dto["providers"][0]["classification"], "unsupported");
+    assert_eq!(
+        dto["readOnlyReason"],
+        "当前配置包含以下只读 Provider 分类：不支持的 Provider/Model 结构。"
+    );
+}
+
+#[test]
+fn overview_read_only_reason_enumerates_mixed_provider_classifications() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  openai:
+    models:
+      - id: gpt-5.6-sol
+        name: Bundled
+        api: openai-responses
+        input: [text]
+        contextWindow: 100
+        maxTokens: 10
+  advanced:
+    baseUrl: https://example.com/v1
+    headers:
+      x-test: value
+    models:
+      - id: advanced-model
+        name: Advanced
+        api: openai-responses
+        input: [text]
+        contextWindow: 100
+        maxTokens: 10
+  unsupported:
+    baseUrl: ftp://example.com
+    models:
+      - id: unsupported-model
+        name: Unsupported
+        api: openai-responses
+        input: [text]
+        contextWindow: 100
+        maxTokens: 10
+"#,
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+
+    assert_eq!(dto["state"], "read-only");
+    assert_eq!(
+        dto["readOnlyReason"],
+        "当前配置包含以下只读 Provider 分类：OMP 内置 Provider/Model 覆盖、高级 Provider、不支持的 Provider/Model 结构。"
+    );
+}
+
+#[test]
+fn overview_counts_only_custom_providers_and_marks_overrides() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  openai:
+    models:
+      - id: gpt-5.6-sol
+        name: Bundled
+        api: openai-responses
+        input: [text]
+        contextWindow: 100
+        maxTokens: 10
+  missing:
+    models:
+      - id: local
+        name: Missing URL
+        api: openai-responses
+        input: [text]
+        contextWindow: 100
+        maxTokens: 10
+  malformed:
+    baseUrl: ftp://example.com
+    models:
+      - id: local
+        name: Malformed URL
+        api: openai-responses
+        input: [text]
+        contextWindow: 100
+        maxTokens: 10
+  nonString:
+    baseUrl: 42
+    models:
+      - id: local
+        name: Non-string URL
+        api: openai-responses
+        input: [text]
+        contextWindow: 100
+        maxTokens: 10
+  empty:
+    models: []
+  custom:
+    baseUrl: https://example.com
+    models:
+      - id: local
+        name: Local
+        api: openai-responses
+        input: [text]
+        contextWindow: 100
+        maxTokens: 10
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: custom/local\n  alias: '@default'\n",
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    assert_eq!(dto["state"], "normal");
+    assert_eq!(dto["counts"]["providerCount"], 1);
+    assert_eq!(dto["counts"]["modelCount"], 5);
+    assert_eq!(dto["counts"]["roleCount"], 2);
+    let providers = dto["providers"].as_array().unwrap();
+    let provider = |id: &str| {
+        providers
+            .iter()
+            .find(|provider| provider["id"] == id)
+            .unwrap()
+    };
+    assert_eq!(provider("openai")["classification"], "built-in-override");
+    assert_eq!(provider("empty")["classification"], "unsupported");
+    assert_eq!(provider("custom")["classification"], "custom");
+    for id in ["missing", "malformed", "nonString"] {
+        let provider = provider(id);
+        assert_eq!(provider["classification"], "unsupported");
+        assert_eq!(provider["editable"], false);
+        assert!(
+            provider["readOnlyReason"]
+                .as_str()
+                .unwrap()
+                .contains("HTTP(S) Base URL")
+        );
+    }
+    let roles = dto["roles"].as_array().unwrap();
+    let role = |id: &str| roles.iter().find(|role| role["id"] == id).unwrap();
+    assert_eq!(role("default")["status"], "configured");
+    assert_eq!(role("alias")["status"], "advanced");
+}
+
+#[test]
+fn overview_parse_failure_clears_previous_business_snapshot() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+
+    let service = service_for_target(&target);
+    let _ = service.get_overview_load();
+    fs::write(target.join("models.yml"), "providers: [\n").unwrap();
+
+    let error = service.get_overview_load().error.unwrap();
+    assert_eq!(error.code, "overview-parse-error");
+    assert!(service.configuration_snapshot_for_test().is_none());
+}
+#[test]
+fn overview_reads_yaml_only_targets_as_read_only() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yaml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yaml"), "modelRoles: {}\n").unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    assert_eq!(dto["state"], "read-only");
+    assert_eq!(dto["files"]["models"]["status"], "alternate-only");
+    assert_eq!(dto["files"]["config"]["status"], "alternate-only");
+    assert!(service.configuration_snapshot_for_test().is_some());
+}
+
+#[test]
+fn overview_missing_canonical_files_returns_empty_without_business_snapshot() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    assert_eq!(dto["state"], "empty");
+    assert_eq!(dto["counts"]["providerCount"], 0);
+    assert_eq!(dto["counts"]["modelCount"], 0);
+    assert_eq!(dto["counts"]["roleCount"], 0);
+    assert!(service.configuration_snapshot_for_test().is_none());
 }

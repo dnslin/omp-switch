@@ -30,7 +30,7 @@ export function Select({ label = "请选择" }: { label?: string }) {
 export function StatusIndicator({
   tone = "success",
   children,
-}: PropsWithChildren<{ tone?: "success" | "neutral" | "warning" }>) {
+}: PropsWithChildren<{ tone?: "success" | "neutral" | "warning" | "danger" }>) {
   return (
     <span className={`status-indicator status-indicator--${tone}`}>
       <span className="status-dot" aria-hidden="true" />

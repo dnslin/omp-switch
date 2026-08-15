@@ -1,10 +1,11 @@
+import { StrictMode } from "react";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import { TauriClientProvider, type StartupState, type TargetConfigurationDiscovery, type TauriClient } from "../lib/tauri-client";
+import { TauriClientProvider, type OverviewDto, type OverviewLoad, type StartupState, type TargetConfigurationDiscovery, type TauriClient } from "../lib/tauri-client";
 
 
 function targetConfiguration(
@@ -36,6 +37,7 @@ const unavailableClient: TauriClient = {
     kind: "omp-unavailable",
     message: "未在已保存路径或系统 PATH 中找到可用的 OMP。",
   }),
+  getOverviewLoad: async () => overviewLoad(overviewDto({ state: "empty", counts: { providerCount: 0, modelCount: 0, roleCount: 0 }, providers: [], models: [], roles: [], emptyReason: "还没有可管理的自定义 Provider。", nextAction: "创建一个 Provider，并同时配置它的第一个模型。" })),
   detectOmp: async () => ({ kind: "omp-unavailable", message: "仍未找到 OMP" }),
   selectOmpExecutable: async () => null,
   validateSelectedOmp: async () => ({ kind: "invalid-executable", executablePath: "/tmp/not-omp", message: "无法运行", diagnosticCode: "io-not-found" }),
@@ -60,15 +62,30 @@ const readyState: StartupState = {
   requiresConfirmation: false,
 };
 
+function overviewLoad(overview: OverviewDto, startupState: StartupState = { kind: "omp-unavailable", message: "未在已保存路径或系统 PATH 中找到可用的 OMP。" }): OverviewLoad {
+  return { startupState, overview, error: null };
+}
 
-function renderRoute(route: string, client: TauriClient = unavailableClient) {
-  return render(
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+
+function renderRoute(route: string, client: TauriClient = unavailableClient, strictMode = false) {
+  const app = (
     <TauriClientProvider client={client}>
       <MemoryRouter initialEntries={[route]}>
         <App />
       </MemoryRouter>
-    </TauriClientProvider>,
+    </TauriClientProvider>
   );
+  return render(strictMode ? <StrictMode>{app}</StrictMode> : app);
 }
 
 describe("React page seam", () => {
@@ -605,9 +622,12 @@ describe("React page seam", () => {
     expect(screen.getByRole("link", { name: "返回概览" })).toHaveAttribute("href", "/overview");
   });
 
-  it("shows the AppError message and next action without exposing unrelated details", async () => {
+  it("shows settings read errors while keeping Overview selection session-only", async () => {
+    const user = userEvent.setup();
+    const saveUiSettings = vi.fn(unavailableClient.saveUiSettings);
     renderRoute("/overview", {
       ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewSelectionDto()),
       getUiSettings: async () => {
         throw {
           code: "settings-read-failed",
@@ -616,10 +636,609 @@ describe("React page seam", () => {
           internal: "sensitive internal detail",
         };
       },
+      saveUiSettings,
     });
 
     expect(await screen.findByText("无法读取界面状态")).toBeVisible();
     expect(screen.getByText("请检查应用数据目录权限。")).toBeVisible();
     expect(screen.queryByText("sensitive internal detail")).not.toBeInTheDocument();
+    const provider = screen.getByRole("combobox", { name: "Provider" });
+    const model = screen.getByRole("combobox", { name: "模型" });
+    expect(provider).toHaveTextContent("dnslin");
+    expect(model).toHaveTextContent("gpt-5.6-sol");
+
+    await user.click(provider);
+    await user.click(await screen.findByRole("option", { name: "anthropic" }));
+    await user.click(model);
+    await user.click(await screen.findByRole("option", { name: "claude-sonnet-4" }));
+    expect(model).toHaveTextContent("claude-sonnet-4");
+    expect(saveUiSettings).not.toHaveBeenCalled();
+  });
+});
+
+function overviewDto(overrides: Partial<OverviewDto> = {}): OverviewDto {
+  const model = {
+    providerId: "dnslin",
+    id: "gpt-5.6-sol",
+    name: "Sol",
+    effectiveApi: "openai-responses",
+    apiSource: "model",
+    input: ["text", "image"],
+    reasoning: true,
+    contextWindow: 356000,
+    maxTokens: 32768,
+    complete: true,
+    editable: true,
+    readOnlyReason: null,
+  };
+  return {
+    state: "normal",
+    omp: { status: "connected", executablePath: "/usr/local/bin/omp", version: "17.4.1" },
+    targetConfiguration: targetConfiguration(),
+    files: {
+      models: { canonicalPath: "/Users/username/.omp/agent/models.yml", resolvedPath: "/Users/username/.omp/agent/models.yml", status: "normal", contentHash: "models-hash" },
+      config: { canonicalPath: "/Users/username/.omp/agent/config.yml", resolvedPath: "/Users/username/.omp/agent/config.yml", status: "normal", contentHash: "config-hash" },
+    },
+    counts: { providerCount: 1, modelCount: 1, roleCount: 2 },
+    providers: [{ id: "dnslin", name: "Local", baseUrl: "https://example.com", defaultApi: "openai-responses", authMode: "api-key", hasApiKey: true, modelCount: 1, classification: "custom", editable: true, readOnlyReason: null, models: [model] }],
+    models: [model],
+    roles: [{ id: "default", status: "configured", selector: "dnslin/gpt-5.6-sol:max" }, { id: "task", status: "configured", selector: "dnslin/gpt-5.6-sol" }],
+    emptyReason: null,
+    nextAction: null,
+    readOnlyReason: null,
+    ...overrides,
+  };
+}
+
+function overviewSelectionDto(): OverviewDto {
+  const primary = overviewDto();
+  const anthropicModel = {
+    ...primary.models[0],
+    providerId: "anthropic",
+    id: "claude-sonnet-4",
+    name: "Claude Sonnet 4",
+    effectiveApi: "anthropic-messages",
+    apiSource: "provider",
+    input: ["text"],
+    reasoning: false,
+    contextWindow: 200000,
+    maxTokens: 8192,
+  };
+  const anthropicProvider = {
+    ...primary.providers[0],
+    id: "anthropic",
+    name: "Anthropic",
+    baseUrl: "https://api.anthropic.com",
+    defaultApi: "anthropic-messages",
+    modelCount: 1,
+    models: [anthropicModel],
+  };
+  return overviewDto({
+    counts: { providerCount: 2, modelCount: 2, roleCount: 2 },
+    providers: [primary.providers[0], anthropicProvider],
+    models: [primary.models[0], anthropicModel],
+  });
+}
+
+describe("Overview page seam", () => {
+  it("renders the normal overview, safe counts, and connected sidebar status", async () => {
+    const overview = overviewDto();
+
+    renderRoute("/overview", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) });
+
+    expect(await screen.findByRole("heading", { name: "概览" })).toBeVisible();
+    expect(screen.getByText("查看当前配置状态并快速验证模型连接。")).toBeVisible();
+    expect(screen.getByText("自定义 Provider")).toBeVisible();
+    expect(screen.getAllByText("1")[0]).toBeVisible();
+    expect(screen.getByLabelText(/OMP 已连接.*v17\.4\.1/)).toBeVisible();
+    expect(screen.getAllByText("/Users/username/.omp/agent")[0]).toBeVisible();
+    expect(screen.queryByText("super-secret-api-key")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "测试模型（尚未启用）" })).toBeDisabled();
+    expect(screen.getByRole("region", { name: "快速测试" })).toHaveTextContent(/Text\s+·\s+Image\s+·\s+Reasoning/);
+    expect(screen.getByRole("region", { name: "测试结果" })).toBeVisible();
+    expect(screen.getByText("尚未测试")).toBeVisible();
+  });
+  it("explains when the final endpoint cannot be constructed", async () => {
+    const overview = overviewDto();
+    const provider = {
+      ...overview.providers[0],
+      baseUrl: "[配置地址因无法解析而已脱敏]",
+    };
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto({ providers: [provider] })),
+    });
+
+    const panel = await screen.findByRole("region", { name: "快速测试" });
+    expect(panel).toHaveTextContent("Provider Base URL 无效或已脱敏");
+  });
+  it("rejects a non-HTTP Provider Base URL from the final endpoint preview", async () => {
+    const overview = overviewDto();
+    const provider = {
+      ...overview.providers[0],
+      baseUrl: "ftp://example.com",
+    };
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto({ providers: [provider] })),
+    });
+
+    const panel = await screen.findByRole("region", { name: "快速测试" });
+    expect(panel).toHaveTextContent("Provider Base URL 必须使用 HTTP(S)");
+    expect(panel).not.toHaveTextContent("ftp://example.com/v1/responses");
+  });
+  it("exposes Provider and Model choices as accessible comboboxes", async () => {
+    const user = userEvent.setup();
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewSelectionDto()),
+    });
+
+    const provider = await screen.findByRole("combobox", { name: "Provider" });
+    const model = screen.getByRole("combobox", { name: "模型" });
+    expect(provider).toHaveTextContent("dnslin");
+    expect(model).toHaveTextContent("gpt-5.6-sol");
+
+    await user.click(provider);
+    expect(await screen.findByRole("option", { name: "dnslin" })).toBeVisible();
+    expect(screen.getByRole("option", { name: "anthropic" })).toBeVisible();
+    await user.keyboard("{Escape}");
+
+    await user.click(model);
+    expect(await screen.findByRole("option", { name: "gpt-5.6-sol" })).toBeVisible();
+  });
+  it("exposes an overlong Model Stable ID through the accessible option", async () => {
+    const user = userEvent.setup();
+    const overview = overviewDto();
+    const longModelId = "model-with-an-overlong-stable-id-that-must-not-expand-the-approved-overview-select-width-0123456789";
+    const longModel = { ...overview.models[0], id: longModelId };
+    const provider = { ...overview.providers[0], models: [longModel] };
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto({ providers: [provider], models: [longModel] })),
+    });
+
+    const model = await screen.findByRole("combobox", { name: "模型" });
+    await user.click(model);
+    const option = await screen.findByRole("option", { name: longModelId });
+    expect(option).toHaveTextContent(longModelId);
+  });
+  it("disables empty Provider and Model comboboxes with explicit placeholders", async () => {
+    const overview = overviewDto({
+      state: "empty",
+      counts: { providerCount: 0, modelCount: 0, roleCount: 0 },
+      providers: [],
+      models: [],
+      roles: [],
+      emptyReason: "还没有可管理的自定义 Provider。",
+      nextAction: "创建一个 Provider，并同时配置它的第一个模型。",
+    });
+    renderRoute("/overview", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) });
+
+    const provider = await screen.findByRole("combobox", { name: "Provider" });
+    const model = screen.getByRole("combobox", { name: "模型" });
+    expect(provider).toBeDisabled();
+    expect(provider).toHaveTextContent("暂无 Provider");
+    expect(model).toBeDisabled();
+    expect(model).toHaveTextContent("暂无模型");
+  });
+  it("clears an incompatible Model on Provider change and persists complete settings", async () => {
+    const user = userEvent.setup();
+    const saveUiSettings = vi.fn(unavailableClient.saveUiSettings);
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewSelectionDto()),
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        costNoticeAccepted: true,
+      }),
+      saveUiSettings,
+    });
+
+    const provider = await screen.findByRole("combobox", { name: "Provider" });
+    await user.click(provider);
+    await user.click(await screen.findByRole("option", { name: "anthropic" }));
+
+    const panel = screen.getByRole("region", { name: "快速测试" });
+    const model = screen.getByRole("combobox", { name: "模型" });
+    expect(model).toHaveTextContent("请选择模型");
+    expect(panel).toHaveTextContent(/有效协议—最终地址—能力—Context Window—/);
+    await waitFor(() => expect(saveUiSettings).toHaveBeenCalledTimes(1));
+    expect(saveUiSettings).toHaveBeenNthCalledWith(1, {
+      theme: "dark",
+      selectedProviderId: "anthropic",
+      selectedModelId: null,
+      costNoticeAccepted: true,
+    });
+
+    await user.click(model);
+    await user.click(await screen.findByRole("option", { name: "claude-sonnet-4" }));
+    expect(panel).toHaveTextContent(/anthropic-messages\s+·\s+Provider 默认值/);
+    expect(panel).toHaveTextContent("https://api.anthropic.com/v1/messages");
+    expect(panel).toHaveTextContent("Text");
+    expect(panel).toHaveTextContent("200,000");
+    await waitFor(() => expect(saveUiSettings).toHaveBeenCalledTimes(2));
+    expect(saveUiSettings).toHaveBeenNthCalledWith(2, {
+      theme: "dark",
+      selectedProviderId: "anthropic",
+      selectedModelId: "claude-sonnet-4",
+      costNoticeAccepted: true,
+    });
+  });
+  it("serializes rapid Provider and Model saves", async () => {
+    const user = userEvent.setup();
+    const firstSave = deferred<Awaited<ReturnType<TauriClient["saveUiSettings"]>>>();
+    const secondSave = deferred<Awaited<ReturnType<TauriClient["saveUiSettings"]>>>();
+    const saveUiSettings = vi.fn<TauriClient["saveUiSettings"]>()
+      .mockImplementationOnce(() => firstSave.promise)
+      .mockImplementationOnce(() => secondSave.promise);
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewSelectionDto()),
+      getUiSettings: async () => ({
+        ompExecutablePath: null,
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        costNoticeAccepted: true,
+      }),
+      saveUiSettings,
+    });
+
+    const provider = await screen.findByRole("combobox", { name: "Provider" });
+    await user.click(provider);
+    await user.click(await screen.findByRole("option", { name: "anthropic" }));
+    await waitFor(() => expect(saveUiSettings).toHaveBeenCalledTimes(1));
+
+    const model = screen.getByRole("combobox", { name: "模型" });
+    await user.click(model);
+    await user.click(await screen.findByRole("option", { name: "claude-sonnet-4" }));
+    expect(model).toHaveTextContent("claude-sonnet-4");
+    expect(saveUiSettings).toHaveBeenCalledTimes(1);
+
+    firstSave.reject({
+      code: "settings-write-failed",
+      message: "无法保存快速测试选择",
+      action: "请重试。",
+    });
+    expect(await screen.findByText("无法保存快速测试选择")).toBeVisible();
+    await waitFor(() => expect(saveUiSettings).toHaveBeenCalledTimes(2));
+    expect(saveUiSettings).toHaveBeenNthCalledWith(2, {
+      theme: "dark",
+      selectedProviderId: "anthropic",
+      selectedModelId: "claude-sonnet-4",
+      costNoticeAccepted: true,
+    });
+    secondSave.resolve({
+      ompExecutablePath: null,
+      theme: "dark",
+      selectedProviderId: "anthropic",
+      selectedModelId: "claude-sonnet-4",
+      costNoticeAccepted: true,
+    });
+  });
+  it("waits for UI settings hydration before showing overview content", async () => {
+    const settings = deferred<Awaited<ReturnType<TauriClient["getUiSettings"]>>>();
+    const getOverviewLoad = vi.fn(async () => overviewLoad(overviewDto()));
+    const saveUiSettings = vi.fn(unavailableClient.saveUiSettings);
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad,
+      getUiSettings: () => settings.promise,
+      saveUiSettings,
+    });
+
+    await screen.findByRole("heading", { name: "概览" });
+    await waitFor(() => expect(getOverviewLoad).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("status", { name: "正在读取配置" })).toBeVisible();
+    expect(screen.queryByRole("region", { name: "快速测试" })).not.toBeInTheDocument();
+
+    settings.resolve({
+      ompExecutablePath: null,
+      theme: "system",
+      selectedProviderId: null,
+      selectedModelId: null,
+      costNoticeAccepted: false,
+    });
+
+    expect(await screen.findByRole("region", { name: "快速测试" })).toBeVisible();
+    expect(saveUiSettings).not.toHaveBeenCalled();
+  });
+  it("restores a saved Provider and Model pair without saving during hydration", async () => {
+    const overview = overviewSelectionDto();
+    const saveUiSettings = vi.fn(unavailableClient.saveUiSettings);
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overview),
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "anthropic",
+        selectedModelId: "claude-sonnet-4",
+        costNoticeAccepted: true,
+      }),
+      saveUiSettings,
+    });
+
+    const panel = await screen.findByRole("region", { name: "快速测试" });
+    expect(screen.getByRole("combobox", { name: "Provider" })).toHaveTextContent("anthropic");
+    expect(screen.getByRole("combobox", { name: "模型" })).toHaveTextContent("claude-sonnet-4");
+    expect(panel).toHaveTextContent("anthropic");
+    expect(panel).toHaveTextContent("claude-sonnet-4");
+    expect(panel).toHaveTextContent(/anthropic-messages\s+·\s+Provider 默认值/);
+    expect(panel).toHaveTextContent("https://api.anthropic.com/v1/messages");
+    expect(panel).toHaveTextContent("200,000");
+    expect(saveUiSettings).not.toHaveBeenCalled();
+  });
+  it("preserves a saved Provider with an intentionally empty Model", async () => {
+    const saveUiSettings = vi.fn(unavailableClient.saveUiSettings);
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewSelectionDto()),
+      getUiSettings: async () => ({
+        ompExecutablePath: null,
+        theme: "system",
+        selectedProviderId: "anthropic",
+        selectedModelId: null,
+        costNoticeAccepted: false,
+      }),
+      saveUiSettings,
+    });
+
+    const panel = await screen.findByRole("region", { name: "快速测试" });
+    expect(panel).toHaveTextContent("anthropic");
+    expect(panel).toHaveTextContent("请选择模型");
+    expect(panel).not.toHaveTextContent("claude-sonnet-4");
+    expect(saveUiSettings).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["stale Model", "dnslin", "claude-sonnet-4", "dnslin", null],
+    ["missing Provider", "removed-provider", "claude-sonnet-4", null, null],
+    ["Model without Provider", null, "claude-sonnet-4", null, null],
+  ] as const)("cleans a %s selection once under StrictMode", async (_case, selectedProviderId, selectedModelId, expectedProviderId, expectedModelId) => {
+    const saveUiSettings = vi.fn(unavailableClient.saveUiSettings);
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewSelectionDto()),
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId,
+        selectedModelId,
+        costNoticeAccepted: true,
+      }),
+      saveUiSettings,
+    }, true);
+
+    expect(await screen.findByText("之前选择的模型已不存在，请重新选择。")).toBeVisible();
+    await waitFor(() => expect(saveUiSettings).toHaveBeenCalledTimes(1));
+    expect(saveUiSettings).toHaveBeenCalledWith({
+      theme: "dark",
+      selectedProviderId: expectedProviderId,
+      selectedModelId: expectedModelId,
+      costNoticeAccepted: true,
+    });
+    expect(screen.getAllByText("之前选择的模型已不存在，请重新选择。")).toHaveLength(1);
+  });
+  it("exercises the duplicate overview load caused by React StrictMode", async () => {
+    const getOverviewLoad = vi.fn(async () => overviewLoad(overviewDto()));
+    renderRoute("/overview", { ...unavailableClient, getOverviewLoad }, true);
+
+    expect(await screen.findByRole("heading", { name: "概览" })).toBeVisible();
+    await waitFor(() => expect(getOverviewLoad).toHaveBeenCalledTimes(2));
+  });
+  it.each([
+    ["openai-responses", "https://example.com/v1/responses?region=us"],
+    ["google-generative-ai", "https://example.com/v1/models/gpt-5.6-sol:streamGenerateContent?region=us&alt=sse"],
+  ] as const)("builds the %s preview path before the base URL query", async (effectiveApi, expectedAddress) => {
+    const overview = overviewDto();
+    const model = { ...overview.models[0], effectiveApi };
+    const provider = { ...overview.providers[0], baseUrl: "https://example.com/v1?region=us", models: [model] };
+    const updated = overviewDto({ providers: [provider], models: [model] });
+    renderRoute("/overview", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(updated) });
+
+    expect(await screen.findByRole("region", { name: "快速测试" })).toHaveTextContent(expectedAddress);
+  });
+
+  it("does not preselect a read-only model in quick test", async () => {
+    const overview = overviewDto();
+    const readOnlyModel = {
+      ...overview.models[0],
+      providerId: "missing",
+      id: "invalid-model",
+      editable: false,
+      readOnlyReason: "Provider 必须包含有效的 HTTP(S) Base URL。",
+    };
+    const readOnlyProvider = {
+      ...overview.providers[0],
+      id: "missing",
+      editable: false,
+      classification: "unsupported" as const,
+      readOnlyReason: "Provider 必须包含有效的 HTTP(S) Base URL。",
+      models: [readOnlyModel],
+    };
+    const updated = overviewDto({
+      counts: { providerCount: 1, modelCount: 2, roleCount: 0 },
+      providers: [readOnlyProvider, overview.providers[0]],
+      models: [readOnlyModel, overview.models[0]],
+      roles: [],
+    });
+    renderRoute("/overview", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(updated) });
+
+    const panel = await screen.findByRole("region", { name: "快速测试" });
+    expect(panel).toHaveTextContent("dnslin");
+    expect(panel).toHaveTextContent("gpt-5.6-sol");
+    expect(panel).not.toHaveTextContent("missing");
+  });
+  it("allows read-only incomplete projections to be selected for safe summaries", async () => {
+    const user = userEvent.setup();
+    const overview = overviewSelectionDto();
+    const readOnlyModel = {
+      ...overview.models[0],
+      providerId: "legacy",
+      id: "legacy-preview",
+      effectiveApi: "openai-completions",
+      apiSource: "model",
+      input: ["text", "image"],
+      reasoning: true,
+      contextWindow: 64000,
+      complete: false,
+      editable: false,
+      readOnlyReason: "模型包含当前版本不支持的字段。",
+    };
+    const readOnlyProvider = {
+      ...overview.providers[0],
+      id: "legacy",
+      name: "Legacy",
+      baseUrl: "https://legacy.example/v1",
+      defaultApi: "openai-completions",
+      modelCount: 1,
+      classification: "advanced" as const,
+      editable: false,
+      readOnlyReason: "Provider 包含当前版本不支持的字段。",
+      models: [readOnlyModel],
+    };
+    const updated = overviewDto({
+      counts: { providerCount: 3, modelCount: 3, roleCount: 2 },
+      providers: [...overview.providers, readOnlyProvider],
+      models: [...overview.models, readOnlyModel],
+    });
+    renderRoute("/overview", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(updated) });
+
+    const provider = await screen.findByRole("combobox", { name: "Provider" });
+    await user.click(provider);
+    await user.click(await screen.findByRole("option", { name: "legacy" }));
+    const model = screen.getByRole("combobox", { name: "模型" });
+    await user.click(model);
+    await user.click(await screen.findByRole("option", { name: "legacy-preview" }));
+
+    const panel = screen.getByRole("region", { name: "快速测试" });
+    expect(panel).toHaveTextContent(/openai-completions\s+·\s+模型指定/);
+    expect(panel).toHaveTextContent("https://legacy.example/v1/chat/completions");
+    expect(panel).toHaveTextContent(/Text\s+·\s+Image\s+·\s+Reasoning/);
+    expect(panel).toHaveTextContent("64,000");
+    expect(screen.getByRole("button", { name: "测试模型（尚未启用）" })).toBeDisabled();
+  });
+
+  it("keeps an alternate YAML file in warning status", async () => {
+    const overview = overviewDto({
+      files: {
+        models: { ...overviewDto().files.models, status: "canonical-with-alternate" },
+        config: overviewDto().files.config,
+      },
+    });
+    const { container } = renderRoute("/overview", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) });
+    expect(await screen.findByText(/models\.yml\s+正常 · 有 \.yaml/)).toBeVisible();
+    expect(container.querySelectorAll(".overview-file-status-icon--warning")).toHaveLength(1);
+  });
+
+  it.each([
+    [overviewDto({ state: "empty", counts: { providerCount: 0, modelCount: 0, roleCount: 0 }, providers: [], models: [], roles: [], emptyReason: "还没有可管理的自定义 Provider。", nextAction: "创建一个 Provider，并同时配置它的第一个模型。" }), "还没有可管理的自定义 Provider", "创建一个 Provider，并同时配置它的第一个模型"],
+    [overviewDto({ state: "read-only", readOnlyReason: "当前配置只能查看；OMP Switch 不会修改 .yaml 或不可写文件。" }), "配置只读", "当前配置只能查看"],
+  ] as const)("renders overview %s state", async (overview, visibleText, detailText) => {
+    renderRoute("/overview", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) });
+    expect((await screen.findAllByText(new RegExp(visibleText)))[0]).toBeVisible();
+    expect(screen.getByText(new RegExp(detailText))).toBeVisible();
+  });
+  it.each([
+    [overviewDto({ state: "empty", counts: { providerCount: 0, modelCount: 0, roleCount: 0 }, providers: [], models: [], roles: [], emptyReason: "还没有可管理的自定义 Provider。", nextAction: "创建一个 Provider，并同时配置它的第一个模型。" }), "新增 Provider"],
+    [overviewDto({ state: "read-only", readOnlyReason: "当前配置只能查看；OMP Switch 不会修改 .yaml 或不可写文件。" }), "查看 Providers"],
+  ] as const)("offers the required Overview state action for %s", async (overview, actionLabel) => {
+    const user = userEvent.setup();
+    renderRoute("/overview", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) });
+
+    await user.click(await screen.findByRole("link", { name: actionLabel }));
+    expect(await screen.findByRole("heading", { name: "Providers" })).toBeVisible();
+  });
+  it("renders missing files without success indicators", async () => {
+    const overview = overviewDto({
+      state: "empty",
+      files: {
+        models: { ...overviewDto().files.models, resolvedPath: null, status: "missing", contentHash: null },
+        config: { ...overviewDto().files.config, resolvedPath: null, status: "missing", contentHash: null },
+      },
+      counts: { providerCount: 0, modelCount: 0, roleCount: 0 },
+      providers: [],
+      models: [],
+      roles: [],
+      emptyReason: "还没有可管理的自定义 Provider。",
+      nextAction: "创建一个 Provider，并同时配置它的第一个模型。",
+    });
+    const { container } = renderRoute("/overview", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) });
+    expect(await screen.findByText(/models\.yml\s+缺失/)).toBeVisible();
+    expect(screen.getByText(/config\.yml\s+缺失/)).toBeVisible();
+    const strip = screen.getByRole("region", { name: "配置同步状态" });
+    expect(strip.querySelectorAll(".overview-file-status-icon--success")).toHaveLength(0);
+    expect(strip.querySelectorAll(".overview-file-status-icon--warning")).toHaveLength(2);
+    expect(container.querySelectorAll(".overview-file-status-icon--danger")).toHaveLength(0);
+  });
+
+
+  it("renders loading and error states without stale overview data, then retries", async () => {
+    const user = userEvent.setup();
+    let rejectInitial!: (error: unknown) => void;
+    let resolveRetry!: (value: OverviewLoad) => void;
+    const getOverviewLoad = vi.fn()
+      .mockImplementationOnce(() => new Promise<OverviewLoad>((_, reject) => { rejectInitial = reject; }))
+      .mockImplementationOnce(() => new Promise<OverviewLoad>((resolve) => { resolveRetry = resolve; }));
+    renderRoute("/overview", { ...unavailableClient, getOverviewLoad });
+
+    expect(screen.getByRole("status", { name: "正在读取配置" })).toBeVisible();
+    expect(screen.queryByText("1")).not.toBeInTheDocument();
+    rejectInitial({ code: "overview-parse-error", message: "无法读取配置", action: "请在外部修复 YAML 后重新读取。" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法读取配置");
+    expect(screen.queryByText("1")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "重新读取" }));
+    expect(screen.getByRole("status", { name: "正在读取配置" })).toBeVisible();
+    resolveRetry(overviewLoad(overviewDto()));
+    expect((await screen.findAllByText("1"))[0]).toBeVisible();
+  });
+  it("keeps startup metadata when overview load reports an error", async () => {
+    const getOverviewLoad = async (): Promise<OverviewLoad> => ({
+      startupState: readyState,
+      overview: null,
+      error: { code: "overview-read-failed", message: "无法读取配置", action: "请检查权限后重试。" },
+    });
+    renderRoute("/overview", { ...unavailableClient, getOverviewLoad });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法读取配置");
+    expect(screen.getByRole("link", { name: /OMP 已连接.*v17\.4\.1/ })).toBeVisible();
+  });
+  it("routes unconfirmed OMP switches to setup", async () => {
+    const confirmationState: StartupState = {
+      ...readyState,
+      previousTargetConfiguration: "/Users/username/.omp/agent",
+      requiresConfirmation: true,
+    };
+    const getOverviewLoad = async (): Promise<OverviewLoad> => ({
+      startupState: confirmationState,
+      overview: null,
+      error: { code: "overview-confirmation-required", message: "无法读取尚未确认的 OMP 配置切换。", action: "请返回“设置 OMP”页确认新的 OMP 与 Target configuration 后再读取概览。" },
+    });
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getStartupState: async () => confirmationState,
+      getOverviewLoad,
+    });
+
+    expect(await screen.findByRole("heading", { name: "确认切换 OMP" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "确认切换并进入应用" })).toBeVisible();
+  });
+
+
+
+  it("opens the Settings destination from the overview status footer", async () => {
+    const user = userEvent.setup();
+    renderRoute("/overview", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overviewDto()) });
+    await screen.findByRole("heading", { name: "概览" });
+    const footer = screen.getByRole("link", { name: /OMP 已连接/ });
+    expect(footer).toHaveAttribute("href", "/settings#omp-settings");
+    await user.click(footer);
+    expect(await screen.findByRole("heading", { name: "设置" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "OMP 与 Target configuration" })).toBeVisible();
   });
 });

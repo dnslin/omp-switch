@@ -26,3 +26,16 @@ impl AppError {
         }
     }
 }
+
+pub(crate) fn io_error_cause(kind: std::io::ErrorKind) -> &'static str {
+    match kind {
+        std::io::ErrorKind::NotFound => "io-not-found",
+        std::io::ErrorKind::PermissionDenied => "io-permission-denied",
+        std::io::ErrorKind::AlreadyExists => "io-already-exists",
+        std::io::ErrorKind::InvalidInput => "io-invalid-input",
+        std::io::ErrorKind::InvalidData => "io-invalid-data",
+        std::io::ErrorKind::WriteZero => "io-write-zero",
+        std::io::ErrorKind::StorageFull => "io-storage-full",
+        _ => "io-other",
+    }
+}

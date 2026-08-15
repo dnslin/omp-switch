@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -6,13 +7,14 @@ use std::{
     time::Instant,
 };
 
-use parking_lot::RwLock;
+use parking_lot::{Condvar, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::{
-    error::AppError,
+    error::{AppError, io_error_cause},
     omp_environment::{OmpEnvironment, SystemOmpEnvironment},
+    overview::{ConfigurationSnapshot, OverviewDto, read_overview},
     redaction::redact_diagnostic,
     target_configuration::{
         TargetConfigurationDiscovery, TargetConfigurationStatus, TargetInitializationExpectation,
@@ -57,6 +59,13 @@ pub enum StartupState {
         requires_confirmation: bool,
     },
 }
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewLoadDto {
+    pub startup_state: StartupState,
+    pub overview: Option<OverviewDto>,
+    pub error: Option<AppError>,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -86,15 +95,124 @@ pub struct UiSettingsUpdate {
     pub cost_notice_accepted: bool,
 }
 
+struct OverviewLoadCoordinator {
+    state: Mutex<OverviewLoadState>,
+    ready: Condvar,
+    #[cfg(test)]
+    pause_after_completion: Mutex<Option<OverviewWaiterPause>>,
+}
+
+#[derive(Default)]
+struct OverviewLoadState {
+    next_generation: u64,
+    in_flight: Option<u64>,
+    completed: HashMap<u64, OverviewLoadDto>,
+    waiters: HashMap<u64, usize>,
+}
+
+#[cfg(test)]
+struct OverviewWaiterPause {
+    reached: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+impl OverviewLoadCoordinator {
+    fn begin_or_wait(&self) -> Option<OverviewLoadDto> {
+        let mut state = self.state.lock();
+        if let Some(generation) = state.in_flight {
+            *state.waiters.entry(generation).or_default() += 1;
+            while !state.completed.contains_key(&generation) {
+                self.ready.wait(&mut state);
+            }
+
+            #[cfg(test)]
+            {
+                let pause = self.pause_after_completion.lock().take();
+                if let Some(pause) = pause {
+                    drop(state);
+                    pause.reached.wait();
+                    pause.release.wait();
+                    state = self.state.lock();
+                }
+            }
+
+            let result = state
+                .completed
+                .get(&generation)
+                .cloned()
+                .expect("completed overview flight disappeared");
+            let remaining = state
+                .waiters
+                .get_mut(&generation)
+                .expect("overview flight waiter count disappeared");
+            *remaining -= 1;
+            if *remaining == 0 {
+                state.waiters.remove(&generation);
+                state.completed.remove(&generation);
+            }
+            self.ready.notify_all();
+            return Some(result);
+        }
+
+        state.next_generation = state
+            .next_generation
+            .checked_add(1)
+            .expect("overview load generation exhausted");
+        state.in_flight = Some(state.next_generation);
+        None
+    }
+
+    fn finish(&self, result: OverviewLoadDto) {
+        let mut state = self.state.lock();
+        let generation = state
+            .in_flight
+            .take()
+            .expect("overview load finished without an active flight");
+        if state.waiters.contains_key(&generation) {
+            state.completed.insert(generation, result);
+        }
+        self.ready.notify_all();
+    }
+
+    #[cfg(test)]
+    fn waiter_count(&self) -> usize {
+        self.state.lock().waiters.values().sum()
+    }
+
+    #[cfg(test)]
+    fn pause_next_waiter_after_completion(
+        &self,
+        reached: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    ) {
+        *self.pause_after_completion.lock() = Some(OverviewWaiterPause { reached, release });
+    }
+}
+
+impl Default for OverviewLoadCoordinator {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(OverviewLoadState::default()),
+            ready: Condvar::new(),
+            #[cfg(test)]
+            pause_after_completion: Mutex::new(None),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppService {
     settings_path: Arc<PathBuf>,
     settings: Arc<RwLock<AppSettings>>,
-    settings_write: Arc<parking_lot::Mutex<()>>,
+    settings_write: Arc<Mutex<()>>,
     environment: Arc<dyn OmpEnvironment>,
     pending_omp: Arc<RwLock<Option<PathBuf>>>,
     recovery_notice: Arc<RwLock<Option<(PathBuf, String)>>>,
+    configuration_snapshot: Arc<RwLock<Option<ConfigurationSnapshot>>>,
+    detection_lock: Arc<Mutex<()>>,
+    overview_load: Arc<OverviewLoadCoordinator>,
 }
+
 impl AppService {
     pub fn new(settings_path: PathBuf) -> Result<Self, AppError> {
         let transaction_root = settings_path
@@ -115,18 +233,118 @@ impl AppService {
         Ok(Self {
             settings_path: Arc::new(settings_path),
             settings: Arc::new(RwLock::new(settings)),
-            settings_write: Arc::new(parking_lot::Mutex::new(())),
+            settings_write: Arc::new(Mutex::new(())),
             environment,
             pending_omp: Arc::new(RwLock::new(None)),
             recovery_notice: Arc::new(RwLock::new(None)),
+            configuration_snapshot: Arc::new(RwLock::new(None)),
+            detection_lock: Arc::new(Mutex::new(())),
+            overview_load: Arc::new(OverviewLoadCoordinator::default()),
         })
     }
 
     pub fn get_startup_state(&self) -> StartupState {
+        let _detection = self.detection_lock.lock();
         self.detect_omp_internal()
     }
 
+    pub fn get_overview_load(&self) -> OverviewLoadDto {
+        if let Some(result) = self.overview_load.begin_or_wait() {
+            return result;
+        }
+
+        let result = {
+            let _detection = self.detection_lock.lock();
+            let startup_state = self.detect_omp_internal();
+            match self.read_overview_for_state(startup_state.clone()) {
+                Ok(overview) => OverviewLoadDto {
+                    startup_state,
+                    overview: Some(overview),
+                    error: None,
+                },
+                Err(error) => OverviewLoadDto {
+                    startup_state,
+                    overview: None,
+                    error: Some(error),
+                },
+            }
+        };
+        self.overview_load.finish(result.clone());
+        result
+    }
+
+    fn read_overview_for_state(&self, state: StartupState) -> Result<OverviewDto, AppError> {
+        *self.configuration_snapshot.write() = None;
+        let (executable_path, version, target_configuration) = match state {
+            StartupState::OmpReady {
+                executable_path,
+                version,
+                target_configuration,
+                requires_confirmation: false,
+                ..
+            } => (executable_path, version, target_configuration),
+            StartupState::OmpReady {
+                requires_confirmation: true,
+                ..
+            } => {
+                return Err(AppError::new(
+                    "overview-confirmation-required",
+                    "无法读取尚未确认的 OMP 配置切换。",
+                    "请返回“设置 OMP”页确认新的 OMP 与 Target configuration 后再读取概览。",
+                ));
+            }
+            _ => {
+                return Err(AppError::new(
+                    "overview-omp-unavailable",
+                    "无法读取 OMP 概览。",
+                    "请先完成 OMP 检测并确认有效的 Target configuration。",
+                ));
+            }
+        };
+        let result = read_overview(&executable_path, &version, &target_configuration)?;
+        if let Some(snapshot) = result.snapshot.as_ref() {
+            tracing::debug!(
+                operation = "get_overview_load",
+                models_hash = %snapshot.models.raw_hash,
+                config_hash = %snapshot.config.raw_hash,
+                "retained complete configuration snapshot"
+            );
+        }
+        *self.configuration_snapshot.write() = result.snapshot;
+        tracing::info!(
+            operation = "get_overview_load",
+            status = "success",
+            provider_count = result.dto.counts.provider_count,
+            model_count = result.dto.counts.model_count,
+            role_count = result.dto.counts.role_count,
+            state = ?result.dto.state,
+            "loaded secret-free overview projection"
+        );
+        Ok(result.dto)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configuration_snapshot_for_test(&self) -> Option<ConfigurationSnapshot> {
+        self.configuration_snapshot.read().clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn overview_waiters_for_test(&self) -> usize {
+        self.overview_load.waiter_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_overview_waiter_for_test(
+        &self,
+        reached: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    ) {
+        self.overview_load
+            .pause_next_waiter_after_completion(reached, release);
+    }
+
     pub fn detect_omp(&self) -> StartupState {
+        let _detection = self.detection_lock.lock();
         *self.recovery_notice.write() = None;
         self.detect_omp_internal()
     }
@@ -169,6 +387,7 @@ impl AppService {
     }
 
     pub fn validate_selected_omp(&self, executable: PathBuf) -> StartupState {
+        let _detection = self.detection_lock.lock();
         *self.pending_omp.write() = None;
         let previous_target_configuration = self.saved_target_configuration(&executable);
         let state = self.validate_omp(executable.clone(), true, previous_target_configuration);
@@ -284,6 +503,7 @@ impl AppService {
         executable: PathBuf,
         expectation: TargetInitializationExpectation,
     ) -> Result<StartupState, AppError> {
+        let _detection = self.detection_lock.lock();
         let saved = self.settings.read().omp_executable_path.clone();
         let requires_confirmation = self.pending_omp.read().as_ref() == Some(&executable)
             || saved
@@ -327,7 +547,7 @@ impl AppService {
             }
         };
         if requires_confirmation {
-            self.confirm_selected_omp(executable.clone())?;
+            self.confirm_selected_omp_locked(executable.clone())?;
         }
         if let Err(error) = self.environment.initialize_target(&target, &expectation) {
             let recovery_incomplete = error.recovery_incomplete();
@@ -370,6 +590,7 @@ impl AppService {
     }
 
     pub fn target_directory_for_opening(&self, executable: PathBuf) -> Result<PathBuf, AppError> {
+        let _detection = self.detection_lock.lock();
         match self.validate_omp(executable, false, None) {
             StartupState::OmpReady {
                 target_configuration,
@@ -393,6 +614,11 @@ impl AppService {
     }
 
     pub fn confirm_selected_omp(&self, executable: PathBuf) -> Result<AppSettings, AppError> {
+        let _detection = self.detection_lock.lock();
+        self.confirm_selected_omp_locked(executable)
+    }
+
+    fn confirm_selected_omp_locked(&self, executable: PathBuf) -> Result<AppSettings, AppError> {
         let mut pending = self.pending_omp.write();
         if pending.as_ref() != Some(&executable) {
             return Err(AppError::internal("OMP 验证状态已变化，请重新检测"));
@@ -403,7 +629,6 @@ impl AppService {
         *pending = None;
         Ok(settings)
     }
-
     pub fn get_ui_settings(&self) -> Result<AppSettings, AppError> {
         Ok(self.settings.read().clone())
     }
@@ -522,19 +747,6 @@ fn internal_error_with_cause(
     AppError::internal(message)
 }
 
-fn io_error_cause(kind: std::io::ErrorKind) -> &'static str {
-    match kind {
-        std::io::ErrorKind::NotFound => "io-not-found",
-        std::io::ErrorKind::PermissionDenied => "io-permission-denied",
-        std::io::ErrorKind::AlreadyExists => "io-already-exists",
-        std::io::ErrorKind::InvalidInput => "io-invalid-input",
-        std::io::ErrorKind::InvalidData => "io-invalid-data",
-        std::io::ErrorKind::WriteZero => "io-write-zero",
-        std::io::ErrorKind::StorageFull => "io-storage-full",
-        _ => "io-other",
-    }
-}
-
 fn log_command_result<T>(
     operation: &'static str,
     started_at: Instant,
@@ -586,6 +798,22 @@ pub fn get_startup_state(service: tauri::State<'_, AppService>) -> StartupState 
         elapsed_ms = started_at.elapsed().as_millis() as u64
     );
     state
+}
+
+#[tauri::command]
+pub fn get_overview_load(service: tauri::State<'_, AppService>) -> OverviewLoadDto {
+    let started_at = Instant::now();
+    let result = service.get_overview_load();
+    tracing::info!(
+        operation = "get_overview_load",
+        status = if result.error.is_some() {
+            "error"
+        } else {
+            "success"
+        },
+        elapsed_ms = started_at.elapsed().as_millis() as u64
+    );
+    result
 }
 
 #[tauri::command]

@@ -16,4 +16,11 @@ Object.defineProperty(window, "matchMedia", {
   }),
 });
 
+Object.defineProperties(HTMLElement.prototype, {
+  hasPointerCapture: { value: () => false },
+  setPointerCapture: { value: () => undefined },
+  releasePointerCapture: { value: () => undefined },
+  scrollIntoView: { value: () => undefined },
+});
+
 afterEach(cleanup);

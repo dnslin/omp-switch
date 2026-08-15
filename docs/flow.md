@@ -269,6 +269,8 @@ OMP Switch MVP 只写入 .yml。当前配置可以查看，但不能修改。
 不允许写入错误文件。
 
 实现状态（issue #5）：6.5–6.7 共用 `02 Page / Setup Success` 的检测表格、状态行、间距体系和操作区，仅按状态替换文案、状态色、路径清单和恢复操作。根据实际窗口缩放反馈，最外层整页卡片装饰已移除，内容在 1100 × 720 最小窗口内响应式收缩；该无外层卡片布局已由产品负责人确认。窗口标题继续由 Tauri 原生窗口组件提供，页面不绘制第二套标题栏。
+实现状态（issue #6）：概览通过 Rust application service 的 `get_overview_load` 读取当前 OMP 返回的真实 Target configuration，保留两份 YAML 完整解析树和原始内容 Hash，仅把安全 Provider、Model definition 与 Model role 摘要投影给 React；Direct API Key 只返回 `hasApiKey` 元数据。React 概览复用 `.pen` 的共享 token 和骨架，覆盖 Loading、Empty、Error、Normal、Read-only，侧边栏状态区进入设置页。Provider/模型使用可访问的 Radix Select；UI settings hydration 完成前保持骨架，恢复时按 Provider 内完整 pair 校验，失效 pair 清理后串行保存完整 UI settings。设置读取失败时选择仅在当前会话生效；所有安全投影条目均可用于查看摘要，模型测试仍保持禁用。窗口标题继续使用 Tauri 原生窗口装饰，页面不绘制第二套标题栏。
+
 
 ## 7. 概览页面
 
@@ -315,6 +317,14 @@ Provider   [dnslin ▾]
 之前选择的模型已不存在，请重新选择。
 ```
 
+实现说明（issue #6）：
+
+- Model ID 只在所属 Provider 内稳定；恢复和切换始终通过当前 `provider.models` 验证完整 pair。
+- 已保存 Provider 存在而 Model 为空时保留空选择；Provider 失效时清空 pair，Model 失效时保留 Provider 并清空 Model。
+- 所有安全投影 Provider/Model 均可选择查看，包括只读或不完整条目；这不启用模型测试。
+- 快速连续选择通过单一队列保存完整 UI settings，保留主题和费用提示状态；settings 读取失败时不写盘。
+- Provider/Model option 的稳定 ID 支持超长文本收缩和省略，不扩大已批准的 Select 与面板宽度。
+
 ### 7.3 空状态
 
 没有 Provider：
@@ -327,12 +337,12 @@ Provider   [dnslin ▾]
 [新增 Provider]
 ```
 
-只有只读 override 或高级 Provider 时：
+没有可编辑的 Provider 时：
 
 ```text
 没有可编辑的自定义 Provider
 
-当前配置包含只读的 OMP 覆盖或高级 Provider。
+根据 Provider 分类显示具体只读原因：内置覆盖、高级配置或不支持的 Provider/Model 结构。
 
 [查看 Providers]
 ```

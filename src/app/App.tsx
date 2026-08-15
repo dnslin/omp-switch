@@ -1,47 +1,23 @@
-import { CheckCircle2, File, Folder, Info, LayoutGrid, Server, Settings, SquareTerminal, Users } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { Link, NavLink, Navigate, Route, Routes, useNavigate } from "react-router";
+import { CheckCircle2, File, Folder, Info, SquareTerminal } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, Navigate, Route, Routes, useNavigate } from "react-router";
 import { toast, Toaster } from "sonner";
 import { RedetectionLoader } from "../components/redetection-loader";
-import { Button, Card, NavigationItem, PageTitle, StatusIndicator } from "../components/ui";
-import { asAppError, useTauriClient, type ConfigurationFileStatus, type StartupState } from "../lib/tauri-client";
+import { Button, Card, PageTitle, StatusIndicator } from "../components/ui";
+import { asAppError, useTauriClient, type StartupState } from "../lib/tauri-client";
+import { useUiSettings } from "../store/ui-settings";
+import { MainShell } from "./MainShell";
+import { OverviewPage } from "./OverviewPage";
+import { fileStatusView, startupShellStatus, targetConfigurationStatusView, type RowStatus } from "./omp-presentation";
 
-const pages = [
-  { to: "/overview", label: "概览", icon: LayoutGrid },
-  { to: "/providers", label: "Providers", icon: Server },
-  { to: "/roles", label: "角色", icon: Users },
-  { to: "/settings", label: "设置", icon: Settings },
-] as const;
+
 const REDETECT_MINIMUM_DURATION_MS = 1200;
 
 
 
-function MainShell({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="app-frame app-frame--shell">
-      <main className="shell-main">
-        <aside className="sidebar">
-          <nav className="sidebar-nav" aria-label="主导航">
-            {pages.map(({ to, label, icon }) => (
-              <NavLink key={to} to={to}>
-                {({ isActive }) => <NavigationItem active={isActive} icon={icon}>{label}</NavigationItem>}
-              </NavLink>
-            ))}
-          </nav>
-          <Link className="sidebar-footer" to="/settings">
-            <strong>尚未检测 OMP</strong>
-            <code>配置目录不可用</code>
-          </Link>
-        </aside>
-        <section className="page-content">{children}</section>
-      </main>
-    </div>
-  );
-}
 
 type ReadyState = Extract<StartupState, { kind: "omp-ready" }>;
 type FailureState = Extract<StartupState, { kind: "invalid-executable" | "version-failed" | "config-path-failed" }>;
-type RowStatus = { label: string; tone: "success" | "warning" | "danger" };
 
 type TargetPresentation = {
   title: string;
@@ -71,27 +47,28 @@ type SetupPresentation = {
 };
 
 function getTargetPresentation(target: ReadyState["targetConfiguration"], confirmingSwitch: boolean): TargetPresentation {
+  const targetStatus = targetConfigurationStatusView(target.status);
   switch (target.status) {
     case "writable":
       return confirmingSwitch
         ? { title: "确认切换 OMP", description: "请确认新的 OMP 及其 Target configuration；确认后才会替换当前选择。", statusText: "等待确认  ·  尚未切换 OMP", tone: "warning", rowStatus: { label: "正常", tone: "success" }, canEnter: true, needsExternalRepair: false, permissionSummary: "配置文件可读写，权限正常。", retryLabel: "重新检测", createLabel: null, enterLabel: "确认切换并进入应用", extended: false, issueHeading: null }
-        : { title: "OMP 已找到", description: "OMP Switch 已确认可执行文件和权威配置目录。", statusText: "检测完成  ·  OMP 已可用", tone: "success", rowStatus: { label: "正常", tone: "success" }, canEnter: true, needsExternalRepair: false, permissionSummary: "配置文件可读写，权限正常。", retryLabel: "重新检测", createLabel: null, enterLabel: "进入应用", extended: false, issueHeading: null };
+        : { title: "OMP 已找到", description: "OMP Switch 已确认可执行文件和权威配置目录。", statusText: "检测完成  ·  OMP 已可用", tone: targetStatus.tone, rowStatus: { label: "正常", tone: "success" }, canEnter: true, needsExternalRepair: false, permissionSummary: "配置文件可读写，权限正常。", retryLabel: "重新检测", createLabel: null, enterLabel: "进入应用", extended: false, issueHeading: null };
     case "creation-required":
-      return { title: "需要创建 OMP 配置", description: "请确认以下目录和最小配置文件。已有文件不会被覆盖。", statusText: "等待确认  ·  尚未创建配置", tone: "warning", rowStatus: { label: "待创建", tone: "warning" }, canEnter: false, needsExternalRepair: false, permissionSummary: "确认后将通过可恢复事务创建最小配置；中断将在下次检测时恢复。", retryLabel: "重新检测", createLabel: confirmingSwitch ? "确认切换并创建" : "创建", enterLabel: null, extended: true, issueHeading: null };
+      return { title: "需要创建 OMP 配置", description: "请确认以下目录和最小配置文件。已有文件不会被覆盖。", statusText: "等待确认  ·  尚未创建配置", tone: targetStatus.tone, rowStatus: { label: "待创建", tone: "warning" }, canEnter: false, needsExternalRepair: false, permissionSummary: "确认后将通过可恢复事务创建最小配置；中断将在下次检测时恢复。", retryLabel: "重新检测", createLabel: confirmingSwitch ? "确认切换并创建" : "创建", enterLabel: null, extended: true, issueHeading: null };
     case "read-only": {
       const yamlOnly = target.models.status === "alternate-only" || target.config.status === "alternate-only";
       return yamlOnly
-        ? { title: "当前配置使用 .yaml", description: "OMP Switch MVP 只写入 .yml。当前配置可以查看，但不能修改。", statusText: "配置只读  ·  .yaml 不会被修改", tone: "warning", rowStatus: { label: "只读", tone: "warning" }, canEnter: true, needsExternalRepair: true, permissionSummary: "配置可查看；OMP Switch 不会修改当前文件。", retryLabel: "重新检测", createLabel: null, enterLabel: "进入只读模式", extended: true, issueHeading: null }
-        : { title: "Target configuration 只读", description: "当前目录或规范 .yml 文件不可写。配置可以查看，但不能修改。", statusText: "配置只读  ·  写入已禁用", tone: "warning", rowStatus: { label: "只读", tone: "warning" }, canEnter: true, needsExternalRepair: false, permissionSummary: "配置可查看；OMP Switch 不会修改当前文件。", retryLabel: "重新检测", createLabel: null, enterLabel: "进入只读模式", extended: true, issueHeading: null };
+        ? { title: "当前配置使用 .yaml", description: "OMP Switch MVP 只写入 .yml。当前配置可以查看，但不能修改。", statusText: "配置只读  ·  .yaml 不会被修改", tone: targetStatus.tone, rowStatus: { label: "只读", tone: "warning" }, canEnter: true, needsExternalRepair: true, permissionSummary: "配置可查看；OMP Switch 不会修改当前文件。", retryLabel: "重新检测", createLabel: null, enterLabel: "进入只读模式", extended: true, issueHeading: null }
+        : { title: "Target configuration 只读", description: "当前目录或规范 .yml 文件不可写。配置可以查看，但不能修改。", statusText: "配置只读  ·  写入已禁用", tone: targetStatus.tone, rowStatus: { label: "只读", tone: "warning" }, canEnter: true, needsExternalRepair: false, permissionSummary: "配置可查看；OMP Switch 不会修改当前文件。", retryLabel: "重新检测", createLabel: null, enterLabel: "进入只读模式", extended: true, issueHeading: null };
     }
     case "migration-required":
-      return { title: "需要先由 OMP 迁移配置", description: "请先使用当前 OMP 完成官方 YAML 迁移，然后重新检测。", statusText: "检测到旧 JSON  ·  不会创建空 YAML", tone: "warning", rowStatus: { label: "待迁移", tone: "warning" }, canEnter: false, needsExternalRepair: true, permissionSummary: "配置目录已确认；写入保持禁用，直到外部问题解决。", retryLabel: "重新检测", createLabel: null, enterLabel: null, extended: true, issueHeading: null };
+      return { title: "需要先由 OMP 迁移配置", description: "请先使用当前 OMP 完成官方 YAML 迁移，然后重新检测。", statusText: "检测到旧 JSON  ·  不会创建空 YAML", tone: targetStatus.tone, rowStatus: { label: "待迁移", tone: "warning" }, canEnter: false, needsExternalRepair: true, permissionSummary: "配置目录已确认；写入保持禁用，直到外部问题解决。", retryLabel: "重新检测", createLabel: null, enterLabel: null, extended: true, issueHeading: null };
     case "parse-error": {
       const file = target.issue?.filePath.split(/[\\/]/).at(-1) ?? "YAML";
-      return { title: `无法读取 ${file}`, description: "请在外部修复 YAML 后重新读取。OMP Switch 不会覆盖错误文件。", statusText: "YAML 解析失败  ·  写入已禁用", tone: "danger", rowStatus: { label: "格式错误", tone: "danger" }, canEnter: false, needsExternalRepair: true, permissionSummary: "配置目录已确认；写入保持禁用，直到外部问题解决。", retryLabel: "重新读取", createLabel: null, enterLabel: null, extended: true, issueHeading: formatIssueLocation(target.issue?.line ?? null, target.issue?.column ?? null) };
+      return { title: `无法读取 ${file}`, description: "请在外部修复 YAML 后重新读取。OMP Switch 不会覆盖错误文件。", statusText: "YAML 解析失败  ·  写入已禁用", tone: targetStatus.tone, rowStatus: { label: "格式错误", tone: "danger" }, canEnter: false, needsExternalRepair: true, permissionSummary: "配置目录已确认；写入保持禁用，直到外部问题解决。", retryLabel: "重新读取", createLabel: null, enterLabel: null, extended: true, issueHeading: formatIssueLocation(target.issue?.line ?? null, target.issue?.column ?? null) };
     }
     case "unsafe":
-      return { title: "无法安全访问 Target configuration", description: "链接、重解析点、路径类型或权限边界无法被安全确认。", statusText: "目标不安全  ·  写入已拒绝", tone: "danger", rowStatus: { label: "不安全", tone: "danger" }, canEnter: false, needsExternalRepair: true, permissionSummary: "配置目录已确认；写入保持禁用，直到外部问题解决。", retryLabel: "重新检测", createLabel: null, enterLabel: null, extended: true, issueHeading: "无法确认真实目标。" };
+      return { title: "无法安全访问 Target configuration", description: "链接、重解析点、路径类型或权限边界无法被安全确认。", statusText: "目标不安全  ·  写入已拒绝", tone: targetStatus.tone, rowStatus: { label: "不安全", tone: "danger" }, canEnter: false, needsExternalRepair: true, permissionSummary: "配置目录已确认；写入保持禁用，直到外部问题解决。", retryLabel: "重新检测", createLabel: null, enterLabel: null, extended: true, issueHeading: "无法确认真实目标。" };
   }
 }
 
@@ -306,20 +283,6 @@ function displayTargetPath(path: string, resolvedPath: string | null) {
 }
 
 
-const FILE_STATUS_VIEW: Record<ConfigurationFileStatus, RowStatus> = {
-  normal: { label: "正常", tone: "success" },
-  missing: { label: "缺失", tone: "warning" },
-  "read-only": { label: "只读", tone: "warning" },
-  "alternate-only": { label: ".yaml 只读", tone: "warning" },
-  "canonical-with-alternate": { label: "正常 · 有 .yaml", tone: "success" },
-  "legacy-json": { label: "旧 JSON", tone: "warning" },
-  "parse-error": { label: "格式错误", tone: "danger" },
-  unsafe: { label: "不安全", tone: "danger" },
-};
-
-function fileStatusView(status: ConfigurationFileStatus) {
-  return FILE_STATUS_VIEW[status];
-}
 
 function formatIssueLocation(line: number | null, column: number | null) {
   if (line !== null && column !== null) return `第 ${line} 行，第 ${column} 列附近存在格式错误。`;
@@ -328,12 +291,54 @@ function formatIssueLocation(line: number | null, column: number | null) {
 }
 
 
+
+
 const routeCopy = {
   overview: ["概览", "查看当前配置状态并快速验证模型连接。", "尚未检测 OMP。完成首次设置后，这里会显示权威配置状态。"],
   providers: ["Providers", "管理自定义 Provider 与模型。", "Provider 管理将在后续工单中实现。"],
   roles: ["角色", "管理 OMP 模型角色。", "角色管理将在后续工单中实现。"],
   settings: ["设置", "配置 OMP 路径、主题与轻量界面偏好。", "设置能力将在后续工单中扩展；当前不会保存任何 Provider、Model definition、Model role 或 Direct API Key。"],
 } as const;
+
+function SettingsPage() {
+  const client = useTauriClient();
+  const [state, setState] = useState<StartupState>({ kind: "detecting" });
+
+  useEffect(() => {
+    let active = true;
+    void client.getStartupState().then((next) => {
+      if (active) setState(next);
+    }).catch((cause: unknown) => {
+      if (active) setState({ kind: "omp-unavailable", message: asAppError(cause, "无法读取 OMP 状态").message });
+    });
+    return () => { active = false; };
+  }, [client]);
+
+  const ready = state.kind === "omp-ready";
+  const targetStatus = ready ? targetConfigurationStatusView(state.targetConfiguration.status) : null;
+  const statusText = targetStatus?.label
+    ?? (state.kind === "detecting"
+      ? "正在检测 OMP…"
+      : "message" in state
+        ? state.message
+        : "OMP 状态不可用");
+  return (
+    <MainShell status={startupShellStatus(state)}>
+      <PageTitle title="设置" description="配置 OMP 路径、主题与轻量界面偏好。" />
+      <section id="omp-settings" className="settings-section" aria-labelledby="omp-settings-title">
+        <h2 id="omp-settings-title">OMP 与 Target configuration</h2>
+        <StatusIndicator tone={targetStatus?.tone ?? "warning"}>{statusText}</StatusIndicator>
+        {ready ? (
+          <div className="settings-details">
+            <p><strong>版本</strong><span>{state.version}</span></p>
+            <p><strong>可执行文件</strong><code>{state.executablePath}</code></p>
+            <p><strong>权威配置目录</strong><code>{state.targetConfiguration.resolvedPath ?? state.targetConfiguration.path}</code></p>
+          </div>
+        ) : <p className="placeholder-card">完成 OMP 检测后，这里会显示权威配置目录和文件状态。</p>}
+      </section>
+    </MainShell>
+  );
+}
 
 function PlaceholderPage({ page }: { page: keyof typeof routeCopy }) {
   const [title, description, message] = routeCopy[page];
@@ -369,24 +374,34 @@ function NotFoundPage() {
 
 export function App() {
   const client = useTauriClient();
+  const beginHydration = useUiSettings((state) => state.beginHydration);
+  const hydrate = useUiSettings((state) => state.hydrate);
+  const failHydration = useUiSettings((state) => state.failHydration);
 
   useEffect(() => {
-    void client.getUiSettings().catch((error: unknown) => {
+    let active = true;
+    beginHydration();
+    void client.getUiSettings().then((settings) => {
+      if (active) hydrate(settings);
+    }).catch((error: unknown) => {
+      if (!active) return;
+      failHydration();
       const appError = asAppError(error, "无法读取界面状态");
       toast.error(appError.message, { description: appError.action });
     });
-  }, [client]);
+    return () => { active = false; };
+  }, [beginHydration, client, failHydration, hydrate]);
 
   return (
     <div className="window">
       <Routes>
         <Route path="/" element={<SetupPage />} />
         <Route path="/setup" element={<SetupPage />} />
-        <Route path="/overview" element={<PlaceholderPage page="overview" />} />
+        <Route path="/overview" element={<OverviewPage />} />
         <Route path="/providers" element={<PlaceholderPage page="providers" />} />
         <Route path="/providers/:providerId" element={<ProviderDetailPage />} />
         <Route path="/roles" element={<PlaceholderPage page="roles" />} />
-        <Route path="/settings" element={<PlaceholderPage page="settings" />} />
+        <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
       <Toaster position="bottom-right" richColors />

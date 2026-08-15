@@ -1,0 +1,10 @@
+Issue #6 visual verification
+
+Reference: .artifacts/issue-6/chFfk.png (Pencil node chFfk, 1536x1024)
+Implementation: .artifacts/issue-6/implementation-1536x961.png (real Tauri window, 1536x961)
+
+Comparison:
+- The real window preserves the native Tauri title bar and controls; no custom title bar is drawn in the page.
+- Sidebar, selected Overview state, 276px sidebar/content split, page title, sync strip, two-row environment grid, three metric cells, and Quick Test/Result panels use the Pencil node hierarchy, density, shared tokens, and labels.
+- The implementation screenshot is 63px shorter because macOS constrains the 1536x1024 configured outer window to the available 961px window height below the native menu/title area. This is an OS-native frame difference, not a page layout change.
+- Responsive CSS keeps the test panels stacked below 1200px and the environment cells single-column below 760px; Overview state variants reuse the same skeleton and token classes.

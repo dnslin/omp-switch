@@ -1,15 +1,18 @@
 mod application;
+mod bundled_catalog;
 mod error;
 mod logging;
 mod omp_environment;
+mod overview;
 mod redaction;
 mod target_configuration;
 
 use application::{
-    AppService, confirm_selected_omp, detect_omp, get_startup_state, get_ui_settings,
-    initialize_target_configuration, open_target_configuration_directory, save_ui_settings,
-    validate_selected_omp,
+    AppService, confirm_selected_omp, detect_omp, get_overview_load, get_startup_state,
+    get_ui_settings, initialize_target_configuration, open_target_configuration_directory,
+    save_ui_settings, validate_selected_omp,
 };
+
 use tauri::Manager;
 
 #[cfg(test)]
@@ -32,6 +35,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_startup_state,
+            get_overview_load,
             detect_omp,
             validate_selected_omp,
             confirm_selected_omp,
