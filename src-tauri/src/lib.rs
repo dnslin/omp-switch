@@ -16,6 +16,10 @@ use application::{
 use tauri::Manager;
 
 #[cfg(test)]
+#[path = "../manifest_registry_build.rs"]
+mod manifest_registry_build;
+
+#[cfg(test)]
 mod application_test;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

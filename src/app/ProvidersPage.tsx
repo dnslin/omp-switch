@@ -1,22 +1,23 @@
 import { CircleAlert, MoreHorizontal } from "lucide-react";
-import { Fragment, useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { Fragment, useState } from "react";
 
 import { Button, SearchInput, StatusIndicator } from "../components/ui";
-import {
-  asAppError,
-  useTauriClient,
-  type AppError,
-  type OverviewDto,
-  type OverviewProvider,
-  type StartupState,
-} from "../lib/tauri-client";
+import { type AppError, type OverviewDto, type OverviewProvider } from "../lib/tauri-client";
 import { MainShell } from "./MainShell";
-import { overviewShellStatus, startupShellStatus } from "./omp-presentation";
+import { useOverviewLoad } from "./overview-load";
 
 type ProviderStatus = {
   label: string;
   tone: "success" | "warning" | "danger";
+};
+
+const providersLoadCopy = {
+  missingOverview: {
+    code: "providers-missing-overview",
+    message: "OMP 没有返回 Provider 列表数据。",
+    action: "请重新读取；如果问题持续，请查看脱敏日志。",
+  },
+  requestFailure: "无法读取 Providers",
 };
 
 function providerStatus(provider: OverviewProvider): ProviderStatus {
@@ -66,58 +67,7 @@ function matchesProvider(provider: OverviewProvider, query: string): boolean {
 }
 
 export function ProvidersPage() {
-  const client = useTauriClient();
-  const navigate = useNavigate();
-  const [data, setData] = useState<OverviewDto | null>(null);
-  const [startupState, setStartupState] = useState<StartupState | null>(null);
-  const [error, setError] = useState<AppError | null>(null);
-  const [loading, setLoading] = useState(true);
-  const requestId = useRef(0);
-
-  async function reload() {
-    const currentRequest = ++requestId.current;
-    setLoading(true);
-    setData(null);
-    setError(null);
-    try {
-      const result = await client.getOverviewLoad();
-      if (currentRequest !== requestId.current) return;
-      setStartupState(result.startupState);
-      if (result.startupState.kind === "omp-ready" && result.startupState.requiresConfirmation) {
-        navigate("/setup", { replace: true });
-        return;
-      }
-      if (result.error) {
-        setError(result.error);
-      } else if (result.overview) {
-        setData(result.overview);
-      } else {
-        setError({
-          code: "providers-missing-overview",
-          message: "OMP 没有返回 Provider 列表数据。",
-          action: "请重新读取；如果问题持续，请查看脱敏日志。",
-        });
-      }
-    } catch (cause: unknown) {
-      if (currentRequest !== requestId.current) return;
-      setError(asAppError(cause, "无法读取 Providers"));
-    } finally {
-      if (currentRequest === requestId.current) setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    void reload();
-    return () => { requestId.current += 1; };
-  }, [client]);
-
-  const shellStatus = data
-    ? overviewShellStatus(data)
-    : startupState
-      ? startupShellStatus(startupState)
-      : error
-        ? { title: "OMP 状态不可用", path: "配置目录不可用", status: "请重新读取 OMP", tone: "warning" as const }
-        : { title: "正在检测 OMP", path: "配置目录检测中", status: "请稍候", tone: "warning" as const };
+  const { data, error, loading, reload, shellStatus } = useOverviewLoad(providersLoadCopy);
 
   return (
     <MainShell status={shellStatus}>
@@ -136,7 +86,7 @@ export function ProvidersPage() {
             新增 Provider
           </Button>
         </header>
-        {loading ? <ProvidersLoading /> : error ? <ProvidersError error={error} onReload={reload} /> : data ? <ProvidersTable data={data} /> : <ProvidersError error={{ code: "providers-missing-overview", message: "OMP 没有返回 Provider 列表数据。", action: "请重新读取；如果问题持续，请查看脱敏日志。" }} onReload={reload} />}
+        {loading ? <ProvidersLoading /> : error ? <ProvidersError error={error} onReload={reload} /> : data ? <ProvidersTable data={data} /> : <ProvidersError error={providersLoadCopy.missingOverview} onReload={reload} />}
       </main>
     </MainShell>
   );
@@ -224,11 +174,10 @@ function ProvidersTable({ data }: { data: OverviewDto }) {
 
 function ProviderRows({ provider }: { provider: OverviewProvider }) {
   const status = providerStatus(provider);
-  const detailPath = `/providers/${encodeURIComponent(provider.id)}`;
   return (
     <Fragment>
       <tr className={provider.editable ? "providers-row" : "providers-row providers-row--readonly"}>
-        <td><Link to={detailPath}>{provider.id}</Link></td>
+        <td>{provider.id}</td>
         <td>
           <div className="providers-address">
             {provider.name ? <span>{provider.name}</span> : null}

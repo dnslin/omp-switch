@@ -1,16 +1,26 @@
 import { CircleAlert, CircleCheck, Info } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { Link } from "react-router";
 import { toast } from "sonner";
 
 import { Button } from "../components/ui";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
-import { asAppError, useTauriClient, type AppError, type OverviewDto, type OverviewModel, type OverviewProvider, type StartupState, type TauriClient, type UiSettingsUpdate } from "../lib/tauri-client";
+import { asAppError, useTauriClient, type AppError, type OverviewDto, type OverviewModel, type OverviewProvider, type TauriClient, type UiSettingsUpdate } from "../lib/tauri-client";
 import { modelSelectionFields, useUiSettings, type ModelSelection } from "../store/ui-settings";
 import { MainShell } from "./MainShell";
-import { fileStatusView, overviewShellStatus, startupShellStatus } from "./omp-presentation";
+import { fileStatusView } from "./omp-presentation";
+import { useOverviewLoad } from "./overview-load";
 
 type OverviewError = Pick<AppError, "message" | "action">;
+
+const overviewLoadCopy = {
+  missingOverview: {
+    code: "overview-missing-data",
+    message: "OMP 没有返回概览数据。",
+    action: "请重新读取；如果问题持续，请查看脱敏日志。",
+  },
+  requestFailure: "无法读取概览",
+};
 
 type InitialOverviewSelection = {
   selection: ModelSelection;
@@ -95,45 +105,8 @@ function sameModelSelection(left: ModelSelection, right: ModelSelection) {
 
 export function OverviewPage() {
   const client = useTauriClient();
-  const navigate = useNavigate();
   const hydrationState = useUiSettings((state) => state.hydrationState);
-  const [data, setData] = useState<OverviewDto | null>(null);
-  const [startupState, setStartupState] = useState<StartupState | null>(null);
-  const [error, setError] = useState<OverviewError | null>(null);
-  const [loading, setLoading] = useState(true);
-  const requestId = useRef(0);
-
-  async function reload() {
-    const currentRequest = ++requestId.current;
-    setLoading(true);
-    setData(null);
-    setError(null);
-
-    try {
-      const result = await client.getOverviewLoad();
-      if (currentRequest !== requestId.current) return;
-      setStartupState(result.startupState);
-      if (result.startupState.kind === "omp-ready" && result.startupState.requiresConfirmation) {
-        navigate("/setup", { replace: true });
-        return;
-      }
-      if (result.error) {
-        setError(result.error);
-      } else if (result.overview) {
-        setData(result.overview);
-      } else {
-        setError({
-          message: "OMP 没有返回概览数据。",
-          action: "请重新读取；如果问题持续，请查看脱敏日志。",
-        });
-      }
-    } catch (cause: unknown) {
-      if (currentRequest !== requestId.current) return;
-      setError(asAppError(cause, "无法读取概览"));
-    } finally {
-      if (currentRequest === requestId.current) setLoading(false);
-    }
-  }
+  const { data, startupState, error, loading, reload, shellStatus } = useOverviewLoad(overviewLoadCopy);
 
   async function openTargetDirectory() {
     if (startupState?.kind !== "omp-ready") return;
@@ -145,26 +118,14 @@ export function OverviewPage() {
     }
   }
 
-  useEffect(() => {
-    void reload();
-    return () => { requestId.current += 1; };
-  }, [client]);
-
   const pageLoading = loading || hydrationState === "loading";
   const pageClass = pageLoading ? "overview-page--loading" : error || !data ? "overview-page--error" : `overview-page--${data.state}`;
-  const shellStatus = data
-    ? overviewShellStatus(data)
-    : startupState
-      ? startupShellStatus(startupState)
-      : error
-        ? { title: "OMP 状态不可用", path: "配置目录不可用", status: "请重新读取 OMP", tone: "warning" as const }
-        : { title: "正在检测 OMP", path: "配置目录检测中", status: "请稍候", tone: "warning" as const };
   const openDirectory = startupState?.kind === "omp-ready" ? openTargetDirectory : null;
   return (
     <MainShell status={shellStatus}>
       <div className={`overview-page ${pageClass}`} aria-busy={pageLoading}>
         <OverviewPageHeader />
-        {pageLoading ? <OverviewLoadingBody /> : error ? <OverviewErrorBody error={error} onReload={reload} onOpenTargetDirectory={openDirectory} /> : data ? <OverviewContentBody data={data} /> : <OverviewErrorBody error={{ message: "OMP 没有返回概览数据。", action: "请重新读取；如果问题持续，请查看脱敏日志。" }} onReload={reload} onOpenTargetDirectory={openDirectory} />}
+        {pageLoading ? <OverviewLoadingBody /> : error ? <OverviewErrorBody error={error} onReload={reload} onOpenTargetDirectory={openDirectory} /> : data ? <OverviewContentBody data={data} /> : <OverviewErrorBody error={overviewLoadCopy.missingOverview} onReload={reload} onOpenTargetDirectory={openDirectory} />}
       </div>
     </MainShell>
   );

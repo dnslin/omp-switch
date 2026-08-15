@@ -658,10 +658,12 @@ describe("React page seam", () => {
     expect(screen.getByRole("button", { name: "新增 Provider" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "OpenAI 操作" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "advanced 操作" })).toBeDisabled();
+    expect(screen.queryByRole("link", { name: "OpenAI" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "advanced" })).not.toBeInTheDocument();
 
     await user.type(screen.getByRole("searchbox", { name: "搜索 Provider" }), "claude");
-    expect(screen.queryByRole("link", { name: "OpenAI" })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "advanced" })).toBeVisible();
+    expect(screen.queryByText("OpenAI")).not.toBeInTheDocument();
+    expect(screen.getByText("advanced")).toBeVisible();
 
     page.unmount();
     const unavailableCatalog = overviewDto({
@@ -754,6 +756,24 @@ describe("React page seam", () => {
     });
 
     expect(await screen.findByRole("alert")).toHaveTextContent("无法检查 OMP PATH");
+    expect(screen.getByRole("link", { name: /OMP 状态不可用.*请重新读取 OMP/ })).toBeVisible();
+  });
+  it("clears the stale OMP footer after a Providers retry fails", async () => {
+    const user = userEvent.setup();
+    const getOverviewLoad = vi.fn()
+      .mockResolvedValueOnce({
+        startupState: readyState,
+        overview: null,
+        error: { code: "overview-read-failed", message: "首次读取失败", action: "请重新读取。" },
+      })
+      .mockRejectedValueOnce({ code: "omp-path-failed", message: "重试读取失败", action: "请重新检测 OMP。" });
+    renderRoute("/providers", { ...unavailableClient, getOverviewLoad });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("首次读取失败");
+
+    await user.click(screen.getByRole("button", { name: "重新读取" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("重试读取失败");
     expect(screen.getByRole("link", { name: /OMP 状态不可用.*请重新读取 OMP/ })).toBeVisible();
   });
   it("ignores stale Providers data after navigation", async () => {
