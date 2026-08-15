@@ -1,3 +1,5 @@
 # Version bundled Provider manifests
 
 OMP Switch prevents Custom Provider IDs from colliding with OMP bundled Provider IDs by shipping a read-only manifest generated from the official `pi-catalog` for each explicitly covered OMP version. It does not use `omp models ls` because that command exposes only currently available authenticated models and can include user configuration, caches, and extensions. When the selected OMP version has no matching manifest, Provider and model management is read-only while unrelated configuration surfaces remain available.
+
+The build input is a version-pinned `@oh-my-pi/pi-catalog` package. `pnpm generate:bundled-manifest` validates the official package identity and reads only its canonical `src/models.json`; it emits one `src-tauri/resources/bundled-manifests/<exact-version>.json` file from that catalog data. `build.rs` validates every manifest's file-name/version agreement and compiles the complete registry; runtime lookup remains exact and never infers a compatible version.

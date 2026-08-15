@@ -188,6 +188,8 @@ OMP 版本只用于诊断和兼容报告，不作为单独的写入许可。每�
 
 当前 OMP 版本没有匹配清单时，Provider 和模型管理整体只读；环境检测、配置查看、角色和设置仍可按各自规则使用。该限制是 bundled override 分类能力缺失导致的安全门槛，不代表按 SemVer 推断整个配置格式不兼容。
 
+实现状态（issue #7）：`@oh-my-pi/pi-catalog@17.2.15` 被锁定为构建输入。`pnpm generate:bundled-manifest` 只接受该官方包及其声明版本，提取 Provider/model ID；`build.rs` 验证每个资源文件名与内容版本一致后编译完整注册表。运行时不执行 `omp models ls`，仅精确匹配清单；无匹配时环境、Target configuration 查看、Model role 和设置继续按自己的安全规则运行。
+
 新 OMP 检测失败时保留当前可用 OMP 路径。
 
 实现约束（issue #4）：手动选择先调用无副作用验证意图；只有用户在验证结果中确认后才提交新的 OMP 路径。检测 DTO 同时返回目标访问性及规范 `.yml` 文件的正常、缺失或只读状态；缺失文件不视为可进入主界面的完整设置。

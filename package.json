@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "generate:bundled-manifest": "node scripts/generate-bundled-manifest.mjs node_modules/@oh-my-pi/pi-catalog src-tauri/resources/bundled-manifests",
+    "build": "pnpm generate:bundled-manifest && tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
-    "test": "vitest run",
+    "test:manifest": "node --test scripts/generate-bundled-manifest.node.mjs",
+    "test": "pnpm test:manifest && vitest run",
     "test:watch": "vitest",
     "tauri": "tauri"
   },
@@ -31,6 +33,7 @@
     "zustand": "5.0.8"
   },
   "devDependencies": {
+    "@oh-my-pi/pi-catalog": "17.2.15",
     "@tailwindcss/vite": "^4.1.14",
     "@tauri-apps/cli": "2.11.4",
     "@testing-library/jest-dom": "6.9.1",

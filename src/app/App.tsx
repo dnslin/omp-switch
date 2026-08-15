@@ -8,6 +8,7 @@ import { asAppError, useTauriClient, type StartupState } from "../lib/tauri-clie
 import { useUiSettings } from "../store/ui-settings";
 import { MainShell } from "./MainShell";
 import { OverviewPage } from "./OverviewPage";
+import { ProvidersPage } from "./ProvidersPage";
 import { fileStatusView, startupShellStatus, targetConfigurationStatusView, type RowStatus } from "./omp-presentation";
 
 
@@ -294,8 +295,6 @@ function formatIssueLocation(line: number | null, column: number | null) {
 
 
 const routeCopy = {
-  overview: ["概览", "查看当前配置状态并快速验证模型连接。", "尚未检测 OMP。完成首次设置后，这里会显示权威配置状态。"],
-  providers: ["Providers", "管理自定义 Provider 与模型。", "Provider 管理将在后续工单中实现。"],
   roles: ["角色", "管理 OMP 模型角色。", "角色管理将在后续工单中实现。"],
   settings: ["设置", "配置 OMP 路径、主题与轻量界面偏好。", "设置能力将在后续工单中扩展；当前不会保存任何 Provider、Model definition、Model role 或 Direct API Key。"],
 } as const;
@@ -398,7 +397,7 @@ export function App() {
         <Route path="/" element={<SetupPage />} />
         <Route path="/setup" element={<SetupPage />} />
         <Route path="/overview" element={<OverviewPage />} />
-        <Route path="/providers" element={<PlaceholderPage page="providers" />} />
+        <Route path="/providers" element={<ProvidersPage />} />
         <Route path="/providers/:providerId" element={<ProviderDetailPage />} />
         <Route path="/roles" element={<PlaceholderPage page="roles" />} />
         <Route path="/settings" element={<SettingsPage />} />

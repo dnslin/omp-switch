@@ -272,6 +272,8 @@ OMP bundled catalog 不进入正常管理列表。新建时禁止与 bundled Pro
 
 Bundled catalog 冲突检测使用随 OMP Switch 发布的 Provider ID 清单。清单由构建流程从对应 OMP 版本的官方 `pi-catalog` 生成，并按 `omp --version` 精确关联；不调用会混入用户认证、扩展或目标 `models.yml` 的 `omp models ls`。当前 OMP 没有匹配清单时，Provider 和模型管理整体只读，避免把无法分类的 built-in override 当作普通自定义配置；环境、配置查看、角色和设置仍可按各自规则使用。
 
+实现状态（issue #7）：构建固定使用 `@oh-my-pi/pi-catalog@17.2.15`；`pnpm generate:bundled-manifest` 从其 `src/models.json` 生成按精确版本命名的只读资源，Rust 构建时校验并编译全部资源清单。运行时只按精确 OMP 版本查找该注册表，Provider 按 Custom Provider、Built-in Provider override、高级、不支持或清单缺失分类；清单缺失只冻结 Provider 与模型管理。
+
 ### 7.2 支持字段
 
 ```ts

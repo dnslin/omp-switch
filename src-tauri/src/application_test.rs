@@ -387,6 +387,143 @@ fn unknown_catalog_with_empty_configuration_is_read_only() {
     assert_eq!(dto["emptyReason"], serde_json::Value::Null);
 }
 #[test]
+fn application_service_uses_an_exact_catalog_and_locks_only_provider_management_when_missing() {
+    let app_data = tempdir().unwrap().keep();
+    let exact_target = app_data.join("exact-agent");
+    fs::create_dir_all(&exact_target).unwrap();
+    fs::write(
+        exact_target.join("models.yml"),
+        r#"providers:
+  OPENAI:
+    baseUrl: https://api.openai.com/v1
+    api: openai-responses
+    models:
+      - id: GPT-5.6-SOL
+        name: Bundled override
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+  advanced:
+    baseUrl: https://advanced.example/v1
+    api: openai-responses
+    headers:
+      x-provider-mode: advanced
+    models:
+      - id: local
+        name: Local
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+"#,
+    )
+    .unwrap();
+    fs::write(exact_target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let exact_environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(exact_target.clone()),
+        inspect_real_target: true,
+        transaction_root: app_data.join("exact-transactions"),
+        ..FakeOmpEnvironment::default()
+    });
+    let exact_service = service_with(exact_environment.clone(), None);
+
+    let exact = serde_json::to_value(exact_service.get_overview_load().overview.unwrap()).unwrap();
+    let provider = |id: &str| {
+        exact["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|provider| provider["id"] == id)
+            .unwrap()
+    };
+    assert_eq!(provider("OPENAI")["classification"], "built-in-override");
+    assert_eq!(provider("OPENAI")["editable"], false);
+    assert_eq!(provider("advanced")["classification"], "advanced");
+    assert_eq!(provider("advanced")["editable"], false);
+    assert_eq!(
+        exact_environment.calls(),
+        vec![
+            (PathBuf::from("/bin/temp-omp"), vec!["--version".to_owned()]),
+            (
+                PathBuf::from("/bin/temp-omp"),
+                vec!["config".to_owned(), "path".to_owned()]
+            ),
+        ]
+    );
+
+    for (field, value) in [
+        ("oauth", "oauth: true"),
+        ("command credential", "apiKey: !command echo-secret"),
+        ("custom header", "headers:\n      x-provider-mode: custom"),
+        ("compat", "compat: openai"),
+        ("discovery", "discovery: true"),
+        ("model overrides", "modelOverrides: {}"),
+        ("transport", "transport: fetch"),
+        ("remote compaction", "remoteCompaction: true"),
+        ("strict tools", "disableStrictTools: true"),
+        ("auth header", "authHeader: Authorization"),
+    ] {
+        let target = app_data.join(format!("advanced-{field}"));
+        fs::create_dir_all(&target).unwrap();
+        fs::write(
+            target.join("models.yml"),
+            format!(
+                "providers:\n  advanced:\n    baseUrl: https://advanced.example/v1\n    api: openai-responses\n    {value}\n    models:\n      - id: local\n        name: Local\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n"
+            ),
+        )
+        .unwrap();
+        fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+
+        let dto = serde_json::to_value(
+            service_for_target(&target)
+                .get_overview_load()
+                .overview
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(dto["providers"][0]["classification"], "advanced", "{field}");
+        assert_eq!(dto["providers"][0]["editable"], false, "{field}");
+    }
+
+    let missing_target = app_data.join("missing-agent");
+    fs::create_dir_all(&missing_target).unwrap();
+    fs::write(
+        missing_target.join("models.yml"),
+        "providers:\n  custom:\n    baseUrl: https://custom.example/v1\n    api: openai-responses\n    models:\n      - id: local\n        name: Local\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n",
+    )
+    .unwrap();
+    fs::write(
+        missing_target.join("config.yml"),
+        "modelRoles:\n  default: custom/local\n",
+    )
+    .unwrap();
+    let missing_environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/unknown-omp")),
+        config_path: Some(missing_target),
+        inspect_real_target: true,
+        transaction_root: app_data.join("missing-transactions"),
+        ..FakeOmpEnvironment::default()
+    });
+    let missing = serde_json::to_value(
+        service_with(missing_environment, None)
+            .get_overview_load()
+            .overview
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(missing["state"], "read-only");
+    assert_eq!(missing["providers"][0]["classification"], "unavailable");
+    assert_eq!(missing["providers"][0]["editable"], false);
+    assert_eq!(missing["roles"][0]["status"], "configured");
+    assert!(
+        missing["readOnlyReason"]
+            .as_str()
+            .unwrap()
+            .contains("没有匹配的 bundled Provider 清单")
+    );
+}
+#[test]
 fn malformed_provider_and_role_roots_are_read_only() {
     let app_data = tempdir().unwrap().keep();
     let cases = [

@@ -594,13 +594,124 @@ describe("React page seam", () => {
     expect(await screen.findByRole("heading", { name: "设置 OMP" })).toBeVisible();
   });
 
-  it("navigates the main shell through accessible links", async () => {
+  it("lists searchable Provider safety summaries and freezes unsafe actions", async () => {
     const user = userEvent.setup();
-    renderRoute("/overview");
+    const base = overviewDto();
+    const openAiModel: OverviewModel = {
+      ...base.models[0],
+      providerId: "OpenAI",
+      id: "GPT-5.6-SOL",
+      name: "GPT-5.6 Sol",
+    };
+    const advancedModel: OverviewModel = {
+      ...base.models[0],
+      providerId: "advanced",
+      id: "claude-opus",
+      name: "Claude Opus",
+      effectiveApi: "anthropic-messages",
+    };
+    const providers: OverviewProvider[] = [
+      {
+        ...base.providers[0],
+        id: "OpenAI",
+        name: "OpenAI",
+        baseUrl: "https://api.openai.com/v1",
+        modelCount: 1,
+        classification: "built-in-override",
+        editable: false,
+        readOnlyReason: "Provider 或 Model ID 覆盖 OMP bundled catalog，只能查看。",
+        models: [openAiModel],
+      },
+      {
+        ...base.providers[0],
+        id: "advanced",
+        name: "Advanced endpoint",
+        baseUrl: "https://advanced.example/v1",
+        authMode: "unsupported",
+        hasApiKey: false,
+        defaultApi: "anthropic-messages",
+        modelCount: 1,
+        classification: "advanced",
+        editable: false,
+        readOnlyReason: "包含 OMP Switch 不支持的高级配置。",
+        models: [advancedModel],
+      },
+    ];
+    const lockedOverview = overviewDto({
+      state: "read-only",
+      counts: { providerCount: 0, modelCount: 2, roleCount: 2 },
+      providers,
+      models: [openAiModel, advancedModel],
+      readOnlyReason: "当前配置包含以下只读 Provider 分类：OMP 内置 Provider/Model 覆盖、高级 Provider。",
+    });
+    const getOverviewLoad = vi.fn(async () => overviewLoad(lockedOverview, readyState));
+    const page = renderRoute("/providers", { ...unavailableClient, getOverviewLoad });
 
-    await user.click(screen.getByRole("link", { name: "Providers" }));
-    expect(screen.getByRole("heading", { name: "Providers" })).toBeVisible();
-    expect(screen.getByText("Provider 管理将在后续工单中实现。")).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Providers" })).toBeVisible();
+    expect(getOverviewLoad).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("columnheader", { name: "Provider ID" })).toBeVisible();
+    expect(screen.getByRole("columnheader", { name: "Base URL" })).toBeVisible();
+    expect(screen.getByText("API Key 已配置")).toBeVisible();
+    expect(screen.getByText("包含 OMP Switch 不支持的高级配置。")).toBeVisible();
+    expect(screen.getByText("内置覆盖 · 只读")).toBeVisible();
+    expect(screen.getByText("高级配置 · 只读")).toBeVisible();
+    expect(screen.getByRole("button", { name: "新增 Provider" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "OpenAI 操作" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "advanced 操作" })).toBeDisabled();
+    expect(screen.queryByRole("link", { name: "OpenAI" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "advanced" })).not.toBeInTheDocument();
+
+    await user.type(screen.getByRole("searchbox", { name: "搜索 Provider" }), "claude");
+    expect(screen.queryByText("OpenAI")).not.toBeInTheDocument();
+    expect(screen.getByText("advanced")).toBeVisible();
+
+    page.unmount();
+    const unavailableCatalog = overviewDto({
+      state: "read-only",
+      providers: [{
+        ...base.providers[0],
+        id: "custom",
+        modelCount: 1,
+        classification: "unavailable",
+        editable: false,
+        readOnlyReason: "当前 OMP 版本没有匹配的 bundled Provider 清单，Provider 与模型管理暂时只读。",
+      }],
+      readOnlyReason: "当前 OMP 版本没有匹配的 bundled Provider 清单，Provider 与模型管理暂时只读。",
+    });
+    renderRoute("/providers", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(unavailableCatalog, readyState),
+    });
+
+    expect(await screen.findAllByText("当前 OMP 版本没有匹配的 bundled Provider 清单，Provider 与模型管理暂时只读。")).toHaveLength(2);
+    expect(screen.getByText("清单缺失 · 只读")).toBeVisible();
+    expect(screen.getByRole("button", { name: "新增 Provider" })).toBeDisabled();
+  });
+  it("marks an otherwise Custom Provider with an incomplete model", async () => {
+    const base = overviewDto();
+    const incompleteModel: OverviewModel = {
+      ...base.models[0],
+      complete: false,
+      editable: false,
+      readOnlyReason: "Model definition 配置不完整。",
+    };
+    const incompleteProvider: OverviewProvider = {
+      ...base.providers[0],
+      editable: true,
+      classification: "custom",
+      models: [incompleteModel],
+    };
+    const overview = overviewDto({
+      providers: [incompleteProvider],
+      models: [incompleteModel],
+    });
+
+    renderRoute("/providers", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overview, readyState),
+    });
+
+    expect(await screen.findByText("配置不完整")).toBeVisible();
   });
   it("does not run a second startup detection while Overview owns loading", async () => {
     const getStartupState = vi.fn(unavailableClient.getStartupState);
@@ -623,44 +734,60 @@ describe("React page seam", () => {
     expect(await screen.findByRole("heading", { name: "Providers" })).toBeVisible();
     expect(screen.getByRole("link", { name: /OMP 已连接.*v17\.4\.1/ })).toBeVisible();
   });
-  it("refreshes the sidebar status when placeholder routes change", async () => {
+  it("refreshes the sidebar status when navigating away from Providers", async () => {
     const user = userEvent.setup();
-    const getStartupState = vi.fn()
-      .mockResolvedValueOnce(readyState)
-      .mockResolvedValueOnce({ kind: "omp-unavailable", message: "OMP 已不可用" } as const);
-    renderRoute("/providers", { ...unavailableClient, getStartupState });
+    const getOverviewLoad = vi.fn(async () => overviewLoad(overviewDto(), readyState));
+    const getStartupState = vi.fn(async () => ({ kind: "omp-unavailable", message: "OMP 已不可用" } as const));
+    renderRoute("/providers", { ...unavailableClient, getOverviewLoad, getStartupState });
 
     expect(await screen.findByRole("link", { name: /OMP 已连接.*v17\.4\.1/ })).toBeVisible();
     await user.click(screen.getByRole("link", { name: "角色" }));
     expect(await screen.findByRole("heading", { name: "角色" })).toBeVisible();
     expect(await screen.findByRole("link", { name: /OMP 不可用.*配置目录不可用/ })).toBeVisible();
-    expect(getStartupState).toHaveBeenCalledTimes(2);
+    expect(getOverviewLoad).toHaveBeenCalledTimes(1);
+    expect(getStartupState).toHaveBeenCalledTimes(1);
   });
-  it("keeps startup detection error context in the sidebar", async () => {
+  it("shows Providers load errors without exposing stale startup context", async () => {
     renderRoute("/providers", {
       ...unavailableClient,
-      getStartupState: async () => {
+      getOverviewLoad: async () => {
         throw { code: "omp-path-failed", message: "无法检查 OMP PATH", action: "请重新检测 OMP。" };
       },
     });
 
-    expect(await screen.findByRole("link", { name: /无法检查 OMP PATH.*请重新检测 OMP/ })).toBeVisible();
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法检查 OMP PATH");
+    expect(screen.getByRole("link", { name: /OMP 状态不可用.*请重新读取 OMP/ })).toBeVisible();
   });
-  it("ignores a stale placeholder status after navigation", async () => {
+  it("clears the stale OMP footer after a Providers retry fails", async () => {
     const user = userEvent.setup();
-    const first = deferred<StartupState>();
-    const second = deferred<StartupState>();
-    const getStartupState = vi.fn()
-      .mockReturnValueOnce(first.promise)
-      .mockReturnValueOnce(second.promise);
-    renderRoute("/providers", { ...unavailableClient, getStartupState });
+    const getOverviewLoad = vi.fn()
+      .mockResolvedValueOnce({
+        startupState: readyState,
+        overview: null,
+        error: { code: "overview-read-failed", message: "首次读取失败", action: "请重新读取。" },
+      })
+      .mockRejectedValueOnce({ code: "omp-path-failed", message: "重试读取失败", action: "请重新检测 OMP。" });
+    renderRoute("/providers", { ...unavailableClient, getOverviewLoad });
 
-    await waitFor(() => expect(getStartupState).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("alert")).toHaveTextContent("首次读取失败");
+
+    await user.click(screen.getByRole("button", { name: "重新读取" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("重试读取失败");
+    expect(screen.getByRole("link", { name: /OMP 状态不可用.*请重新读取 OMP/ })).toBeVisible();
+  });
+  it("ignores stale Providers data after navigation", async () => {
+    const user = userEvent.setup();
+    const first = deferred<OverviewLoad>();
+    const getOverviewLoad = vi.fn(() => first.promise);
+    const getStartupState = vi.fn(async () => ({ kind: "omp-unavailable", message: "最新 OMP 状态不可用" } as const));
+    renderRoute("/providers", { ...unavailableClient, getOverviewLoad, getStartupState });
+
+    await waitFor(() => expect(getOverviewLoad).toHaveBeenCalledTimes(1));
     await user.click(screen.getByRole("link", { name: "角色" }));
-    await waitFor(() => expect(getStartupState).toHaveBeenCalledTimes(2));
-    second.resolve({ kind: "omp-unavailable", message: "最新 OMP 状态不可用" });
+    expect(await screen.findByRole("heading", { name: "角色" })).toBeVisible();
     expect(await screen.findByRole("link", { name: /最新 OMP 状态不可用/ })).toBeVisible();
-    first.resolve(readyState);
+    first.resolve(overviewLoad(overviewDto(), readyState));
     await waitFor(() => expect(screen.getByRole("link", { name: /最新 OMP 状态不可用/ })).toBeVisible());
   });
 
