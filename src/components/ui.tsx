@@ -78,9 +78,17 @@ export function PageTitle({ title, description }: { title: string; description: 
 export function ConfirmDialog({
   title,
   children,
+  cancelLabel = "取消",
+  confirmLabel = "确认",
   onCancel,
   onConfirm,
-}: PropsWithChildren<{ title: string; onCancel(): void; onConfirm(): void }>) {
+}: PropsWithChildren<{
+  title: string;
+  cancelLabel?: string;
+  confirmLabel?: string;
+  onCancel(): void;
+  onConfirm(): void;
+}>) {
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onCancel(); }}>
       <DialogContent aria-describedby="confirm-dialog-description">
@@ -89,8 +97,8 @@ export function ConfirmDialog({
           {children}
         </DialogDescription>
         <footer className="mt-5 flex justify-end gap-3">
-          <Button variant="secondary" onClick={onCancel}>取消</Button>
-          <Button onClick={onConfirm}>确认</Button>
+          <Button variant="secondary" onClick={onCancel}>{cancelLabel}</Button>
+          <Button onClick={onConfirm}>{confirmLabel}</Button>
         </footer>
       </DialogContent>
     </Dialog>

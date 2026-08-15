@@ -632,8 +632,13 @@ describe("React page seam", () => {
     expect(screen.getByLabelText("Base URL")).toBeVisible();
     expect(screen.getByRole("radiogroup", { name: "认证方式" })).toBeVisible();
 
-    await user.click(screen.getByRole("button", { name: "下一步" }));
-    expect(await screen.findByText("Provider ID 不能为空。" )).toBeVisible();
+    const next = screen.getByRole("button", { name: "下一步" });
+    expect(next).toBeDisabled();
+    await user.click(screen.getByLabelText("Provider ID"));
+    await user.tab();
+    await user.click(screen.getByLabelText("Base URL"));
+    await user.tab();
+    expect(await screen.findByText("Provider ID 不能为空。")).toBeVisible();
     expect(screen.getByText("Base URL 必须是有效的 HTTP 或 HTTPS 地址。")).toBeVisible();
 
     await user.type(screen.getByLabelText("Provider ID"), "new-provider");
@@ -642,11 +647,15 @@ describe("React page seam", () => {
     expect(screen.getByLabelText("Base URL")).toHaveValue("https://new-provider.example/v1");
     expect(screen.getByRole("radio", { name: "API Key 认证" })).toBeChecked();
     expect(screen.getByRole("combobox", { name: "默认协议（可选）" })).toHaveTextContent("由模型指定");
+    expect(next).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "下一步" }));
     expect(screen.queryByText("Provider ID 不能为空。")).not.toBeInTheDocument();
     expect(screen.queryByText("Base URL 必须是有效的 HTTP 或 HTTPS 地址。")).not.toBeInTheDocument();
 
-    expect(await screen.findByText("步骤 2 / 2 · 首个模型")).toBeVisible();
+    expect(await screen.findByText((_, element) => Boolean(
+      element?.classList.contains("provider-create-step")
+      && element.textContent === "步骤 2 / 2 · 首个模型",
+    ))).toBeVisible();
     expect(screen.queryByText("Model ID 不能为空。")).not.toBeInTheDocument();
     expect(screen.queryByText("名称不能为空。")).not.toBeInTheDocument();
     expect(screen.getByText("new-provider")).toBeVisible();
@@ -656,7 +665,7 @@ describe("React page seam", () => {
     expect(await screen.findByText("Model ID 不能为空。")).toBeVisible();
     expect(screen.queryByText("名称不能为空。")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Context Window")).toBeVisible();
-    expect(screen.getByRole("button", { name: "创建 Provider" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "创建 Provider" })).toBeDisabled();
   });
 
   it("submits a complete first model, reloads, and enters its Provider detail", async () => {
@@ -707,7 +716,7 @@ describe("React page seam", () => {
       modelId: " new-model ",
       modelName: "New Model",
     });
-    await user.click(screen.getByRole("button", { name: "创建 Provider" }));
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "s", metaKey: true });
 
     await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
     expect(createCustomProvider).toHaveBeenCalledWith(expect.objectContaining({
@@ -790,6 +799,44 @@ describe("React page seam", () => {
     expect(getOverviewLoad).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps the conflict form open when rereading configuration fails", async () => {
+    const user = userEvent.setup();
+    const getOverviewLoad = vi.fn()
+      .mockResolvedValueOnce(overviewLoad(overviewDto(), readyState))
+      .mockResolvedValueOnce({
+        startupState: readyState,
+        overview: null,
+        error: {
+          code: "overview-read-failed",
+          message: "无法重新读取 models.yml。",
+          action: "请检查文件后重试。",
+        },
+      });
+    const createCustomProvider = vi.fn(async () => {
+      throw {
+        code: "models-hash-conflict",
+        message: "models.yml 在打开表单后已被外部修改。",
+        action: "请重新读取配置；当前表单输入已保留，OMP Switch 不会自动合并。",
+      };
+    });
+    renderRoute("/providers", { ...unavailableClient, getOverviewLoad, createCustomProvider });
+
+    await fillProviderWizard(user, {
+      providerId: "new-provider",
+      baseUrl: "https://new-provider.example/v1",
+      modelId: "new-model",
+      modelName: "New Model",
+    });
+    await user.click(screen.getByRole("button", { name: "创建 Provider" }));
+    await user.click(await screen.findByRole("button", { name: "重新读取" }));
+
+    const conflictDialog = screen.getByRole("dialog");
+    expect(await within(conflictDialog).findByText("无法重新读取 models.yml。")).toBeVisible();
+    expect(screen.getByLabelText("Model ID")).toHaveValue("new-model");
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(getOverviewLoad).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps submitted model values available after a non-conflict Provider write failure", async () => {
     const user = userEvent.setup();
     const createCustomProvider = vi.fn(async () => {
@@ -834,7 +881,10 @@ describe("React page seam", () => {
     await user.click(screen.getByRole("radio", { name: "无需认证" }));
     await user.click(screen.getByRole("button", { name: "下一步" }));
 
-    expect(await screen.findByText("步骤 2 / 2 · 首个模型")).toBeVisible();
+    expect(await screen.findByText((_, element) => Boolean(
+      element?.classList.contains("provider-create-step")
+      && element.textContent === "步骤 2 / 2 · 首个模型",
+    ))).toBeVisible();
     expect(screen.queryByText("Direct API Key 不能以 ! 开头。")).not.toBeInTheDocument();
   });
 
@@ -879,14 +929,14 @@ describe("React page seam", () => {
     const cancelHeading = await screen.findByRole("heading", { name: "有未保存的修改" });
     const cancelDialog = cancelHeading.closest('[role="dialog"]');
     expect(cancelDialog).not.toBeNull();
-    await user.click(within(cancelDialog as HTMLElement).getByRole("button", { name: "取消" }));
+    await user.click(within(cancelDialog as HTMLElement).getByRole("button", { name: "继续编辑" }));
     expect(screen.getByLabelText("Provider ID")).toHaveValue("draft-provider");
 
     await user.click(screen.getByRole("button", { name: "取消" }));
     const discardHeading = await screen.findByRole("heading", { name: "有未保存的修改" });
     const discardDialog = discardHeading.closest('[role="dialog"]');
     expect(discardDialog).not.toBeNull();
-    await user.click(within(discardDialog as HTMLElement).getByRole("button", { name: "确认" }));
+    await user.click(within(discardDialog as HTMLElement).getByRole("button", { name: "放弃修改" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
 
     await user.click(await screen.findByRole("button", { name: "新增 Provider" }));

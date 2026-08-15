@@ -110,7 +110,7 @@ type Step = "provider" | "model";
 type ProviderCreateDialogProps = {
   openedModelsHash: string;
   onDismiss(): void;
-  onReload(): Promise<void>;
+  onReload(): Promise<AppError | null>;
   onCreated(result: CreateCustomProviderResult): Promise<void>;
 };
 
@@ -160,6 +160,15 @@ export function ProviderCreateDialog({
   const values = watch();
   const apiKeyMode = values.authMode === "api-key";
   const finalAddress = endpointPreview(values);
+  const providerValues = {
+    providerId: values.providerId,
+    baseUrl: values.baseUrl,
+    defaultApi: values.defaultApi,
+    authMode: values.authMode,
+    apiKey: values.apiKey,
+  };
+  const canAdvance = providerStepSchema.safeParse(providerValues).success;
+  const canCreate = isDirty && providerCreateSchema.safeParse(values).success;
   const markModelFieldBlurred = (field: ModelField) => {
     setBlurredModelFields((fields) => {
       if (fields[field]) return fields;
@@ -177,13 +186,7 @@ export function ProviderCreateDialog({
   };
 
   const advance = () => {
-    const validation = providerStepSchema.safeParse({
-      providerId: getValues("providerId") ?? "",
-      baseUrl: getValues("baseUrl") ?? "",
-      defaultApi: getValues("defaultApi") ?? "",
-      authMode: getValues("authMode") ?? "api-key",
-      apiKey: getValues("apiKey") ?? "",
-    });
+    const validation = providerStepSchema.safeParse(providerValues);
     if (!validation.success) {
       clearErrors([...providerStepFields]);
       let focused = false;
@@ -259,8 +262,21 @@ export function ProviderCreateDialog({
     void handleSubmit(submit)();
   };
 
+  const submitCurrentStep = () => {
+    if (submitting) return;
+    if (step === "provider") {
+      advance();
+    } else {
+      submitForm();
+    }
+  };
+
   const reloadAfterConflict = async () => {
-    await onReload();
+    const error = await onReload();
+    if (error) {
+      setSubmissionError(error);
+      return;
+    }
     onDismiss();
   };
 
@@ -278,12 +294,26 @@ export function ProviderCreateDialog({
             event.preventDefault();
             requestDismiss();
           }}
+          onKeyDown={(event) => {
+            if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") return;
+            event.preventDefault();
+            submitCurrentStep();
+          }}
         >
-          <form className="provider-create-form" noValidate onSubmit={(event) => event.preventDefault()}>
+          <form
+            className="provider-create-form"
+            noValidate
+            onSubmit={(event) => {
+              event.preventDefault();
+              submitCurrentStep();
+            }}
+          >
             <div className="provider-create-form__body">
               <header className="provider-create-heading">
                 <DialogTitle>新增 Provider</DialogTitle>
-                <p className="provider-create-step">{step === "provider" ? "步骤 1 / 2 · Provider" : "步骤 2 / 2 · 首个模型"}</p>
+                <p className="provider-create-step">
+                  {step === "provider" ? "步骤 1 / 2 · Provider" : <>步骤 <span className="provider-create-step__current">2</span> / 2 · 首个模型</>}
+                </p>
                 <DialogDescription id="provider-create-description">
                   {step === "provider"
                     ? "先配置连接和认证，下一步添加首个模型。"
@@ -339,11 +369,11 @@ export function ProviderCreateDialog({
                   取消
                 </Button>
                 {step === "provider" ? (
-                  <Button type="button" onClick={() => void advance()}>
+                  <Button type="submit" disabled={!canAdvance || submitting}>
                     下一步
                   </Button>
                 ) : (
-                  <Button type="button" disabled={submitting} aria-busy={submitting} onClick={submitForm}>
+                  <Button type="submit" disabled={!canCreate || submitting} aria-busy={submitting}>
                     {submitting ? "创建中…" : "创建 Provider"}
                   </Button>
                 )}
@@ -356,6 +386,8 @@ export function ProviderCreateDialog({
       {confirmDiscard ? (
         <ConfirmDialog
           title="有未保存的修改"
+          cancelLabel="继续编辑"
+          confirmLabel="放弃修改"
           onCancel={() => setConfirmDiscard(false)}
           onConfirm={onDismiss}
         >
@@ -392,8 +424,8 @@ function ProviderStep({
       <FormRow label="默认协议（可选）" htmlFor="provider-default-api" error={errors.defaultApi?.message}>
         <ProtocolSelect control={control} name="defaultApi" id="provider-default-api" inheritLabel="由模型指定" />
       </FormRow>
-      <fieldset className="provider-create-auth">
-        <legend>认证方式</legend>
+      <div className="provider-create-auth">
+        <span className="provider-create-auth__label">认证方式</span>
         <div className="provider-create-auth__choices" role="radiogroup" aria-label="认证方式">
           <label className="provider-create-auth__choice">
             <input type="radio" value="api-key" aria-label="API Key 认证" {...register("authMode")} />
@@ -404,7 +436,7 @@ function ProviderStep({
             <span>无需认证</span>
           </label>
         </div>
-      </fieldset>
+      </div>
       {apiKeyMode ? (
         <FormRow label="API Key" htmlFor="provider-api-key" error={errors.apiKey?.message}>
           <div className="provider-create-key-input">

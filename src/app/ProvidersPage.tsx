@@ -132,7 +132,7 @@ function ProvidersLoading() {
   );
 }
 
-function ProvidersError({ error, onReload }: { error: AppError; onReload: () => Promise<void> }) {
+function ProvidersError({ error, onReload }: { error: AppError; onReload: () => Promise<AppError | null> }) {
   return (
     <section className="providers-error" role="alert" aria-live="assertive">
       <CircleAlert aria-hidden="true" />

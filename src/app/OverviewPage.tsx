@@ -160,7 +160,7 @@ function OverviewLoadingBody() {
   );
 }
 
-function OverviewErrorBody({ error, onReload, onOpenTargetDirectory }: { error: OverviewError; onReload: () => Promise<void>; onOpenTargetDirectory: (() => Promise<void>) | null }) {
+function OverviewErrorBody({ error, onReload, onOpenTargetDirectory }: { error: OverviewError; onReload: () => Promise<AppError | null>; onOpenTargetDirectory: (() => Promise<void>) | null }) {
   return (
     <div className="overview-error-scaffold">
       <section className="overview-error-card" role="alert" aria-live="assertive">
