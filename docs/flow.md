@@ -477,6 +477,9 @@ flowchart TD
 Provider 和首个模型已创建
 ```
 
+实现状态（issue #8）：`ProviderCreateDialog` 按 `23 Provider Create - Step 1` 和 `24 Provider Create - Step 2` 画板实现为 2 步 Dialog；创建成功后刷新并进入 `/providers/:providerId`。Hash 冲突与普通写入失败都留在当前表单并显示可操作错误；只有用户明确点击“重新读取”才关闭冲突表单。
+
+
 ## 10. Provider 详情
 
 ```text

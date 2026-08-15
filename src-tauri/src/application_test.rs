@@ -10,7 +10,9 @@ use std::{
 
 use crate::{
     application::{
-        AppService, AppSettings, OverviewLoadDto, StartupState, Theme, UiSettingsUpdate,
+        AppService, AppSettings, CreateCustomProviderInput, CreateModelFields,
+        CreateProviderFields, OverviewLoadDto, ProviderAuthMode, ProviderCreationFailurePoint,
+        StartupState, SupportedApi, SupportedInput, Theme, UiSettingsUpdate,
     },
     omp_environment::{CommandOutput, OmpEnvironment},
     target_configuration::{
@@ -2355,4 +2357,285 @@ fn overview_missing_canonical_files_returns_empty_without_business_snapshot() {
     assert_eq!(dto["counts"]["modelCount"], 0);
     assert_eq!(dto["counts"]["roleCount"], 0);
     assert!(service.configuration_snapshot_for_test().is_none());
+}
+
+fn provider_creation_service(target: &Path, app_data: &Path) -> AppService {
+    fs::create_dir_all(app_data).unwrap();
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.to_path_buf()),
+        inspect_real_target: true,
+        transaction_root: app_data.join("target-initialization-transactions"),
+        ..FakeOmpEnvironment::default()
+    });
+    AppService::new_with_environment(app_data.join("settings.json"), environment).unwrap()
+}
+
+fn provider_creation_input(opened_models_hash: String) -> CreateCustomProviderInput {
+    CreateCustomProviderInput {
+        opened_models_hash,
+        provider: CreateProviderFields {
+            id: "  new-provider  ".to_owned(),
+            base_url: " https://api.new-provider.example/v1/ ".to_owned(),
+            default_api: Some(SupportedApi::OpenAiResponses),
+            auth_mode: ProviderAuthMode::ApiKey,
+            api_key: Some("create-secret-must-not-leak".to_owned()),
+        },
+        first_model: CreateModelFields {
+            id: "  new-model  ".to_owned(),
+            name: "New Model".to_owned(),
+            api: None,
+            reasoning: true,
+            input: vec![SupportedInput::Text, SupportedInput::Image],
+            context_window: 128_000,
+            max_tokens: 8_192,
+        },
+    }
+}
+
+#[test]
+fn custom_provider_creation_preserves_deep_unknown_values_and_creates_a_current_backup() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original = r#"unrecognizedRoot:
+  nested:
+    branches:
+      - leaf: untouched
+providers:
+  legacy:
+    baseUrl: https://legacy.example/v1
+    api: openai-responses
+    models:
+      - id: legacy-model
+        name: Legacy Model
+        reasoning: false
+        input: [text]
+        contextWindow: 4096
+        maxTokens: 1024
+"#;
+    fs::write(target.join("models.yml"), original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap();
+
+    let result = service
+        .create_custom_provider(provider_creation_input(opened_models_hash))
+        .unwrap();
+
+    assert_eq!(result.provider_id, "new-provider");
+    assert_eq!(result.model_id, "new-model");
+    assert!(
+        !serde_json::to_string(&result)
+            .unwrap()
+            .contains("create-secret-must-not-leak")
+    );
+
+    let before: serde_yaml::Value = serde_yaml::from_str(original).unwrap();
+    let after: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    assert_eq!(after["unrecognizedRoot"], before["unrecognizedRoot"]);
+    assert_eq!(after["providers"]["legacy"], before["providers"]["legacy"]);
+    assert_eq!(
+        after["providers"]["new-provider"]["baseUrl"],
+        "https://api.new-provider.example/v1"
+    );
+    assert_eq!(
+        after["providers"]["new-provider"]["apiKey"],
+        "create-secret-must-not-leak"
+    );
+    assert_eq!(
+        after["providers"]["new-provider"]["models"][0]["id"],
+        "new-model"
+    );
+
+    let backup_targets = fs::read_dir(app_data.path().join("target-configuration-backups"))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    assert_eq!(backup_targets.len(), 1);
+    let model_backups = fs::read_dir(backup_targets[0].path().join("models.yml"))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    assert_eq!(model_backups.len(), 1);
+    assert_eq!(
+        fs::read(model_backups[0].path()).unwrap(),
+        original.as_bytes()
+    );
+
+    let refreshed = service.get_overview_load().overview.unwrap();
+    assert!(
+        refreshed
+            .providers
+            .iter()
+            .any(|provider| provider.id == "new-provider" && provider.editable)
+    );
+}
+
+#[test]
+fn custom_provider_creation_rejects_a_changed_models_hash_before_creating_a_backup() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap();
+    let externally_changed = b"unrecognizedRoot:\n  changed: outside-omp-switch\nproviders: {}\n";
+    fs::write(target.join("models.yml"), externally_changed).unwrap();
+
+    let error = service
+        .create_custom_provider(provider_creation_input(opened_models_hash))
+        .unwrap_err();
+
+    assert_eq!(error.code, "models-hash-conflict");
+    assert_eq!(
+        fs::read(target.join("models.yml")).unwrap(),
+        externally_changed
+    );
+    assert!(
+        !app_data
+            .path()
+            .join("target-configuration-backups")
+            .exists()
+    );
+}
+
+#[test]
+fn custom_provider_creation_rejects_invalid_and_colliding_values_without_writing() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original = b"providers:\n  existing:\n    baseUrl: https://existing.example/v1\n    api: openai-responses\n    models:\n      - id: existing-model\n        name: Existing model\n        reasoning: false\n        input: [text]\n        contextWindow: 4096\n        maxTokens: 1024\n";
+    fs::write(target.join("models.yml"), original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap();
+
+    let mut invalid_provider = provider_creation_input(opened_models_hash.clone());
+    invalid_provider.provider.id = "not a provider".to_owned();
+    assert_eq!(
+        service
+            .create_custom_provider(invalid_provider)
+            .unwrap_err()
+            .code,
+        "provider-id-invalid"
+    );
+
+    let mut duplicate_provider = provider_creation_input(opened_models_hash.clone());
+    duplicate_provider.provider.id = "EXISTING".to_owned();
+    assert_eq!(
+        service
+            .create_custom_provider(duplicate_provider)
+            .unwrap_err()
+            .code,
+        "provider-id-conflict"
+    );
+
+    let mut missing_capability = provider_creation_input(opened_models_hash.clone());
+    missing_capability.first_model.input.clear();
+    assert_eq!(
+        service
+            .create_custom_provider(missing_capability)
+            .unwrap_err()
+            .code,
+        "model-input-required"
+    );
+
+    let mut invalid_limits = provider_creation_input(opened_models_hash.clone());
+    invalid_limits.first_model.max_tokens = invalid_limits.first_model.context_window + 1;
+    assert_eq!(
+        service
+            .create_custom_provider(invalid_limits)
+            .unwrap_err()
+            .code,
+        "model-token-limit-invalid"
+    );
+
+    let mut missing_protocol = provider_creation_input(opened_models_hash);
+    missing_protocol.provider.default_api = None;
+    missing_protocol.first_model.api = None;
+    assert_eq!(
+        service
+            .create_custom_provider(missing_protocol)
+            .unwrap_err()
+            .code,
+        "model-api-required"
+    );
+    assert_eq!(fs::read(target.join("models.yml")).unwrap(), original);
+}
+
+#[test]
+fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
+    for (name, failure) in [
+        ("before backup", ProviderCreationFailurePoint::BeforeBackup),
+        ("after backup", ProviderCreationFailurePoint::AfterBackup),
+        (
+            "before temporary write",
+            ProviderCreationFailurePoint::BeforeTemporaryWrite,
+        ),
+        (
+            "temporary reparse",
+            ProviderCreationFailurePoint::CorruptTemporaryFile,
+        ),
+        (
+            "untouched comparison",
+            ProviderCreationFailurePoint::MutateUntouchedValue,
+        ),
+        (
+            "before replacement",
+            ProviderCreationFailurePoint::BeforeReplacement,
+        ),
+    ] {
+        let app_data = tempdir().unwrap();
+        let target = app_data.path().join("agent");
+        fs::create_dir_all(&target).unwrap();
+        let original = b"unrecognizedRoot:\n  nested:\n    value: preserve-me\nproviders: {}\n";
+        fs::write(target.join("models.yml"), original).unwrap();
+        fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+        let service = provider_creation_service(&target, app_data.path());
+        let opened_models_hash = service
+            .get_overview_load()
+            .overview
+            .unwrap()
+            .files
+            .models
+            .content_hash
+            .unwrap();
+        service.set_provider_creation_failure_for_test(failure);
+
+        assert!(
+            service
+                .create_custom_provider(provider_creation_input(opened_models_hash))
+                .is_err(),
+            "{name}"
+        );
+        assert_eq!(
+            fs::read(target.join("models.yml")).unwrap(),
+            original,
+            "{name}"
+        );
+    }
 }

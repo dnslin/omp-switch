@@ -38,6 +38,7 @@ const unavailableClient: TauriClient = {
     message: "未在已保存路径或系统 PATH 中找到可用的 OMP。",
   }),
   getOverviewLoad: async () => overviewLoad(overviewDto({ state: "empty", counts: { providerCount: 0, modelCount: 0, roleCount: 0 }, providers: [], models: [], roles: [], emptyReason: "还没有可管理的自定义 Provider。", nextAction: "创建一个 Provider，并同时配置它的第一个模型。" })),
+  createCustomProvider: async () => ({ providerId: "new-provider", modelId: "new-model" }),
   detectOmp: async () => ({ kind: "omp-unavailable", message: "仍未找到 OMP" }),
   selectOmpExecutable: async () => null,
   validateSelectedOmp: async () => ({ kind: "invalid-executable", executablePath: "/tmp/not-omp", message: "无法运行", diagnosticCode: "io-not-found" }),
@@ -592,6 +593,185 @@ describe("React page seam", () => {
     renderRoute("/");
 
     expect(await screen.findByRole("heading", { name: "设置 OMP" })).toBeVisible();
+  });
+
+  it("opens the approved two-step Provider wizard and validates the first step before advancing", async () => {
+    const user = userEvent.setup();
+    renderRoute("/providers", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+    });
+
+    const create = await screen.findByRole("button", { name: "新增 Provider" });
+    expect(create).toBeEnabled();
+    await user.click(create);
+
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "新增 Provider" })).toBeVisible();
+    expect(screen.getByText("步骤 1 / 2 · Provider")).toBeVisible();
+    expect(screen.getByLabelText("Provider ID")).toBeVisible();
+    expect(screen.getByLabelText("Base URL")).toBeVisible();
+    expect(screen.getByRole("radiogroup", { name: "认证方式" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    expect(await screen.findByText("Provider ID 不能为空。" )).toBeVisible();
+    expect(screen.getByText("Base URL 必须是有效的 HTTP 或 HTTPS 地址。")).toBeVisible();
+
+    await user.type(screen.getByLabelText("Provider ID"), "new-provider");
+    await user.type(screen.getByLabelText("Base URL"), "https://new-provider.example/v1");
+    expect(screen.getByLabelText("Provider ID")).toHaveValue("new-provider");
+    expect(screen.getByLabelText("Base URL")).toHaveValue("https://new-provider.example/v1");
+    expect(screen.getByRole("radio", { name: "API Key 认证" })).toBeChecked();
+    expect(screen.getByRole("combobox", { name: "默认协议（可选）" })).toHaveTextContent("由模型指定");
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    expect(screen.queryByText("Provider ID 不能为空。")).not.toBeInTheDocument();
+    expect(screen.queryByText("Base URL 必须是有效的 HTTP 或 HTTPS 地址。")).not.toBeInTheDocument();
+
+    expect(await screen.findByText("步骤 2 / 2 · 首个模型")).toBeVisible();
+    expect(screen.queryByText("Model ID 不能为空。")).not.toBeInTheDocument();
+    expect(screen.queryByText("名称不能为空。")).not.toBeInTheDocument();
+    expect(screen.getByText("new-provider")).toBeVisible();
+    expect(screen.getByLabelText("Model ID")).toBeVisible();
+    await user.click(screen.getByLabelText("Model ID"));
+    await user.tab();
+    expect(await screen.findByText("Model ID 不能为空。")).toBeVisible();
+    expect(screen.queryByText("名称不能为空。")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Context Window")).toBeVisible();
+    expect(screen.getByRole("button", { name: "创建 Provider" })).toBeVisible();
+  });
+
+  it("submits a complete first model, reloads, and enters its Provider detail", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const createdModel: OverviewModel = {
+      ...base.models[0],
+      providerId: "new-provider",
+      id: "new-model",
+      name: "New Model",
+      contextWindow: 356_000,
+      maxTokens: 128_000,
+    };
+    const createdProvider: OverviewProvider = {
+      ...base.providers[0],
+      id: "new-provider",
+      name: null,
+      baseUrl: "https://new-provider.example/v1",
+      authMode: "none",
+      hasApiKey: false,
+      modelCount: 1,
+      models: [createdModel],
+    };
+    const initial = overviewDto({
+      state: "empty",
+      counts: { providerCount: 0, modelCount: 0, roleCount: 0 },
+      providers: [],
+      models: [],
+      roles: [],
+      emptyReason: "还没有可管理的自定义 Provider。",
+      nextAction: "创建一个 Provider，并同时配置它的第一个模型。",
+    });
+    const created = overviewDto({
+      counts: { providerCount: 1, modelCount: 1, roleCount: 0 },
+      providers: [createdProvider],
+      models: [createdModel],
+      roles: [],
+    });
+    const getOverviewLoad = vi.fn()
+      .mockResolvedValueOnce(overviewLoad(initial, readyState))
+      .mockResolvedValue(overviewLoad(created, readyState));
+    const createCustomProvider = vi.fn(async () => ({ providerId: "new-provider", modelId: "new-model" }));
+    renderRoute("/providers", { ...unavailableClient, getOverviewLoad, createCustomProvider });
+
+    await user.click(await screen.findByRole("button", { name: "新增 Provider" }));
+    await user.type(screen.getByLabelText("Provider ID"), " new-provider ");
+    await user.type(screen.getByLabelText("Base URL"), "https://new-provider.example/v1/");
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.type(await screen.findByLabelText("Model ID"), " new-model ");
+    await user.type(screen.getByLabelText("名称"), "New Model");
+    await user.click(screen.getByRole("button", { name: "创建 Provider" }));
+
+    await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
+    expect(createCustomProvider).toHaveBeenCalledWith(expect.objectContaining({
+      openedModelsHash: "models-hash",
+      provider: expect.objectContaining({
+        id: "new-provider",
+        baseUrl: "https://new-provider.example/v1",
+        authMode: "api-key",
+      }),
+      firstModel: expect.objectContaining({
+        id: "new-model",
+        name: "New Model",
+        api: "openai-responses",
+        input: ["text", "image"],
+        contextWindow: 356_000,
+        maxTokens: 128_000,
+      }),
+    }));
+    expect(await screen.findByRole("heading", { name: "new-provider" })).toBeVisible();
+    expect(screen.getByText("https://new-provider.example/v1")).toBeVisible();
+    expect(getOverviewLoad).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps the completed wizard open on a models Hash conflict until the user explicitly reloads", async () => {
+    const user = userEvent.setup();
+    const getOverviewLoad = vi.fn(async () => overviewLoad(overviewDto(), readyState));
+    const createCustomProvider = vi.fn(async () => {
+      throw {
+        code: "models-hash-conflict",
+        message: "models.yml 在打开表单后已被外部修改。",
+        action: "请重新读取配置；当前表单输入已保留，OMP Switch 不会自动合并。",
+      };
+    });
+    renderRoute("/providers", { ...unavailableClient, getOverviewLoad, createCustomProvider });
+
+    await user.click(await screen.findByRole("button", { name: "新增 Provider" }));
+    await user.type(screen.getByLabelText("Provider ID"), "new-provider");
+    await user.type(screen.getByLabelText("Base URL"), "https://new-provider.example/v1");
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.type(await screen.findByLabelText("Model ID"), "new-model");
+    await user.type(screen.getByLabelText("名称"), "New Model");
+    await user.click(screen.getByRole("button", { name: "创建 Provider" }));
+
+    expect(await screen.findByText("配置冲突")).toBeVisible();
+    expect(screen.getByText("models.yml 在打开表单后已被外部修改。")).toBeVisible();
+    expect(screen.getByLabelText("Model ID")).toHaveValue("new-model");
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    expect(await screen.findByLabelText("Provider ID")).toHaveValue("new-provider");
+    expect(screen.getByRole("dialog")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "重新读取" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(getOverviewLoad).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps submitted model values available after a non-conflict Provider write failure", async () => {
+    const user = userEvent.setup();
+    const createCustomProvider = vi.fn(async () => {
+      throw {
+        code: "provider-create-failed",
+        message: "无法替换 models.yml。",
+        action: "请检查文件权限后重试。",
+      };
+    });
+    renderRoute("/providers", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      createCustomProvider,
+    });
+
+    await user.click(await screen.findByRole("button", { name: "新增 Provider" }));
+    await user.type(screen.getByLabelText("Provider ID"), "new-provider");
+    await user.type(screen.getByLabelText("Base URL"), "https://new-provider.example/v1");
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.type(await screen.findByLabelText("Model ID"), "new-model");
+    await user.type(screen.getByLabelText("名称"), "New Model");
+    await user.click(screen.getByRole("button", { name: "创建 Provider" }));
+
+    expect(await screen.findByText("无法创建 Provider")).toBeVisible();
+    expect(screen.getByText("无法替换 models.yml。")).toBeVisible();
+    expect(screen.getByLabelText("Model ID")).toHaveValue("new-model");
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(createCustomProvider).toHaveBeenCalledTimes(1);
   });
 
   it("lists searchable Provider safety summaries and freezes unsafe actions", async () => {

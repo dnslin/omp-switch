@@ -1,9 +1,12 @@
 import { CircleAlert, MoreHorizontal } from "lucide-react";
 import { Fragment, useState } from "react";
+import { useNavigate } from "react-router";
+import { toast } from "sonner";
 
 import { Button, SearchInput, StatusIndicator } from "../components/ui";
 import { type AppError, type OverviewDto, type OverviewProvider } from "../lib/tauri-client";
 import { MainShell } from "./MainShell";
+import { ProviderCreateDialog } from "./ProviderCreateDialog";
 import { useOverviewLoad } from "./overview-load";
 
 type ProviderStatus = {
@@ -67,7 +70,22 @@ function matchesProvider(provider: OverviewProvider, query: string): boolean {
 }
 
 export function ProvidersPage() {
+  const navigate = useNavigate();
   const { data, error, loading, reload, shellStatus } = useOverviewLoad(providersLoadCopy);
+  const [openedModelsHash, setOpenedModelsHash] = useState<string | null>(null);
+  const canCreate = data?.state !== "read-only" && Boolean(data?.files.models.contentHash);
+  const createTitle = data?.state === "read-only"
+    ? data.readOnlyReason ?? "当前 Provider 仅可查看；OMP Switch 不会修改配置文件。"
+    : data?.files.models.contentHash
+      ? ""
+      : "当前 models.yml 没有可用于冲突检查的内容 Hash。";
+
+  const created = async ({ providerId }: { providerId: string }) => {
+    await reload();
+    setOpenedModelsHash(null);
+    toast.success("Provider 和首个模型已创建");
+    navigate(`/providers/${encodeURIComponent(providerId)}`);
+  };
 
   return (
     <MainShell status={shellStatus}>
@@ -79,15 +97,27 @@ export function ProvidersPage() {
           </div>
           <Button
             type="button"
-            disabled
+            disabled={!canCreate}
             disabledAppearance="stable"
-            title={data?.readOnlyReason ?? "Provider 写入功能不可用。"}
+            title={createTitle}
+            onClick={() => {
+              const hash = data?.files.models.contentHash;
+              if (hash) setOpenedModelsHash(hash);
+            }}
           >
             新增 Provider
           </Button>
         </header>
         {loading ? <ProvidersLoading /> : error ? <ProvidersError error={error} onReload={reload} /> : data ? <ProvidersTable data={data} /> : <ProvidersError error={providersLoadCopy.missingOverview} onReload={reload} />}
       </main>
+      {openedModelsHash ? (
+        <ProviderCreateDialog
+          openedModelsHash={openedModelsHash}
+          onDismiss={() => setOpenedModelsHash(null)}
+          onReload={reload}
+          onCreated={created}
+        />
+      ) : null}
     </MainShell>
   );
 }

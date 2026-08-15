@@ -400,6 +400,9 @@ google-generative-ai
 
 Provider 默认协议可留空，但首个模型必须最终能够通过 `Model.api ?? Provider.defaultApi` 得到有效协议。保存时一次性新增 Provider 节点和首个模型；任何校验、冲突、备份或写入失败都不留下空 Provider。
 
+实现状态（issue #8）：Provider 创建表单经两步收集上述字段。提交成功后刷新 Providers 数据并进入新 Provider 详情；字段校验、Hash 冲突和普通写入失败都保留表单。Hash 冲突只提供显式“重新读取”，不会自动合并或覆盖外部修改。
+
+
 ### 9.3 Provider ID
 
 - 去除首尾空白。
