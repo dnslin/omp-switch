@@ -216,7 +216,6 @@ pub struct AppService {
     backup_root: Arc<PathBuf>,
     settings: Arc<RwLock<AppSettings>>,
     settings_write: Arc<Mutex<()>>,
-    provider_creation_write: Arc<Mutex<()>>,
     environment: Arc<dyn OmpEnvironment>,
     pending_omp: Arc<RwLock<Option<PathBuf>>>,
     recovery_notice: Arc<RwLock<Option<(PathBuf, String)>>>,
@@ -253,7 +252,6 @@ impl AppService {
             backup_root: Arc::new(backup_root),
             settings: Arc::new(RwLock::new(settings)),
             settings_write: Arc::new(Mutex::new(())),
-            provider_creation_write: Arc::new(Mutex::new(())),
             environment,
             pending_omp: Arc::new(RwLock::new(None)),
             recovery_notice: Arc::new(RwLock::new(None)),
@@ -726,7 +724,6 @@ impl AppService {
         input: CreateCustomProviderInput,
     ) -> Result<CreateCustomProviderResult, AppError> {
         let _detection = self.detection_lock.lock();
-        let _write = self.provider_creation_write.lock();
         let state = self.detect_omp_internal();
         let (version, target) = match state {
             StartupState::OmpReady {

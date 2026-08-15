@@ -1,7 +1,8 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Eye, EyeOff, Info, LockKeyhole } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Controller, type Control, type FieldErrors, type UseFormRegister, useForm } from "react-hook-form";
+import { type BlockerFunction, useBlocker } from "react-router";
 import { z } from "zod";
 
 import { Button, ConfirmDialog } from "../components/ui";
@@ -15,6 +16,7 @@ import {
   type OverviewApi,
   useTauriClient,
 } from "../lib/tauri-client";
+import { buildModelEndpoint, isHttpUrl } from "./model-endpoint";
 
 const protocols = [
   "openai-completions",
@@ -126,6 +128,8 @@ export function ProviderCreateDialog({
   const [blurredModelFields, setBlurredModelFields] = useState<Partial<Record<ModelField, true>>>({});
   const [showApiKey, setShowApiKey] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const submissionInFlight = useRef(false);
+  const successfulSubmission = useRef(false);
   const [submissionError, setSubmissionError] = useState<AppError | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const {
@@ -176,14 +180,22 @@ export function ProviderCreateDialog({
     });
   };
 
-  const requestDismiss = () => {
+  const blocker = useBlocker(useCallback<BlockerFunction>(({ currentLocation, nextLocation }) => {
+    const currentPath = `${currentLocation.pathname}${currentLocation.search}${currentLocation.hash}`;
+    const nextPath = `${nextLocation.pathname}${nextLocation.search}${nextLocation.hash}`;
+    return !successfulSubmission.current && isDirty && !submitting && currentPath !== nextPath;
+  }, [isDirty, submitting]));
+  useEffect(() => {
+    if (blocker.state === "blocked") setConfirmDiscard(true);
+  }, [blocker.state]);
+  const requestDismiss = useCallback(() => {
     if (submitting) return;
     if (isDirty) {
       setConfirmDiscard(true);
       return;
     }
     onDismiss();
-  };
+  }, [isDirty, onDismiss, submitting]);
 
   const advance = () => {
     const validation = providerStepSchema.safeParse(providerValues);
@@ -217,6 +229,9 @@ export function ProviderCreateDialog({
   };
 
   const submit = async (form: ProviderCreateValues) => {
+    if (submissionInFlight.current) return;
+    successfulSubmission.current = false;
+    submissionInFlight.current = true;
     setSubmissionError(null);
     setSubmitting(true);
     try {
@@ -241,8 +256,10 @@ export function ProviderCreateDialog({
           maxTokens: form.maxTokens,
         },
       });
+      successfulSubmission.current = true;
       await onCreated(result);
     } catch (cause: unknown) {
+      successfulSubmission.current = false;
       const error = asAppError(cause, "创建 Provider 失败");
       const field = errorField(error.code);
       if (field) {
@@ -253,6 +270,7 @@ export function ProviderCreateDialog({
         setSubmissionError(error);
       }
     } finally {
+      submissionInFlight.current = false;
       setSubmitting(false);
     }
   };
@@ -388,8 +406,17 @@ export function ProviderCreateDialog({
           title="有未保存的修改"
           cancelLabel="继续编辑"
           confirmLabel="放弃修改"
-          onCancel={() => setConfirmDiscard(false)}
-          onConfirm={onDismiss}
+          onCancel={() => {
+            if (blocker.state === "blocked") blocker.reset();
+            setConfirmDiscard(false);
+          }}
+          onConfirm={() => {
+            if (blocker.state === "blocked") {
+              blocker.proceed();
+              return;
+            }
+            onDismiss();
+          }}
         >
           离开后，这些修改将会丢失。
         </ConfirmDialog>
@@ -448,7 +475,7 @@ function ProviderStep({
               {...register("apiKey")}
             />
             <button type="button" aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"} onClick={onToggleApiKey}>
-              {showApiKey ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}
+              {showApiKey ? <Eye aria-hidden="true" /> : <EyeOff aria-hidden="true" />}
             </button>
           </div>
         </FormRow>
@@ -621,17 +648,26 @@ function ProtocolSelect({
     <Controller
       control={control}
       name={name}
-      render={({ field }) => (
-        <Select value={field.value || "inherit"} onValueChange={(value) => field.onChange(value === "inherit" ? "" : value)}>
-          <SelectTrigger id={id} aria-label={name === "defaultApi" ? "默认协议（可选）" : "协议"} className="provider-create-select">
-            <SelectValue placeholder={inheritLabel} />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="inherit">{inheritLabel}</SelectItem>
-            {protocols.map((protocol) => <SelectItem key={protocol} value={protocol}>{protocol}</SelectItem>)}
-          </SelectContent>
-        </Select>
-      )}
+      render={({ field }) => {
+        const sourceLabel = name === "modelApi" && field.value ? "模型指定" : null;
+        return (
+          <Select value={field.value || "inherit"} onValueChange={(value) => field.onChange(value === "inherit" ? "" : value)}>
+            <SelectTrigger
+              id={id}
+              aria-label={name === "defaultApi" ? "默认协议（可选）" : "协议"}
+              className="provider-create-select"
+              showIndicator={!sourceLabel}
+            >
+              <SelectValue placeholder={inheritLabel} />
+              {sourceLabel ? <span className="provider-create-select__source" aria-hidden="true">{sourceLabel}</span> : null}
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="inherit">{inheritLabel}</SelectItem>
+              {protocols.map((protocol) => <SelectItem key={protocol} value={protocol}>{protocol}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        );
+      }}
     />
   );
 }
@@ -671,23 +707,6 @@ function endpointPreview(values: ProviderCreateValues): string {
   if (!isHttpUrl(baseUrl) || !modelId || !protocol) {
     return "填写有效 Provider、Model 和协议后显示最终地址";
   }
-  switch (protocol) {
-    case "openai-completions":
-      return `${baseUrl}/chat/completions`;
-    case "openai-responses":
-      return `${baseUrl}/responses`;
-    case "anthropic-messages":
-      return `${baseUrl}/v1/messages`;
-    case "google-generative-ai":
-      return `${baseUrl}/models/${modelId}:streamGenerateContent?alt=sse`;
-  }
-}
-
-function isHttpUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return (url.protocol === "http:" || url.protocol === "https:") && Boolean(url.hostname);
-  } catch {
-    return false;
-  }
+  const endpoint = buildModelEndpoint(baseUrl, modelId, protocol);
+  return endpoint.kind === "available" ? endpoint.value : "填写有效 Provider、Model 和协议后显示最终地址";
 }

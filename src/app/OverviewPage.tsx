@@ -10,6 +10,7 @@ import { modelSelectionFields, useUiSettings, type ModelSelection } from "../sto
 import { MainShell } from "./MainShell";
 import { fileStatusView } from "./omp-presentation";
 import { useOverviewLoad } from "./overview-load";
+import { buildModelEndpoint, type ModelEndpoint } from "./model-endpoint";
 
 type OverviewError = Pick<AppError, "message" | "action">;
 
@@ -444,44 +445,9 @@ function formatOverviewCount(value: number) {
   return new Intl.NumberFormat("zh-CN").format(value);
 }
 
-type ModelEndpoint =
-  | { kind: "available"; value: string }
-  | { kind: "not-configured" }
-  | { kind: "invalid"; reason: string };
-
 function modelEndpoint(provider: OverviewProvider, model: OverviewModel): ModelEndpoint {
   if (model.hasBaseUrlOverride) {
     return { kind: "invalid", reason: "模型级 Base URL 覆盖不可安全展示" };
   }
-  const base = provider.baseUrl?.trim();
-  if (!base || !model.effectiveApi) return { kind: "not-configured" };
-  try {
-    const endpoint = new URL(base);
-    if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") {
-      return { kind: "invalid", reason: "Provider Base URL 必须使用 HTTP(S)" };
-    }
-    switch (model.effectiveApi) {
-      case "openai-completions":
-        return { kind: "available", value: appendEndpointPath(endpoint, "chat/completions").toString() };
-      case "openai-responses":
-        return { kind: "available", value: appendEndpointPath(endpoint, "responses").toString() };
-      case "anthropic-messages":
-        return { kind: "available", value: appendEndpointPath(endpoint, "v1/messages").toString() };
-      case "google-generative-ai": {
-        const googleEndpoint = appendEndpointPath(endpoint, `models/${encodeURIComponent(model.id)}:streamGenerateContent`);
-        googleEndpoint.searchParams.set("alt", "sse");
-        return { kind: "available", value: googleEndpoint.toString() };
-      }
-      default:
-        return { kind: "invalid", reason: "有效协议不受支持" };
-    }
-  } catch {
-    return { kind: "invalid", reason: "Provider Base URL 无效或已脱敏" };
-  }
-}
-
-function appendEndpointPath(endpoint: URL, suffix: string) {
-  const basePath = endpoint.pathname.replace(/\/+$/, "");
-  endpoint.pathname = `${basePath}/${suffix}`;
-  return endpoint;
+  return buildModelEndpoint(provider.baseUrl, model.id, model.effectiveApi);
 }

@@ -1,7 +1,7 @@
 import { StrictMode } from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
+import { createMemoryRouter, RouterProvider } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
@@ -79,14 +79,13 @@ function deferred<T>() {
 
 
 function renderRoute(route: string, client: TauriClient = unavailableClient, strictMode = false) {
+  const router = createMemoryRouter([{ path: "*", element: <App /> }], { initialEntries: [route] });
   const app = (
     <TauriClientProvider client={client}>
-      <MemoryRouter initialEntries={[route]}>
-        <App />
-      </MemoryRouter>
+      <RouterProvider router={router} />
     </TauriClientProvider>
   );
-  return render(strictMode ? <StrictMode>{app}</StrictMode> : app);
+  return { ...render(strictMode ? <StrictMode>{app}</StrictMode> : app), router };
 }
 
 type ProviderWizardValues = {
@@ -944,6 +943,90 @@ describe("React page seam", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
+  it("confirms before navigating away from a dirty Provider wizard", async () => {
+    const user = userEvent.setup();
+    const { router } = renderRoute("/providers", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+    });
+
+    await user.click(await screen.findByRole("button", { name: "新增 Provider" }));
+    await user.type(screen.getByLabelText("Provider ID"), "draft-provider");
+    void router.navigate("/overview");
+
+    const firstConfirmation = await screen.findByRole("heading", { name: "有未保存的修改" });
+    const firstDialog = firstConfirmation.closest('[role="dialog"]');
+    expect(firstDialog).not.toBeNull();
+    await user.click(within(firstDialog as HTMLElement).getByRole("button", { name: "继续编辑" }));
+    expect(screen.getByLabelText("Provider ID")).toHaveValue("draft-provider");
+
+    void router.navigate("/overview");
+    const secondConfirmation = await screen.findByRole("heading", { name: "有未保存的修改" });
+    const secondDialog = secondConfirmation.closest('[role="dialog"]');
+    expect(secondDialog).not.toBeNull();
+    await user.click(within(secondDialog as HTMLElement).getByRole("button", { name: "放弃修改" }));
+
+    expect(await screen.findByRole("heading", { name: "概览" })).toBeVisible();
+  });
+
+  it("latches rapid Provider creation submissions", async () => {
+    const user = userEvent.setup();
+    const createCustomProvider = vi.fn(() => new Promise<{ providerId: string; modelId: string }>(() => undefined));
+    renderRoute("/providers", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      createCustomProvider,
+    });
+
+    await fillProviderWizard(user, {
+      providerId: "new-provider",
+      baseUrl: "https://new-provider.example/v1",
+      modelId: "new-model",
+      modelName: "New Model",
+    });
+    const create = screen.getByRole("button", { name: "创建 Provider" });
+    create.click();
+    create.click();
+
+    await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
+  });
+
+  it("matches the masked-key glyph and model protocol source treatment", async () => {
+    const user = userEvent.setup();
+    renderRoute("/providers", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+    });
+
+    await user.click(await screen.findByRole("button", { name: "新增 Provider" }));
+    expect(screen.getByRole("button", { name: "显示 API Key" }).querySelector("svg")).toHaveClass("lucide-eye-off");
+    await user.type(screen.getByLabelText("Provider ID"), "new-provider");
+    await user.type(screen.getByLabelText("Base URL"), "https://new-provider.example/v1");
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+
+    const protocol = await screen.findByRole("combobox", { name: "协议" });
+    expect(protocol).toHaveTextContent("openai-responses");
+    expect(protocol).toHaveTextContent("模型指定");
+    expect(protocol.querySelector(".lucide-chevron-down")).not.toBeInTheDocument();
+  });
+
+  it("uses URL-safe endpoint construction in the Provider wizard", async () => {
+    const user = userEvent.setup();
+    renderRoute("/providers", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+    });
+
+    await fillProviderWizard(user, {
+      providerId: "new-provider",
+      baseUrl: "https://new-provider.example/v1?region=us",
+      modelId: "new-model",
+      modelName: "New Model",
+    });
+
+    expect(screen.getByLabelText("最终地址")).toHaveValue("https://new-provider.example/v1/responses?region=us");
+  });
+ 
   it("lists searchable Provider safety summaries and freezes unsafe actions", async () => {
     const user = userEvent.setup();
     const base = overviewDto();

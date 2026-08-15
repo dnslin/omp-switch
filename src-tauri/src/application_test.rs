@@ -2609,6 +2609,10 @@ fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
             ProviderCreationFailurePoint::BeforeReplacement,
         ),
         (
+            "replacement commit failure",
+            ProviderCreationFailurePoint::CommitFailureAfterReplacement,
+        ),
+        (
             "after replacement",
             ProviderCreationFailurePoint::AfterReplacement,
         ),

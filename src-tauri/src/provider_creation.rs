@@ -114,6 +114,7 @@ pub(crate) enum ProviderCreationFailurePoint {
     CorruptTemporaryFile,
     MutateUntouchedValue,
     BeforeReplacement,
+    CommitFailureAfterReplacement,
     AfterReplacement,
 }
 
@@ -226,9 +227,25 @@ pub(crate) fn create_custom_provider(
     if failure == Some(ProviderCreationFailurePoint::BeforeReplacement) {
         return Err(injected_failure("原子替换前发生故障。"));
     }
-    temporary
+    let replacement = temporary
         .commit()
-        .map_err(|error| write_error("replace_models", error))?;
+        .map_err(|error| write_error("replace_models", error))
+        .and_then(|()| {
+            if failure == Some(ProviderCreationFailurePoint::CommitFailureAfterReplacement) {
+                Err(injected_failure("原子替换在提交后报告故障。"))
+            } else {
+                Ok(())
+            }
+        });
+    if let Err(error) = replacement {
+        return Err(restore_after_postwrite_failure(
+            &models_path,
+            &expected_target,
+            serialized.as_bytes(),
+            &original_bytes,
+            error,
+        ));
+    }
 
     let postwrite = (|| -> Result<(), AppError> {
         if failure == Some(ProviderCreationFailurePoint::AfterReplacement) {
@@ -271,7 +288,12 @@ fn restore_after_postwrite_failure(
     original_bytes: &[u8],
     postwrite_error: AppError,
 ) -> AppError {
-    match restore_original_models(models_path, expected_target, candidate_bytes, original_bytes) {
+    match restore_original_models(
+        models_path,
+        expected_target,
+        candidate_bytes,
+        original_bytes,
+    ) {
         Ok(()) => postwrite_error,
         Err(recovery_error) => {
             tracing::error!(
@@ -301,6 +323,9 @@ fn restore_original_models(
     }
     let current = fs::read(models_path)
         .map_err(|error| postwrite_recovery_io_error("read_models_for_recovery", error))?;
+    if current == original_bytes {
+        return Ok(());
+    }
     if current != candidate_bytes {
         tracing::error!(
             operation = "verify_models_before_recovery",

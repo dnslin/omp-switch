@@ -6,10 +6,14 @@ import { cn } from "../../lib/utils";
 export const Select = SelectPrimitive.Root;
 export const SelectValue = SelectPrimitive.Value;
 
+type SelectTriggerProps = React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger> & {
+  showIndicator?: boolean;
+};
+
 export const SelectTrigger = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Trigger>,
-  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger>
->(({ className, children, ...props }, ref) => (
+  SelectTriggerProps
+>(({ className, children, showIndicator = true, ...props }, ref) => (
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
@@ -19,7 +23,7 @@ export const SelectTrigger = React.forwardRef<
     {...props}
   >
     {children}
-    <SelectPrimitive.Icon><ChevronDown aria-hidden="true" size={18} /></SelectPrimitive.Icon>
+    {showIndicator ? <SelectPrimitive.Icon><ChevronDown aria-hidden="true" size={18} /></SelectPrimitive.Icon> : null}
   </SelectPrimitive.Trigger>
 ));
 SelectTrigger.displayName = SelectPrimitive.Trigger.displayName;
