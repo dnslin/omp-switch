@@ -2456,12 +2456,14 @@ providers:
         "new-model"
     );
 
-    let backup_targets = fs::read_dir(app_data.path().join("target-configuration-backups"))
+    let backup_root = app_data.path().join("target-configuration-backups");
+    let backup_targets = fs::read_dir(&backup_root)
         .unwrap()
         .map(Result::unwrap)
         .collect::<Vec<_>>();
     assert_eq!(backup_targets.len(), 1);
-    let model_backups = fs::read_dir(backup_targets[0].path().join("models.yml"))
+    let model_backup_directory = backup_targets[0].path().join("models.yml");
+    let model_backups = fs::read_dir(&model_backup_directory)
         .unwrap()
         .map(Result::unwrap)
         .collect::<Vec<_>>();
@@ -2470,6 +2472,17 @@ providers:
         fs::read(model_backups[0].path()).unwrap(),
         original.as_bytes()
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode =
+            |path: &std::path::Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&backup_root), 0o700);
+        assert_eq!(mode(&backup_targets[0].path()), 0o700);
+        assert_eq!(mode(&model_backup_directory), 0o700);
+        assert_eq!(mode(&model_backups[0].path()), 0o600);
+    }
 
     let refreshed = service.get_overview_load().overview.unwrap();
     assert!(
@@ -2545,6 +2558,14 @@ fn custom_provider_creation_accepts_spec_valid_model_suffix_and_limits() {
     assert_eq!(model["id"], "new-model:high");
     assert_eq!(model["contextWindow"], 1_024);
     assert_eq!(model["maxTokens"], 2_048);
+    let refreshed = service.get_overview_load().overview.unwrap();
+    let model = refreshed
+        .models
+        .iter()
+        .find(|model| model.id == "new-model:high")
+        .unwrap();
+    assert!(model.complete);
+    assert!(model.editable);
 }
 
 #[test]

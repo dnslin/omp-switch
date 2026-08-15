@@ -712,9 +712,6 @@ fn project_model(
             .all(|value| matches!(value, OverviewInput::Text | OverviewInput::Image))
         && context_window.is_some_and(|value| value > 0)
         && max_tokens.is_some_and(|value| value > 0)
-        && context_window
-            .zip(max_tokens)
-            .is_some_and(|(context, max)| max <= context)
         && effective_api.is_some();
     if !complete {
         read_only_reason.get_or_insert_with(|| "Model definition 配置不完整。".to_owned());

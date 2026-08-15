@@ -105,7 +105,12 @@ type ProviderCreateDialogProps = {
   openedModelsHash: string;
   onDismiss(): void;
   onReload(): Promise<AppError | null>;
-  onCreated(result: CreateCustomProviderResult): Promise<void>;
+  onCreated(result: CreateCustomProviderResult): Promise<AppError | null>;
+};
+
+type PostCreateReloadFailure = {
+  result: CreateCustomProviderResult;
+  error: AppError;
 };
 
 export function ProviderCreateDialog({
@@ -123,6 +128,7 @@ export function ProviderCreateDialog({
   const submissionInFlight = useRef(false);
   const successfulSubmission = useRef(false);
   const [submissionError, setSubmissionError] = useState<AppError | null>(null);
+  const [postCreateReloadFailure, setPostCreateReloadFailure] = useState<PostCreateReloadFailure | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const {
     clearErrors,
@@ -221,13 +227,15 @@ export function ProviderCreateDialog({
   };
 
   const submit = async (form: ProviderCreateValues) => {
-    if (submissionInFlight.current) return;
+    if (submissionInFlight.current || postCreateReloadFailure) return;
     successfulSubmission.current = false;
     submissionInFlight.current = true;
     setSubmissionError(null);
+    setPostCreateReloadFailure(null);
     setSubmitting(true);
+    let result: CreateCustomProviderResult | null = null;
     try {
-      const result = await client.createCustomProvider({
+      result = await client.createCustomProvider({
         openedModelsHash,
         provider: {
           id: form.providerId.trim(),
@@ -249,8 +257,18 @@ export function ProviderCreateDialog({
         },
       });
       successfulSubmission.current = true;
-      await onCreated(result);
+      const reloadError = await onCreated(result);
+      if (reloadError) {
+        setPostCreateReloadFailure({ result, error: reloadError });
+      }
     } catch (cause: unknown) {
+      if (result) {
+        setPostCreateReloadFailure({
+          result,
+          error: asAppError(cause, "无法重新读取已创建的 Provider"),
+        });
+        return;
+      }
       successfulSubmission.current = false;
       const error = asAppError(cause, "创建 Provider 失败");
       const field = errorField(error.code);
@@ -273,7 +291,7 @@ export function ProviderCreateDialog({
   };
 
   const submitCurrentStep = () => {
-    if (submitting) return;
+    if (submitting || postCreateReloadFailure) return;
     if (step === "provider") {
       advance();
     } else {
@@ -288,6 +306,26 @@ export function ProviderCreateDialog({
       return;
     }
     onDismiss();
+  };
+
+  const retryPostCreateReload = async () => {
+    if (!postCreateReloadFailure || submissionInFlight.current) return;
+    submissionInFlight.current = true;
+    setSubmitting(true);
+    try {
+      const reloadError = await onCreated(postCreateReloadFailure.result);
+      if (reloadError) {
+        setPostCreateReloadFailure({ result: postCreateReloadFailure.result, error: reloadError });
+      }
+    } catch (cause: unknown) {
+      setPostCreateReloadFailure({
+        result: postCreateReloadFailure.result,
+        error: asAppError(cause, "无法重新读取已创建的 Provider"),
+      });
+    } finally {
+      submissionInFlight.current = false;
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -352,7 +390,19 @@ export function ProviderCreateDialog({
                 />
               )}
 
-              {submissionError ? (
+              {postCreateReloadFailure ? (
+                <section className="provider-create-submit-error" role="alert" aria-live="assertive">
+                  <div>
+                    <strong>Provider 已创建，但无法重新读取配置</strong>
+                    <p>Provider 和首个模型已写入 models.yml。请重新读取以查看最新配置。</p>
+                    <p>{postCreateReloadFailure.error.message}</p>
+                    <p>{postCreateReloadFailure.error.action}</p>
+                  </div>
+                  <Button type="button" variant="secondary" disabled={submitting} onClick={() => void retryPostCreateReload()}>
+                    {submitting ? "重新读取中…" : "重新读取"}
+                  </Button>
+                </section>
+              ) : submissionError ? (
                 <section className="provider-create-submit-error" role="alert" aria-live="assertive">
                   <div>
                     <strong>{submissionError.code === "models-hash-conflict" ? "配置冲突" : "无法创建 Provider"}</strong>
@@ -370,7 +420,7 @@ export function ProviderCreateDialog({
 
             <footer className="provider-create-footer">
               {step === "model" ? (
-                <Button type="button" variant="secondary" disabled={submitting} onClick={() => setStep("provider")}>
+                <Button type="button" variant="secondary" disabled={submitting || Boolean(postCreateReloadFailure)} onClick={() => setStep("provider")}>
                   返回
                 </Button>
               ) : <span />}
@@ -379,11 +429,11 @@ export function ProviderCreateDialog({
                   取消
                 </Button>
                 {step === "provider" ? (
-                  <Button type="submit" disabled={!canAdvance || submitting}>
+                  <Button type="submit" disabled={!canAdvance || submitting || Boolean(postCreateReloadFailure)}>
                     下一步
                   </Button>
                 ) : (
-                  <Button type="submit" disabled={!canCreate || submitting} aria-busy={submitting}>
+                  <Button type="submit" disabled={!canCreate || submitting || Boolean(postCreateReloadFailure)} aria-busy={submitting}>
                     {submitting ? "创建中…" : "创建 Provider"}
                   </Button>
                 )}

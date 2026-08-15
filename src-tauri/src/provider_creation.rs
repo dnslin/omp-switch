@@ -6,6 +6,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
@@ -22,6 +25,8 @@ use crate::{
 };
 
 static BACKUP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+const BACKUP_ALLOCATION_ATTEMPTS: usize = 128;
 
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
 pub(crate) enum SupportedApi {
@@ -792,16 +797,15 @@ fn create_current_backup(
     original_bytes: &[u8],
 ) -> Result<(), AppError> {
     let target_fingerprint = content_hash(resolved_target.to_string_lossy().as_bytes());
-    let directory = backup_root.join(target_fingerprint).join("models.yml");
-    fs::create_dir_all(&directory)
-        .map_err(|error| write_error("create_backup_directory", error))?;
-    let sequence = BACKUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let backup_path = directory.join(format!("{}-{sequence}.yml", std::process::id(),));
+    let target_directory = backup_root.join(target_fingerprint);
+    let directory = target_directory.join("models.yml");
+    for path in [backup_root, target_directory.as_path(), directory.as_path()] {
+        create_private_backup_directory(path)
+            .map_err(|error| write_error("create_backup_directory", error))?;
+    }
+    let (backup_path, mut backup) = allocate_backup_file(&directory)
+        .map_err(|error| write_error("create_models_backup", error))?;
     let result = (|| -> std::io::Result<()> {
-        let mut backup = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&backup_path)?;
         backup.write_all(original_bytes)?;
         backup.sync_all()?;
         drop(backup);
@@ -828,6 +832,50 @@ fn create_current_backup(
             Err(write_error("create_models_backup", error))
         }
     }
+}
+
+fn create_private_backup_directory(path: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+fn allocate_backup_file(directory: &Path) -> std::io::Result<(PathBuf, fs::File)> {
+    for _ in 0..BACKUP_ALLOCATION_ATTEMPTS {
+        let backup_path =
+            backup_candidate_path(directory, BACKUP_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&backup_path) {
+            Ok(backup) => {
+                if let Err(error) = set_private_backup_file_permissions(&backup_path) {
+                    drop(backup);
+                    let _ = fs::remove_file(&backup_path);
+                    return Err(error);
+                }
+                return Ok((backup_path, backup));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate an unused models.yml backup path",
+    ))
+}
+
+fn set_private_backup_file_permissions(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn backup_candidate_path(directory: &Path, sequence: u64) -> PathBuf {
+    directory.join(format!("{}-{sequence}.yml", std::process::id()))
 }
 
 fn content_hash(bytes: &[u8]) -> String {
@@ -883,6 +931,35 @@ fn mutate_untouched_value_for_test(tree: &mut Value) {
         root.insert(
             Value::String("unexpectedRoot".to_owned()),
             Value::String("changed-by-failure-injection".to_owned()),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn current_backup_retries_when_its_first_candidate_exists() {
+        let temporary = tempdir().unwrap();
+        let backup_root = temporary.path().join("backups");
+        let target = temporary.path().join("agent/models.yml");
+        let original = b"original models";
+        let directory = backup_root
+            .join(content_hash(target.to_string_lossy().as_bytes()))
+            .join("models.yml");
+        fs::create_dir_all(&directory).unwrap();
+        let first_candidate = directory.join(format!("{}-0.yml", std::process::id()));
+        fs::write(&first_candidate, b"existing backup").unwrap();
+        BACKUP_SEQUENCE.store(0, Ordering::Relaxed);
+
+        create_current_backup(&backup_root, &target, original).unwrap();
+
+        assert_eq!(fs::read(first_candidate).unwrap(), b"existing backup");
+        assert_eq!(
+            fs::read(directory.join(format!("{}-1.yml", std::process::id()))).unwrap(),
+            original
         );
     }
 }

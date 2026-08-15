@@ -748,7 +748,8 @@ describe("React page seam", () => {
     };
     const getOverviewLoad = vi.fn()
       .mockResolvedValueOnce(overviewLoad(overviewDto(), readyState))
-      .mockResolvedValueOnce({ startupState: readyState, overview: null, error: refreshError });
+      .mockResolvedValueOnce({ startupState: readyState, overview: null, error: refreshError })
+      .mockResolvedValueOnce(overviewLoad(overviewDto(), readyState));
     const createCustomProvider = vi.fn(async () => ({ providerId: "new-provider", modelId: "new-model" }));
     renderRoute("/providers", { ...unavailableClient, getOverviewLoad, createCustomProvider });
 
@@ -761,11 +762,14 @@ describe("React page seam", () => {
     await user.click(screen.getByRole("button", { name: "创建 Provider" }));
 
     const dialog = screen.getByRole("dialog");
-    expect(await within(dialog).findByText("无法创建 Provider")).toBeVisible();
+    expect(await within(dialog).findByText("Provider 已创建，但无法重新读取配置")).toBeVisible();
+    expect(within(dialog).getByText("Provider 和首个模型已写入 models.yml。请重新读取以查看最新配置。")).toBeVisible();
     expect(within(dialog).getByText(refreshError.message)).toBeVisible();
-    expect(within(dialog).getByLabelText("Model ID")).toHaveValue("new-model");
-    expect(dialog).toBeVisible();
-    expect(getOverviewLoad).toHaveBeenCalledTimes(2);
+    expect(within(dialog).getByRole("button", { name: "创建 Provider" })).toBeDisabled();
+    await user.click(within(dialog).getByRole("button", { name: "重新读取" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(getOverviewLoad).toHaveBeenCalledTimes(3);
   });
 
   it("submits spec-valid model IDs and token limits", async () => {

@@ -80,12 +80,13 @@ export function ProvidersPage() {
       ? ""
       : "当前 models.yml 没有可用于冲突检查的内容 Hash。";
 
-  const created = async ({ providerId }: { providerId: string }) => {
+  const created = async ({ providerId }: { providerId: string }): Promise<AppError | null> => {
     const reloadError = await reload();
-    if (reloadError) throw reloadError;
+    if (reloadError) return reloadError;
     setOpenedModelsHash(null);
     toast.success("Provider 和首个模型已创建");
     navigate(`/providers/${encodeURIComponent(providerId)}`);
+    return null;
   };
 
   return (
