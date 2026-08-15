@@ -14,9 +14,9 @@ use crate::{
     },
     omp_environment::{CommandOutput, OmpEnvironment},
     target_configuration::{
-        ConfigurationFileDiscovery, ConfigurationFileStatus, InitializationFailurePoint,
-        TargetConfigurationDiscovery, TargetConfigurationStatus, TargetInitializationError,
-        TargetInitializationExpectation, discover_target_configuration,
+        ConfigurationFileDiscovery, ConfigurationFileStatus, ConfigurationIssue,
+        InitializationFailurePoint, TargetConfigurationDiscovery, TargetConfigurationStatus,
+        TargetInitializationError, TargetInitializationExpectation, discover_target_configuration,
         initialize_target_configuration_with_failure,
     },
 };
@@ -31,6 +31,7 @@ struct FakeOmpEnvironment {
     path_error: Option<std::io::ErrorKind>,
     calls: Mutex<Vec<(PathBuf, Vec<String>)>>,
     inspect_target_error: Option<std::io::ErrorKind>,
+    target_override: Option<TargetConfigurationDiscovery>,
     config_path: Option<PathBuf>,
     inspect_real_target: bool,
     transaction_root: PathBuf,
@@ -113,10 +114,12 @@ impl OmpEnvironment for FakeOmpEnvironment {
             _ => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
         }
     }
-
     fn inspect_target(&self, target: &Path) -> std::io::Result<TargetConfigurationDiscovery> {
         if let Some(kind) = self.inspect_target_error {
             return Err(std::io::Error::new(kind, "target inspection failed"));
+        }
+        if let Some(target_override) = &self.target_override {
+            return Ok(target_override.clone());
         }
         if self.inspect_real_target {
             return discover_target_configuration(target);
@@ -712,13 +715,12 @@ fn automatic_detection_clears_previous_manual_pending_omp() {
 }
 
 #[test]
-fn diagnostics_redact_common_secret_assignments_and_authorization_headers() {
-    let diagnostic = "API_KEY super-secret password=hunter2 Authorization: Bearer abc.def token 'quoted secret' client_secret: hidden access_token= spaced x-api-key: header-secret sk-live-raw safe-context";
+fn diagnostics_redact_common_secret_assignments() {
+    let diagnostic = "API_KEY super-secret password=hunter2 token 'quoted secret' client_secret: hidden access_token= spaced x-api-key: header-secret sk-live-raw safe-context";
     let redacted = crate::redaction::redact_diagnostic(diagnostic);
     for secret in [
         "super-secret",
         "hunter2",
-        "abc.def",
         "quoted secret",
         "hidden",
         "spaced",
@@ -735,15 +737,36 @@ fn diagnostics_redact_common_secret_assignments_and_authorization_headers() {
 }
 
 #[test]
-fn diagnostics_redact_compact_authorization_and_standalone_separators() {
+fn diagnostics_fail_closed_for_ambiguous_secret_assignments() {
     for diagnostic in [
-        "Authorization:Bearer abc.def safe-context",
+        "safe-context,api_key=punctuated-secret",
+        "(token=wrapped-secret)",
+        "%74oken=encoded-secret",
+        "Authoriz%61tion: Bearer encoded-header-secret",
+        "(token = wrapped-secret)",
+        "safe-context,api_key : punctuated-secret",
+        "%74oken = encoded-secret",
+        "safe%2Capi_key=opaque-value",
+        "token%3Dopaque-secret",
+        "safe%2Capi_key%3Dopaque-value",
+        "Authorization%3A%20Bearer%20abc.def",
+        "%74oken %3D opaque-secret",
+    ] {
+        assert_eq!(
+            crate::redaction::redact_diagnostic(diagnostic),
+            "[诊断信息因可能包含凭据而已脱敏]"
+        );
+    }
+}
+#[test]
+fn diagnostics_redact_standalone_secret_separators() {
+    for diagnostic in [
         "API_KEY = secret safe-context",
         "API_KEY : colon-secret safe-context",
         "OPENAI_API_KEY = provider-secret safe-context",
     ] {
         let redacted = crate::redaction::redact_diagnostic(diagnostic);
-        for secret in ["abc.def", "secret", "colon-secret", "provider-secret"] {
+        for secret in ["secret", "colon-secret", "provider-secret"] {
             assert!(
                 !redacted.contains(secret),
                 "secret {secret:?} leaked in {redacted:?} for {diagnostic:?}"
@@ -752,31 +775,101 @@ fn diagnostics_redact_compact_authorization_and_standalone_separators() {
         assert!(redacted.contains("safe-context"));
     }
 }
+#[test]
+fn diagnostics_fail_closed_for_unsafe_authorization_headers() {
+    for diagnostic in [
+        "Authorization:Bearer abc.def safe-context",
+        "Authorization : Bearer abc.def safe-context",
+        "OPENAI_AUTHORIZATION: Bearer provider-secret safe-context",
+        "Authorization: Basic dXNlcjpwYXNz",
+        "Authorization Basic dXNlcjpwYXNz",
+        "Authorization opaque-token secret-value",
+        "Authorization failed with Basic dXNlcjpwYXNz",
+        "Authorization header AWS4-HMAC-SHA256 Credential=access-key Signature=signature-value",
+        "Authorization: AWS4-HMAC-SHA256 Credential=access-key Signature=signature-value",
+        "Authorization AWS4-HMAC-SHA256 Credential=access-key Signature=signature-value",
+        "Authorization: Bearer abc.def Basic dXNlcjpwYXNz",
+        "Authorization: Bearer abc.def AWS4-HMAC-SHA256 Credential=access-key Signature=signature-value",
+        "Authorization: Bearer abc.def Credential=access-key",
+        "Authorization Bearer abc.def Basic dXNlcjpwYXNz",
+        "Authorization: Bearer abc.def,Basic dXNlcjpwYXNz",
+        "Authorization: Bearer abc.def (token=wrapped-secret)",
+        "context%3AAuthorization: Bearer abc.def",
+        "context%3AProxy-Authorization: Basic cHJveHk6cGFzcw==",
+        "Authorization: Bearer abc.def safe-context,api_key=punctuated-secret",
+        "context:Authorization Bearer abc.def",
+        "context:Proxy-Authorization Basic cHJveHk6cGFzcw==",
+        "Proxy-Authorization: Basic cHJveHk6cGFzcw==",
+        "Proxy-Authorization Basic cHJveHk6cGFzcw==",
+    ] {
+        let redacted = crate::redaction::redact_diagnostic(diagnostic);
+        assert_eq!(redacted, "[诊断信息因可能包含凭据而已脱敏]");
+        assert!(!redacted.contains("dXNlcjpwYXNz"));
+        assert!(!redacted.contains("access-key"));
+        assert!(!redacted.contains("signature-value"));
+    }
+}
+
+#[test]
+fn diagnostics_preserve_non_header_authorization_context() {
+    let redacted = crate::redaction::redact_diagnostic("authorization failed for provider");
+    assert_ne!(redacted, "[诊断信息因可能包含凭据而已脱敏]");
+    assert!(redacted.contains("authorization"));
+    assert!(redacted.contains("failed"));
+    assert!(redacted.contains("provider"));
+}
 
 #[test]
 fn diagnostics_suppress_structured_json_and_url_credentials() {
     for diagnostic in [
         r#"request failed: {\"token\":\"json-secret\",\"message\":\"denied\"}"#,
+        "request failed: https://example.test/models/sk-live-abc123#fragment-xyz",
         "request failed: https://example.test/models?api_key=query-secret&limit=10",
+        "request failed: https://example.test/v1/%73ecret/opaque123",
+        "request failed: https://example.test/v1/%74oken%3Dopaque123",
+        "request failed: https:user:password@example.com/v1",
+        "request failed: endpoint=|https:alice:s3cr3t@example.com/v1|",
+        "request failed: endpoint=https:user:password@example.com/v1",
+        "request failed: endpoint=<https:alice:s3cr3t@example.com/v1>",
+        "request failed: endpoint=`https:alice:s3cr3t@example.com/v1`",
+        "request failed: (https:alice:s3cr3t@example.com/v1)",
+        "request failed: endpoint=(https:alice:s3cr3t@example.com/v1)",
+        "request:endpoint=https:alice:s3cr3t@example.com/v1",
     ] {
         let redacted = crate::redaction::redact_diagnostic(diagnostic);
         assert_eq!(redacted, "[诊断信息因可能包含凭据而已脱敏]");
         assert!(!redacted.contains("json-secret"));
-        assert!(!redacted.contains("query-secret"));
+        assert!(!redacted.contains("abc123"));
+        assert!(!redacted.contains("fragment-xyz"));
+    }
+}
+
+#[test]
+fn projection_rejects_encoded_paths_and_unknown_query_parameters() {
+    for address in [
+        "https://example.test/v1/sk%2Dlive%2Dabc",
+        "https://example.test/v1/api%5Fkey%3Dsecret",
+        "https://example.test/v1/%74oken/opaque-credential",
+        "https://example.test/v1/%73ecret/value",
+        "https://example.test/v1/openai%2Dapi%2Dkey%3Dopaque123",
+        "https://example.test/v1/%61pikey/value",
+        "https://example.test/v1/%70asswd/value",
+        "https://example.test/v1?tenant=acme",
+    ] {
+        assert_eq!(
+            crate::redaction::redact_projection(address),
+            "[配置地址因无法解析而已脱敏]",
+            "unsafe address was projected: {address}"
+        );
     }
 }
 
 #[test]
 fn diagnostics_redact_provider_prefixed_secret_names() {
-    let diagnostic = "OPENAI_API_KEY=sk-openai-live ANTHROPIC_API_KEY anthropic-live AZURE_ACCESS_TOKEN=azure-live OPENAI_AUTHORIZATION: Bearer provider-secret safe-context";
+    let diagnostic = "OPENAI_API_KEY=sk-openai-live ANTHROPIC_API_KEY anthropic-live AZURE_ACCESS_TOKEN=azure-live safe-context";
     let redacted = crate::redaction::redact_diagnostic(diagnostic);
 
-    for secret in [
-        "sk-openai-live",
-        "anthropic-live",
-        "azure-live",
-        "provider-secret",
-    ] {
+    for secret in ["sk-openai-live", "anthropic-live", "azure-live"] {
         assert!(
             !redacted.contains(secret),
             "secret {secret:?} leaked in {redacted:?}"
@@ -1423,12 +1516,18 @@ fn overview_reads_complete_trees_hashes_and_redacts_direct_api_keys() {
       - id: incomplete
         name: Incomplete
         api: openai-responses
+        reasoning: yes
         input: [text]
   other:
-    baseUrl: https://example.com/v1?key=query-secret&region=us
+    baseUrl: https://example.com/v1?key=query-secret&sig=signed-url-secret&credential=credential-secret&x-goog-signature=goog-signature-secret&x-goog-credential=goog-credential-secret&public=display-me&region=us
     models:
       - id: mystery
         name: Mystery
+        baseUrl: https://model-override.example/v1
+        input: [audio]
+  pathSecret:
+    baseUrl: https://example.com/v1/sk-live-path-secret#fragment-secret
+    models: []
   special:
     baseUrl: https:user:no-slashes-secret@example.com/v1
     models: []
@@ -1466,6 +1565,30 @@ otherSettings:
     assert!(!dto.to_string().contains("user-info-secret"));
     assert!(!dto.to_string().contains("query-secret"));
     assert!(!dto.to_string().contains("no-slashes-secret"));
+    assert!(!dto.to_string().contains("signed-url-secret"));
+    assert!(!dto.to_string().contains("credential-secret"));
+    assert!(!dto.to_string().contains("goog-signature-secret"));
+    assert!(!dto.to_string().contains("goog-credential-secret"));
+    assert!(!dto.to_string().contains("display-me"));
+    assert!(!dto.to_string().contains("path-secret"));
+    assert!(!dto.to_string().contains("fragment-secret"));
+    let serialized_load = serde_json::to_string(&service.get_overview_load()).unwrap();
+    for secret in [
+        "super-secret-api-key",
+        "user-info-secret",
+        "query-secret",
+        "no-slashes-secret",
+        "signed-url-secret",
+        "credential-secret",
+        "goog-signature-secret",
+        "goog-credential-secret",
+        "display-me",
+        "path-secret",
+        "fragment-secret",
+        "apiKey",
+    ] {
+        assert!(!serialized_load.contains(secret), "IPC DTO leaked {secret}");
+    }
     assert!(!dto.to_string().contains("preserve-me"));
     assert!(!dto.to_string().contains("preserve-model"));
     let providers = dto["providers"].as_array().unwrap();
@@ -1479,12 +1602,31 @@ otherSettings:
     assert_eq!(provider("other")["classification"], "custom");
     assert_eq!(provider("special")["classification"], "unsupported");
     assert_eq!(provider("dnslin")["baseUrl"], "https://example.com/v1");
+    assert_eq!(provider("other")["baseUrl"], "[配置地址因无法解析而已脱敏]");
+    let incomplete_model = provider("dnslin")["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "incomplete")
+        .unwrap();
+    assert_eq!(incomplete_model["complete"], false);
     assert_eq!(
-        provider("other")["baseUrl"],
-        "https://example.com/v1?region=us"
+        incomplete_model["readOnlyReason"],
+        "Model definition 的 reasoning 字段格式不受支持。"
     );
+    let mystery_model = provider("other")["models"]
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap();
+    assert_eq!(mystery_model["input"][0], "unsupported");
+    assert_eq!(mystery_model["hasBaseUrlOverride"], true);
     assert_eq!(
         provider("special")["baseUrl"],
+        "[配置地址因无法解析而已脱敏]"
+    );
+    assert_eq!(
+        provider("pathSecret")["baseUrl"],
         "[配置地址因无法解析而已脱敏]"
     );
     let roles = dto["roles"].as_array().unwrap();
@@ -1698,6 +1840,77 @@ fn overview_allows_null_provider_api_with_supported_model_override() {
 }
 
 #[test]
+fn overview_marks_case_insensitive_provider_and_model_collisions_read_only() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  Foo:
+    baseUrl: https://foo.example/v1
+    api: openai-responses
+    models:
+      - id: Model
+        name: First
+        input: [text]
+        contextWindow: 100
+        maxTokens: 10
+      - id: model
+        name: Second
+        input: [text]
+        contextWindow: 100
+        maxTokens: 10
+  foo:
+    baseUrl: https://foo.example/v1
+    api: openai-responses
+    models:
+      - id: other
+        name: Other
+        input: [text]
+        contextWindow: 100
+        maxTokens: 10
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: Foo/Model\n",
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+
+    assert_eq!(dto["state"], "read-only");
+    for provider in dto["providers"].as_array().unwrap() {
+        assert_eq!(provider["editable"], false);
+        assert!(
+            provider["readOnlyReason"]
+                .as_str()
+                .unwrap()
+                .contains("不区分大小写")
+        );
+    }
+    let foo = dto["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["id"] == "Foo")
+        .unwrap();
+    for model in foo["models"].as_array().unwrap() {
+        assert_eq!(model["editable"], false);
+        assert!(
+            model["readOnlyReason"]
+                .as_str()
+                .unwrap()
+                .contains("不区分大小写")
+        );
+    }
+    assert_eq!(dto["roles"][0]["status"], "advanced");
+}
+
+#[test]
 fn overview_excludes_unconfigured_roles_from_configured_role_count() {
     let app_data = tempdir().unwrap().keep();
     let target = app_data.join("agent");
@@ -1897,6 +2110,67 @@ fn overview_counts_only_custom_providers_and_marks_overrides() {
     let role = |id: &str| roles.iter().find(|role| role["id"] == id).unwrap();
     assert_eq!(role("default")["status"], "configured");
     assert_eq!(role("alias")["status"], "advanced");
+}
+
+#[test]
+fn overview_dto_redacts_embedded_target_diagnostics() {
+    let app_data = tempdir().unwrap().keep();
+    let target_path = app_data.join("agent");
+    fs::create_dir_all(&target_path).unwrap();
+    fs::write(target_path.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target_path.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let mut target = writable_target(&target_path);
+    target.recovery_notice = Some("recovered sk-live-recovery".to_owned());
+    target.warnings = vec!["warning token=sk-live-warning".to_owned()];
+    target.issue = Some(ConfigurationIssue {
+        file_path: target_path.join("models.yml").display().to_string(),
+        line: Some(3),
+        column: Some(1),
+        message: "issue Authorization: Bearer sk-live-issue".to_owned(),
+    });
+
+    let dto = crate::overview::read_overview("/bin/omp", "17.3.4", &target)
+        .unwrap()
+        .dto;
+    let serialized = serde_json::to_string(&dto).unwrap();
+    for secret in ["sk-live-recovery", "sk-live-warning", "sk-live-issue"] {
+        assert!(!serialized.contains(secret), "Overview DTO leaked {secret}");
+    }
+}
+
+#[test]
+fn overview_load_redacts_target_configuration_diagnostics_at_ipc_seam() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let mut discovery = writable_target(&target);
+    discovery.status = TargetConfigurationStatus::ParseError;
+    discovery.issue = Some(ConfigurationIssue {
+        file_path: target.join("models.yml").display().to_string(),
+        line: Some(18),
+        column: Some(4),
+        message: "parse failed at https://example.test/v1/sk-live-abc123".to_owned(),
+    });
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.clone()),
+        target_override: Some(discovery),
+        transaction_root: target.parent().unwrap().join(".app-transactions"),
+        ..FakeOmpEnvironment::default()
+    });
+    let service = service_with(environment, None);
+
+    let load = service.get_overview_load();
+    assert_eq!(
+        load.error.as_ref().map(|error| error.code),
+        Some("overview-parse-error")
+    );
+    assert!(load.overview.is_none());
+    let serialized = serde_json::to_string(&load).unwrap();
+    assert!(!serialized.contains("sk-live-abc123"));
+    assert!(serialized.contains("[诊断信息因可能包含凭据而已脱敏]"));
 }
 
 #[test]

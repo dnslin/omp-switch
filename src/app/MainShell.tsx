@@ -1,9 +1,11 @@
 import { LayoutGrid, Server, Settings, Users } from "lucide-react";
-import type { ReactNode } from "react";
-import { Link, NavLink } from "react-router";
+import { useEffect, useState, type ReactNode } from "react";
+import { Link, NavLink, useLocation } from "react-router";
 
 import { NavigationItem } from "../components/ui";
+import { asAppError, useTauriClient } from "../lib/tauri-client";
 import type { ShellStatus } from "./omp-presentation";
+import { startupShellStatus } from "./omp-presentation";
 
 const pages = [
   { to: "/overview", label: "概览", icon: LayoutGrid },
@@ -13,7 +15,25 @@ const pages = [
 ] as const;
 
 export function MainShell({ children, status }: { children: ReactNode; status?: ShellStatus }) {
-  const footer = status ?? { title: "尚未检测 OMP", path: "配置目录不可用", status: "请先完成 OMP 检测", tone: "warning" as const };
+  const client = useTauriClient();
+  const location = useLocation();
+  const [detectedStatus, setDetectedStatus] = useState<ShellStatus | null>(null);
+
+  useEffect(() => {
+    if (status) return;
+    let active = true;
+    setDetectedStatus(null);
+    void client.getStartupState().then((state) => {
+      if (active) setDetectedStatus(startupShellStatus(state));
+    }).catch((cause: unknown) => {
+      if (!active) return;
+      const error = asAppError(cause, "OMP 状态不可用");
+      setDetectedStatus({ title: error.message, path: "配置目录不可用", status: error.action, tone: "warning" });
+    });
+    return () => { active = false; };
+  }, [client, location.pathname, status]);
+
+  const footer = status ?? detectedStatus ?? { title: "正在检测 OMP", path: "配置目录检测中", status: "请稍候", tone: "warning" as const };
   return (
     <div className="app-frame app-frame--shell">
       <main className="shell-main">
