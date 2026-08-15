@@ -471,13 +471,6 @@ fn validate_input(
             "请选择一个不区分大小写也不与 bundled catalog 冲突的 Provider ID。",
         ));
     }
-    if catalog.contains_model(&provider_id, &model_id) {
-        return Err(AppError::new(
-            "model-id-conflict",
-            "Model ID 与 OMP 内置 Model definition 冲突。",
-            "请选择一个不与 bundled catalog 冲突的 Model ID。",
-        ));
-    }
 
     let base_url = normalize_base_url(&input.provider.base_url)?;
     let api_key = validate_api_key(input.provider.auth_mode, input.provider.api_key.as_deref())?;
@@ -532,8 +525,11 @@ fn validate_input(
             Value::String(api.as_str().to_owned()),
         );
     }
-    if let Some(api_key) = api_key {
-        provider.insert(Value::String("apiKey".to_owned()), Value::String(api_key));
+    if input.provider.auth_mode == ProviderAuthMode::ApiKey {
+        provider.insert(
+            Value::String("apiKey".to_owned()),
+            Value::String(api_key.unwrap_or_default()),
+        );
     }
     let mut model = Mapping::new();
     model.insert(

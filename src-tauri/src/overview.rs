@@ -910,9 +910,10 @@ fn credential_projection(provider: &Mapping) -> (OverviewAuthMode, bool, bool) {
         Value::Null => false,
         _ => true,
     });
+    let api_key_mode = matches!(value, Some(Value::String(_)));
     let auth_mode = if unsupported_credential {
         OverviewAuthMode::Unsupported
-    } else if has_api_key {
+    } else if api_key_mode {
         OverviewAuthMode::ApiKey
     } else {
         OverviewAuthMode::None

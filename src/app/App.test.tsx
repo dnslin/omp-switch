@@ -683,7 +683,7 @@ describe("React page seam", () => {
       id: "new-provider",
       name: null,
       baseUrl: "https://new-provider.example/v1",
-      authMode: "none",
+      authMode: "api-key",
       hasApiKey: false,
       modelCount: 1,
       models: [createdModel],
@@ -887,14 +887,23 @@ describe("React page seam", () => {
     expect(screen.queryByText("Direct API Key 不能以 ! 开头。")).not.toBeInTheDocument();
   });
 
-  it("returns Provider conflicts to the visible Provider step", async () => {
+  it.each([
+    ["provider-id-invalid", "provider", "Provider ID"],
+    ["provider-id-conflict", "provider", "Provider ID"],
+    ["provider-base-url-invalid", "provider", "Base URL"],
+    ["provider-api-key-invalid", "provider", "API Key"],
+    ["provider-auth-invalid", "provider", "API Key"],
+    ["model-id-invalid", "model", "Model ID"],
+    ["model-name-required", "model", "名称"],
+    ["model-api-required", "model", "协议"],
+    ["model-input-required", "model", "能力"],
+    ["model-context-window-invalid", "model", "Context Window"],
+    ["model-token-limit-invalid", "model", "Max Tokens"],
+  ] as const)("routes server validation error %s to its visible field", async (code, expectedStep, fieldLabel) => {
     const user = userEvent.setup();
+    const message = `服务器返回的 ${code} 错误。`;
     const createCustomProvider = vi.fn(async () => {
-      throw {
-        code: "provider-id-conflict",
-        message: "Provider ID 已存在。",
-        action: "请使用其他 Provider ID。",
-      };
+      throw { code, message, action: "请修正字段后重试。" };
     });
     renderRoute("/providers", {
       ...unavailableClient,
@@ -910,9 +919,16 @@ describe("React page seam", () => {
     });
     await user.click(screen.getByRole("button", { name: "创建 Provider" }));
 
-    expect(await screen.findByText("步骤 1 / 2 · Provider")).toBeVisible();
-    expect(screen.getByText("Provider ID 已存在。")).toBeVisible();
-    expect(screen.getByLabelText("Provider ID")).toHaveValue("new-provider");
+    const error = await screen.findByText(message);
+    const stepText = expectedStep === "provider" ? "步骤 1 / 2 · Provider" : "步骤 2 / 2 · 首个模型";
+    expect(screen.getByText((_, element) => Boolean(
+      element?.classList.contains("provider-create-step") && element.textContent === stepText,
+    ))).toBeVisible();
+    if (fieldLabel === "能力") {
+      expect(error.closest("fieldset")).toHaveTextContent(fieldLabel);
+    } else {
+      expect(error.closest(".provider-create-field")).toHaveTextContent(fieldLabel);
+    }
   });
 
   it("confirms dirty wizard dismissal and closes a clean wizard immediately", async () => {

@@ -683,7 +683,6 @@ function errorField(code: string): "providerId" | "baseUrl" | "apiKey" | "modelI
     case "provider-auth-invalid":
       return "apiKey";
     case "model-id-invalid":
-    case "model-id-conflict":
       return "modelId";
     case "model-name-required":
       return "modelName";

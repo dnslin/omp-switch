@@ -2481,6 +2481,41 @@ providers:
 }
 
 #[test]
+fn custom_provider_creation_preserves_api_key_mode_without_direct_key() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap();
+    let mut input = provider_creation_input(opened_models_hash);
+    input.provider.api_key = None;
+
+    service.create_custom_provider(input).unwrap();
+
+    let created: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    assert_eq!(created["providers"]["new-provider"]["apiKey"], "");
+    let refreshed = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    let provider = refreshed["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["id"] == "new-provider")
+        .unwrap();
+    assert_eq!(provider["authMode"], "api-key");
+    assert_eq!(provider["hasApiKey"], false);
+}
+
+#[test]
 fn custom_provider_creation_rejects_a_changed_models_hash_before_creating_a_backup() {
     let app_data = tempdir().unwrap();
     let target = app_data.path().join("agent");
@@ -2534,57 +2569,78 @@ fn custom_provider_creation_rejects_invalid_and_colliding_values_without_writing
         .content_hash
         .unwrap();
 
-    let mut invalid_provider = provider_creation_input(opened_models_hash.clone());
-    invalid_provider.provider.id = "not a provider".to_owned();
-    assert_eq!(
-        service
-            .create_custom_provider(invalid_provider)
-            .unwrap_err()
-            .code,
-        "provider-id-invalid"
-    );
-
-    let mut duplicate_provider = provider_creation_input(opened_models_hash.clone());
-    duplicate_provider.provider.id = "EXISTING".to_owned();
-    assert_eq!(
-        service
-            .create_custom_provider(duplicate_provider)
-            .unwrap_err()
-            .code,
-        "provider-id-conflict"
-    );
-
-    let mut missing_capability = provider_creation_input(opened_models_hash.clone());
-    missing_capability.first_model.input.clear();
-    assert_eq!(
-        service
-            .create_custom_provider(missing_capability)
-            .unwrap_err()
-            .code,
-        "model-input-required"
-    );
-
-    let mut invalid_limits = provider_creation_input(opened_models_hash.clone());
-    invalid_limits.first_model.max_tokens = invalid_limits.first_model.context_window + 1;
-    assert_eq!(
-        service
-            .create_custom_provider(invalid_limits)
-            .unwrap_err()
-            .code,
-        "model-token-limit-invalid"
-    );
-
-    let mut missing_protocol = provider_creation_input(opened_models_hash);
-    missing_protocol.provider.default_api = None;
-    missing_protocol.first_model.api = None;
-    assert_eq!(
-        service
-            .create_custom_provider(missing_protocol)
-            .unwrap_err()
-            .code,
-        "model-api-required"
-    );
-    assert_eq!(fs::read(target.join("models.yml")).unwrap(), original);
+    let invalid_cases = [
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.provider.id = "not a provider".to_owned();
+            ("invalid Provider ID", input, "provider-id-invalid")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.provider.id = "EXISTING".to_owned();
+            ("duplicate Provider ID", input, "provider-id-conflict")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.provider.base_url = "ftp://invalid.example".to_owned();
+            ("invalid Base URL", input, "provider-base-url-invalid")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.provider.auth_mode = ProviderAuthMode::None;
+            input.provider.api_key = Some("stale-key".to_owned());
+            (
+                "API Key with disabled authentication",
+                input,
+                "provider-auth-invalid",
+            )
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.provider.api_key = Some("!command credential".to_owned());
+            ("command API Key", input, "provider-api-key-invalid")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.first_model.id = "invalid model".to_owned();
+            ("invalid Model ID", input, "model-id-invalid")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.first_model.name = "  ".to_owned();
+            ("missing Model name", input, "model-name-required")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.first_model.input.clear();
+            ("missing Model capability", input, "model-input-required")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.first_model.context_window = 0;
+            ("zero Context Window", input, "model-context-window-invalid")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.first_model.max_tokens = input.first_model.context_window + 1;
+            ("invalid Max Tokens", input, "model-token-limit-invalid")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash);
+            input.provider.default_api = None;
+            input.first_model.api = None;
+            ("missing Model protocol", input, "model-api-required")
+        },
+    ];
+    for (name, input, expected_code) in invalid_cases {
+        let error = service.create_custom_provider(input).unwrap_err();
+        assert_eq!(error.code, expected_code, "{name}");
+        assert_eq!(
+            fs::read(target.join("models.yml")).unwrap(),
+            original,
+            "{name}"
+        );
+    }
 }
 
 #[test]
