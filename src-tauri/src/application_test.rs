@@ -2751,7 +2751,7 @@ fn custom_provider_creation_rejects_invalid_and_colliding_values_without_writing
 
 #[test]
 fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
-    for (name, failure) in [
+    let mut failures = vec![
         ("before backup", ProviderCreationFailurePoint::BeforeBackup),
         ("after backup", ProviderCreationFailurePoint::AfterBackup),
         (
@@ -2770,11 +2770,13 @@ fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
             "before replacement",
             ProviderCreationFailurePoint::BeforeReplacement,
         ),
-        (
-            "replacement commit failure",
-            ProviderCreationFailurePoint::BeforeCommit,
-        ),
-    ] {
+    ];
+    #[cfg(unix)]
+    failures.push((
+        "replacement commit failure",
+        ProviderCreationFailurePoint::CommitFailure,
+    ));
+    for (name, failure) in failures {
         let app_data = tempdir().unwrap();
         let target = app_data.path().join("agent");
         fs::create_dir_all(&target).unwrap();

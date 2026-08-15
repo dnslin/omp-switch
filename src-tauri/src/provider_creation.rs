@@ -121,7 +121,8 @@ pub(crate) enum ProviderCreationFailurePoint {
     CorruptTemporaryFile,
     MutateUntouchedValue,
     BeforeReplacement,
-    BeforeCommit,
+    #[cfg(all(test, unix))]
+    CommitFailure,
 }
 
 struct ValidatedCreate {
@@ -234,14 +235,14 @@ pub(crate) fn create_custom_provider(
     if failure == Some(ProviderCreationFailurePoint::BeforeReplacement) {
         return Err(injected_failure("原子替换前发生故障。"));
     }
-    if failure == Some(ProviderCreationFailurePoint::BeforeCommit) {
-        return Err(injected_failure("原子替换提交前发生故障。"));
-    }
-    // Commit is deliberately last: a fallible postwrite check would require a
-    // second write to recover and could expose the candidate if recovery failed.
-    temporary
-        .commit()
-        .map_err(|error| write_error("replace_models", error))?;
+    // In production, commit is deliberately last: a fallible postwrite check
+    // would require a second write to recover and could expose the candidate if recovery failed.
+    #[cfg(all(test, unix))]
+    let restricted_directory = restrict_models_directory_for_commit_failure(&models_path, failure)?;
+    let commit_result = temporary.commit();
+    #[cfg(all(test, unix))]
+    restore_models_directory_permissions_for_test(restricted_directory)?;
+    commit_result.map_err(|error| write_error("replace_models", error))?;
 
     Ok(CreateCustomProviderResult {
         provider_id: validated.provider_id,
@@ -249,6 +250,37 @@ pub(crate) fn create_custom_provider(
     })
 }
 
+#[cfg(all(test, unix))]
+fn restrict_models_directory_for_commit_failure(
+    models_path: &Path,
+    failure: Option<ProviderCreationFailurePoint>,
+) -> Result<Option<(PathBuf, fs::Permissions)>, AppError> {
+    if failure != Some(ProviderCreationFailurePoint::CommitFailure) {
+        return Ok(None);
+    }
+    let directory = models_path
+        .parent()
+        .ok_or_else(|| AppError::internal("models.yml 缺少用于原子替换的父目录。"))?;
+    let original_permissions = fs::metadata(directory)
+        .map_err(|error| write_error("read_models_directory_permissions", error))?
+        .permissions();
+    let mut restricted_permissions = original_permissions.clone();
+    restricted_permissions.set_mode(original_permissions.mode() & !0o222);
+    fs::set_permissions(directory, restricted_permissions)
+        .map_err(|error| write_error("restrict_models_directory_permissions", error))?;
+    Ok(Some((directory.to_owned(), original_permissions)))
+}
+
+#[cfg(all(test, unix))]
+fn restore_models_directory_permissions_for_test(
+    restricted_directory: Option<(PathBuf, fs::Permissions)>,
+) -> Result<(), AppError> {
+    if let Some((directory, permissions)) = restricted_directory {
+        fs::set_permissions(directory, permissions)
+            .map_err(|error| write_error("restore_models_directory_permissions", error))?;
+    }
+    Ok(())
+}
 fn acquire_models_write_lock(
     backup_root: &Path,
     resolved_target: &Path,
