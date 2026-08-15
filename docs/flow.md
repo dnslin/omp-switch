@@ -371,10 +371,10 @@ Providers                                      [新增 Provider]
 
 范围：
 
-- Provider ID。
+- Provider ID 和名称。
 - Base URL。
-- 默认协议。
-
+- 默认协议和认证状态。
+- Model ID、名称、有效协议及只读原因。
 无结果：
 
 ```text
@@ -400,6 +400,8 @@ Providers                                      [新增 Provider]
 
 [查看详情] [重新检测]
 ```
+
+实现状态（issue #7）：Providers 列表通过 `get_overview_load` 读取 Rust 的无密钥安全摘要，按 Provider 与 Model 信息做不区分大小写搜索。表格固定显示 ID、名称/地址摘要、模型数量、认证、默认协议、状态和操作；Built-in Provider override、高级、不支持及无清单状态都显示只读原因并禁用不安全操作。页面按 `04 Page / Providers List` 的 1536×1024 栅格实现；窄窗口保留信息架构并让表格横向滚动，窗口标题继续使用 Tauri 原生装饰。
 
 ## 9. 新增 Provider 和首个模型
 

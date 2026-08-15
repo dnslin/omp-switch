@@ -60,6 +60,9 @@ importers:
         specifier: 5.0.8
         version: 5.0.8(@types/react@19.2.2)(react@19.2.8)
     devDependencies:
+      '@oh-my-pi/pi-catalog':
+        specifier: 17.2.15
+        version: 17.2.15
       '@tailwindcss/vite':
         specifier: ^4.1.14
         version: 4.1.14(vite@7.1.7(jiti@2.7.0)(lightningcss@1.33.0))
@@ -200,6 +203,9 @@ packages:
   '@babel/types@7.29.8':
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
     engines: {node: '>=6.9.0'}
+
+  '@bufbuild/protobuf@2.14.0':
+    resolution: {integrity: sha512-C3UGsiCwSprE2NKIIFA3hCDlpXTMCAXRZuEVp88L1GY36Y41+rYL5fryE+nOFhp4p4JPQvdV8PQ4DWgHgeTE+w==}
 
   '@csstools/color-helpers@6.1.0':
     resolution: {integrity: sha512-064IFJdjTfUqnjpCVpMOdbr8FLQBhinbZj6yRv2An2E41O/pLEXqfFRWqGq/SxlE5PEUYTlvWsG2r8MswAVvkg==}
@@ -439,6 +445,52 @@ packages:
     engines: {node: ^22.20 || ^24.12 || >=25}
     cpu: [x64]
     os: [linux]
+
+  '@oh-my-pi/omptype@17.2.15':
+    resolution: {integrity: sha512-H+BILflS0B0tzdadKt131ivtnWlvDHb5JyEBrWEy+hDMDk0wA6Z6ix36L1M8nEyxixtcI4TGr5S4/cskA33wng==}
+    engines: {bun: '>=1.3.14', node: '>=20'}
+
+  '@oh-my-pi/pi-catalog@17.2.15':
+    resolution: {integrity: sha512-Z6uFLp9IBRbtU0jc6GN2rzCxCh2fiGdPNfZEBb01LqjCK6PQlNu/dmJyA4tIQpzYT5yp6DQyiwoARJXOvC+/Kg==}
+    engines: {bun: '>=1.3.14'}
+
+  '@oh-my-pi/pi-natives-darwin-arm64@17.2.15':
+    resolution: {integrity: sha512-Y0bpLvHmvSVYIBrPlCO3z9dG7gwbS4Zsse56Tsu3C5DcC9rFdpsrW61lY13MMEaUdAwos/IegGPf/O6ea2Zdqw==}
+    engines: {bun: '>=1.3.14'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@oh-my-pi/pi-natives-darwin-x64@17.2.15':
+    resolution: {integrity: sha512-opB0UMllT3wbumM3c24jJQQzr2r5siPevugULnbIAkE1fpXWbvfwoQ7Rv7ZmRGUHmgkgfd/BpK3RIsmIUqVj0Q==}
+    engines: {bun: '>=1.3.14'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@oh-my-pi/pi-natives-linux-arm64@17.2.15':
+    resolution: {integrity: sha512-Dcwyl8n0htFQcrOUJm958kATP2tp24R3W0BZaJdj/XXL+howeE44fhmzzs7gr448M8AugYgAu0UlN/9P8iolpw==}
+    engines: {bun: '>=1.3.14'}
+    cpu: [arm64]
+    os: [linux]
+
+  '@oh-my-pi/pi-natives-linux-x64@17.2.15':
+    resolution: {integrity: sha512-0orScj5we/OFETXD2o8sSpreAwGxuDaLUihgSmvfEUlc231aBRxyue8oIU94ekmNfS4lTyNdAFXoJj2d9BYCxQ==}
+    engines: {bun: '>=1.3.14'}
+    cpu: [x64]
+    os: [linux]
+
+  '@oh-my-pi/pi-natives-win32-x64@17.2.15':
+    resolution: {integrity: sha512-xOyKtYh48XBMy98nZqviyPexgwAzS1jSEFswzmKNRwXZl/NNSOU1WBRZkXQMXanG8/fGJyUdfEOHhd5nt5SD4g==}
+    engines: {bun: '>=1.3.14'}
+    cpu: [x64]
+    os: [win32]
+
+  '@oh-my-pi/pi-natives@17.2.15':
+    resolution: {integrity: sha512-9n4+/OmWTS9RfNL7qjX0T9CcQcIkKRKLQBb8evK5+0uOEKz7u0hXAQ8c9ES4xtsu5iACkh+5aNwK/PhjhEnZaw==}
+    engines: {bun: '>=1.3.14'}
+
+  '@oh-my-pi/pi-utils@17.2.15':
+    resolution: {integrity: sha512-Rl6rGhAlxshUJji3th8ZV0M47XRpzdEzlIuRL/Ycqrd+Hex+okCfpKXnpTcQoxN5QhrDOVTsoAnevK1gbU/nfQ==}
+    engines: {bun: '>=1.3.14'}
 
   '@radix-ui/number@1.1.3':
     resolution: {integrity: sha512-Road2bidD0uu/1BGDOWNdPI06g0lIRy6IF9GZcIrDK2KGItfor8IQwQa+yM2ERgHM1MmHxaxpTzk0/Jp42lNfA==}
@@ -2011,6 +2063,8 @@ snapshots:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
 
+  '@bufbuild/protobuf@2.14.0': {}
+
   '@csstools/color-helpers@6.1.0': {}
 
   '@csstools/css-calc@3.3.0(@csstools/css-parser-algorithms@4.0.0(@csstools/css-tokenizer@4.0.0))(@csstools/css-tokenizer@4.0.0)':
@@ -2159,6 +2213,41 @@ snapshots:
 
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
+
+  '@oh-my-pi/omptype@17.2.15': {}
+
+  '@oh-my-pi/pi-catalog@17.2.15':
+    dependencies:
+      '@bufbuild/protobuf': 2.14.0
+      '@oh-my-pi/omptype': 17.2.15
+      '@oh-my-pi/pi-utils': 17.2.15
+
+  '@oh-my-pi/pi-natives-darwin-arm64@17.2.15':
+    optional: true
+
+  '@oh-my-pi/pi-natives-darwin-x64@17.2.15':
+    optional: true
+
+  '@oh-my-pi/pi-natives-linux-arm64@17.2.15':
+    optional: true
+
+  '@oh-my-pi/pi-natives-linux-x64@17.2.15':
+    optional: true
+
+  '@oh-my-pi/pi-natives-win32-x64@17.2.15':
+    optional: true
+
+  '@oh-my-pi/pi-natives@17.2.15':
+    optionalDependencies:
+      '@oh-my-pi/pi-natives-darwin-arm64': 17.2.15
+      '@oh-my-pi/pi-natives-darwin-x64': 17.2.15
+      '@oh-my-pi/pi-natives-linux-arm64': 17.2.15
+      '@oh-my-pi/pi-natives-linux-x64': 17.2.15
+      '@oh-my-pi/pi-natives-win32-x64': 17.2.15
+
+  '@oh-my-pi/pi-utils@17.2.15':
+    dependencies:
+      '@oh-my-pi/pi-natives': 17.2.15
 
   '@radix-ui/number@1.1.3': {}
 
