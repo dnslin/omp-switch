@@ -26,7 +26,6 @@ const protocols = [
 ] as const satisfies readonly OverviewApi[];
 
 const providerIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-const thinkingSuffixPattern = /:(?:off|minimal|low|medium|high|xhigh|max|auto)$/i;
 
 const protocolSchema = z.enum(protocols);
 const providerStepSchema = z.object({
@@ -62,8 +61,8 @@ const providerCreateSchema = providerStepSchema
       .trim()
       .min(1, "Model ID 不能为空。")
       .refine(
-        (value) => value.length === 0 || (!/[\s\p{C}]/u.test(value) && !thinkingSuffixPattern.test(value)),
-        "Model ID 不能包含空白、控制字符或 Thinking Level 后缀。",
+        (value) => value.length === 0 || !/[\s\p{C}]/u.test(value),
+        "Model ID 不能包含空白或控制字符。",
       ),
     modelName: z.string().trim().min(1, "名称不能为空。"),
     modelApi: z.union([protocolSchema, z.literal("")]),
@@ -86,13 +85,6 @@ const providerCreateSchema = providerStepSchema
         code: "custom",
         path: ["modelApi"],
         message: "请在默认协议或模型协议中选择一种受支持协议。",
-      });
-    }
-    if (value.maxTokens > value.contextWindow) {
-      context.addIssue({
-        code: "custom",
-        path: ["maxTokens"],
-        message: "Max Tokens 不能超过 Context Window。",
       });
     }
   });

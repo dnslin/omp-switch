@@ -739,6 +739,69 @@ describe("React page seam", () => {
     expect(getOverviewLoad).toHaveBeenCalledTimes(3);
   });
 
+  it("keeps the wizard open when post-create reload fails", async () => {
+    const user = userEvent.setup();
+    const refreshError = {
+      code: "overview-read-failed",
+      message: "无法重新读取 models.yml。",
+      action: "请检查文件后重试。",
+    };
+    const getOverviewLoad = vi.fn()
+      .mockResolvedValueOnce(overviewLoad(overviewDto(), readyState))
+      .mockResolvedValueOnce({ startupState: readyState, overview: null, error: refreshError });
+    const createCustomProvider = vi.fn(async () => ({ providerId: "new-provider", modelId: "new-model" }));
+    renderRoute("/providers", { ...unavailableClient, getOverviewLoad, createCustomProvider });
+
+    await fillProviderWizard(user, {
+      providerId: "new-provider",
+      baseUrl: "https://new-provider.example/v1",
+      modelId: "new-model",
+      modelName: "New Model",
+    });
+    await user.click(screen.getByRole("button", { name: "创建 Provider" }));
+
+    const dialog = screen.getByRole("dialog");
+    expect(await within(dialog).findByText("无法创建 Provider")).toBeVisible();
+    expect(within(dialog).getByText(refreshError.message)).toBeVisible();
+    expect(within(dialog).getByLabelText("Model ID")).toHaveValue("new-model");
+    expect(dialog).toBeVisible();
+    expect(getOverviewLoad).toHaveBeenCalledTimes(2);
+  });
+
+  it("submits spec-valid model IDs and token limits", async () => {
+    const user = userEvent.setup();
+    const createCustomProvider = vi.fn(async () => ({ providerId: "new-provider", modelId: "new-model:high" }));
+    renderRoute("/providers", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      createCustomProvider,
+    });
+
+    await fillProviderWizard(user, {
+      providerId: "new-provider",
+      baseUrl: "https://new-provider.example/v1",
+      modelId: "new-model",
+      modelName: "New Model",
+    });
+    await user.clear(screen.getByLabelText("Model ID"));
+    await user.type(screen.getByLabelText("Model ID"), "new-model:high");
+    await user.clear(screen.getByLabelText("Context Window"));
+    await user.type(screen.getByLabelText("Context Window"), "1024");
+    await user.clear(screen.getByLabelText("Max Tokens"));
+    await user.type(screen.getByLabelText("Max Tokens"), "2048");
+
+    const create = screen.getByRole("button", { name: "创建 Provider" });
+    await waitFor(() => expect(create).toBeEnabled());
+    await user.click(create);
+    await waitFor(() => expect(createCustomProvider).toHaveBeenCalledWith(expect.objectContaining({
+      firstModel: expect.objectContaining({
+        id: "new-model:high",
+        contextWindow: 1_024,
+        maxTokens: 2_048,
+      }),
+    })));
+  });
+
   it("retries a failed Provider detail read", async () => {
     const user = userEvent.setup();
     const getOverviewLoad = vi.fn()

@@ -2516,6 +2516,38 @@ fn custom_provider_creation_preserves_api_key_mode_without_direct_key() {
 }
 
 #[test]
+fn custom_provider_creation_accepts_spec_valid_model_suffix_and_limits() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap();
+    let mut input = provider_creation_input(opened_models_hash);
+    input.first_model.id = "  new-model:high  ".to_owned();
+    input.first_model.context_window = 1_024;
+    input.first_model.max_tokens = 2_048;
+
+    let result = service.create_custom_provider(input).unwrap();
+
+    assert_eq!(result.model_id, "new-model:high");
+    let created: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    let model = &created["providers"]["new-provider"]["models"][0];
+    assert_eq!(model["id"], "new-model:high");
+    assert_eq!(model["contextWindow"], 1_024);
+    assert_eq!(model["maxTokens"], 2_048);
+}
+
+#[test]
 fn custom_provider_creation_rejects_a_changed_models_hash_before_creating_a_backup() {
     let app_data = tempdir().unwrap();
     let target = app_data.path().join("agent");
@@ -2622,8 +2654,8 @@ fn custom_provider_creation_rejects_invalid_and_colliding_values_without_writing
         },
         {
             let mut input = provider_creation_input(opened_models_hash.clone());
-            input.first_model.max_tokens = input.first_model.context_window + 1;
-            ("invalid Max Tokens", input, "model-token-limit-invalid")
+            input.first_model.max_tokens = 0;
+            ("zero Max Tokens", input, "model-token-limit-invalid")
         },
         {
             let mut input = provider_creation_input(opened_models_hash);

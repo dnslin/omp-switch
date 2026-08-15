@@ -495,13 +495,11 @@ fn validate_input(
             "请输入大于 0 的 Context Window。",
         ));
     }
-    if input.first_model.max_tokens == 0
-        || input.first_model.max_tokens > input.first_model.context_window
-    {
+    if input.first_model.max_tokens == 0 {
         return Err(AppError::new(
             "model-token-limit-invalid",
-            "Max Tokens 必须是正整数且不能超过 Context Window。",
-            "请调整 Max Tokens 或 Context Window。",
+            "Max Tokens 必须是正整数。",
+            "请输入大于 0 的 Max Tokens。",
         ));
     }
     if input
@@ -611,27 +609,14 @@ fn normalize_model_id(value: &str) -> Result<String, AppError> {
         || normalized
             .chars()
             .any(|character| character.is_whitespace() || character.is_control())
-        || has_thinking_suffix(normalized)
     {
         return Err(AppError::new(
             "model-id-invalid",
-            "Model ID 必须非空、不含空白或控制字符，且不能使用 Thinking Level 后缀。",
-            "请使用不与角色 Thinking Level 歧义的 Model ID。",
+            "Model ID 必须非空且不含空白或控制字符。",
+            "请使用不含空白或控制字符的 Model ID。",
         ));
     }
     Ok(normalized.to_owned())
-}
-
-fn has_thinking_suffix(value: &str) -> bool {
-    let suffix = value.rsplit_once(':').map(|(_, suffix)| suffix);
-    matches!(
-        suffix.map(|suffix| suffix.to_ascii_lowercase()),
-        Some(suffix)
-            if matches!(
-                suffix.as_str(),
-                "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "auto"
-            )
-    )
 }
 
 fn normalize_base_url(value: &str) -> Result<String, AppError> {
