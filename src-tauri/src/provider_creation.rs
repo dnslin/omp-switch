@@ -15,6 +15,7 @@ use url::Url;
 use crate::{
     bundled_catalog::BundledCatalog,
     error::{AppError, io_error_cause},
+    redaction::redact_diagnostic,
     target_configuration::{
         ConfigurationFileStatus, TargetConfigurationDiscovery, TargetConfigurationStatus,
     },
@@ -113,6 +114,7 @@ pub(crate) enum ProviderCreationFailurePoint {
     CorruptTemporaryFile,
     MutateUntouchedValue,
     BeforeReplacement,
+    AfterReplacement,
 }
 
 struct ValidatedCreate {
@@ -139,11 +141,13 @@ pub(crate) fn create_custom_provider(
     if original_hash != input.opened_models_hash {
         return Err(hash_conflict());
     }
-    let original_tree = serde_yaml::from_slice::<Value>(&original_bytes).map_err(|_| {
-        AppError::new(
+    let original_tree = serde_yaml::from_slice::<Value>(&original_bytes).map_err(|error| {
+        yaml_error(
+            "parse_original_models",
             "models-parse-error",
-            "models.yml 已无法重新解析；OMP Switch 不会覆盖该文件。",
-            "请在外部修复 YAML 后重新读取配置。",
+            "models.yml 已无法重新解析",
+            "请在外部修复 YAML 后重新读取；OMP Switch 不会覆盖该文件。",
+            error,
         )
     })?;
     let validated = validate_input(input, &original_tree, catalog)?;
@@ -162,11 +166,13 @@ pub(crate) fn create_custom_provider(
         &validated.provider_id,
         validated.provider_value.clone(),
     )?;
-    let serialized = serde_yaml::to_string(&candidate).map_err(|_| {
-        AppError::new(
+    let serialized = serde_yaml::to_string(&candidate).map_err(|error| {
+        yaml_error(
+            "serialize_created_provider",
             "models-serialize-error",
-            "无法序列化新的 Provider 配置。",
+            "无法序列化新的 Provider 配置",
             "请检查表单后重试；原 models.yml 没有被修改。",
+            error,
         )
     })?;
 
@@ -196,11 +202,13 @@ pub(crate) fn create_custom_provider(
     temporary
         .read_to_end(&mut temporary_bytes)
         .map_err(|error| write_error("read_models_temporary", error))?;
-    let mut reparsed = serde_yaml::from_slice::<Value>(&temporary_bytes).map_err(|_| {
-        AppError::new(
+    let mut reparsed = serde_yaml::from_slice::<Value>(&temporary_bytes).map_err(|error| {
+        yaml_error(
+            "parse_temporary_models",
             "models-temporary-parse-error",
-            "临时 models.yml 无法重新解析；原文件没有被修改。",
+            "临时 models.yml 无法重新解析；原文件没有被修改",
             "请检查表单后重试。",
+            error,
         )
     })?;
     if failure == Some(ProviderCreationFailurePoint::MutateUntouchedValue) {
@@ -222,22 +230,135 @@ pub(crate) fn create_custom_provider(
         .commit()
         .map_err(|error| write_error("replace_models", error))?;
 
-    let committed_bytes =
-        fs::read(&models_path).map_err(|error| write_error("reread_models", error))?;
-    let committed = serde_yaml::from_slice::<Value>(&committed_bytes).map_err(|_| {
-        AppError::new(
-            "models-postwrite-parse-error",
-            "写入后的 models.yml 无法重新解析。",
-            "请立即停止写入并从当前备份恢复；详细原因已写入脱敏日志。",
-        )
-    })?;
-    validate_created_provider(&committed, &validated)?;
-    ensure_untouched_paths_equal(&original_tree, &committed, &validated.provider_id)?;
+    let postwrite = (|| -> Result<(), AppError> {
+        if failure == Some(ProviderCreationFailurePoint::AfterReplacement) {
+            return Err(injected_failure("原子替换后发生故障。"));
+        }
+        let committed_bytes =
+            fs::read(&models_path).map_err(|error| write_error("reread_models", error))?;
+        let committed = serde_yaml::from_slice::<Value>(&committed_bytes).map_err(|error| {
+            yaml_error(
+                "parse_committed_models",
+                "models-postwrite-parse-error",
+                "写入后的 models.yml 无法重新解析",
+                "OMP Switch 将恢复原文件；请检查 YAML 后重试。",
+                error,
+            )
+        })?;
+        validate_created_provider(&committed, &validated)?;
+        ensure_untouched_paths_equal(&original_tree, &committed, &validated.provider_id)
+    })();
+    if let Err(error) = postwrite {
+        return Err(restore_after_postwrite_failure(
+            &models_path,
+            &expected_target,
+            serialized.as_bytes(),
+            &original_bytes,
+            error,
+        ));
+    }
 
     Ok(CreateCustomProviderResult {
         provider_id: validated.provider_id,
         model_id: validated.model_id,
     })
+}
+
+fn restore_after_postwrite_failure(
+    models_path: &Path,
+    expected_target: &Path,
+    candidate_bytes: &[u8],
+    original_bytes: &[u8],
+    postwrite_error: AppError,
+) -> AppError {
+    match restore_original_models(models_path, expected_target, candidate_bytes, original_bytes) {
+        Ok(()) => postwrite_error,
+        Err(recovery_error) => {
+            tracing::error!(
+                operation = "restore_models_after_postwrite_failure",
+                postwrite_code = postwrite_error.code,
+                recovery_code = recovery_error.code,
+                "Provider creation postwrite recovery failed"
+            );
+            recovery_error
+        }
+    }
+}
+
+fn restore_original_models(
+    models_path: &Path,
+    expected_target: &Path,
+    candidate_bytes: &[u8],
+    original_bytes: &[u8],
+) -> Result<(), AppError> {
+    if let Err(error) = ensure_resolved_models_path(models_path, expected_target) {
+        tracing::error!(
+            operation = "verify_models_path_before_recovery",
+            code = error.code,
+            "Provider creation recovery target changed"
+        );
+        return Err(postwrite_recovery_error());
+    }
+    let current = fs::read(models_path)
+        .map_err(|error| postwrite_recovery_io_error("read_models_for_recovery", error))?;
+    if current != candidate_bytes {
+        tracing::error!(
+            operation = "verify_models_before_recovery",
+            "Provider creation recovery refuses to overwrite changed models.yml"
+        );
+        return Err(postwrite_recovery_error());
+    }
+
+    let mut recovery = AtomicWriteFile::options()
+        .read(true)
+        .open(models_path)
+        .map_err(|error| postwrite_recovery_io_error("open_models_recovery", error))?;
+    recovery
+        .write_all(original_bytes)
+        .and_then(|()| recovery.sync_all())
+        .map_err(|error| postwrite_recovery_io_error("write_models_recovery", error))?;
+    recovery
+        .commit()
+        .map_err(|error| postwrite_recovery_io_error("replace_models_recovery", error))?;
+    let restored = fs::read(models_path)
+        .map_err(|error| postwrite_recovery_io_error("verify_models_recovery", error))?;
+    if restored != original_bytes {
+        tracing::error!(
+            operation = "verify_models_recovery",
+            "Provider creation recovery did not restore the original models.yml"
+        );
+        return Err(postwrite_recovery_error());
+    }
+    Ok(())
+}
+
+fn postwrite_recovery_io_error(operation: &'static str, error: std::io::Error) -> AppError {
+    tracing::error!(
+        operation,
+        cause = io_error_cause(error.kind()),
+        "Provider creation rollback failed"
+    );
+    postwrite_recovery_error()
+}
+
+fn postwrite_recovery_error() -> AppError {
+    AppError::new(
+        "models-postwrite-recovery-failed",
+        "写入后验证失败，且 OMP Switch 无法安全恢复原 models.yml。",
+        "请立即停止写入，并从 Target configuration 的当前备份恢复 models.yml。",
+    )
+}
+
+fn yaml_error(
+    operation: &'static str,
+    code: &'static str,
+    message: &'static str,
+    action: &'static str,
+    error: serde_yaml::Error,
+) -> AppError {
+    let diagnostic = redact_diagnostic(&error.to_string());
+    tracing::warn!(operation, diagnostic = %diagnostic, "Provider creation YAML operation failed");
+    AppError::new(code, format!("{message}：{diagnostic}"), action)
 }
 
 fn validate_writable_target(target: &TargetConfigurationDiscovery) -> Result<(), AppError> {
@@ -689,7 +810,15 @@ fn create_current_backup(
     match result {
         Ok(()) => Ok(()),
         Err(error) => {
-            let _ = fs::remove_file(&backup_path);
+            if let Err(cleanup_error) = fs::remove_file(&backup_path)
+                && cleanup_error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    operation = "cleanup_partial_models_backup",
+                    cause = io_error_cause(cleanup_error.kind()),
+                    "Provider creation backup cleanup failed"
+                );
+            }
             Err(write_error("create_models_backup", error))
         }
     }

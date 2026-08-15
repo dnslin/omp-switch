@@ -1,5 +1,5 @@
 import { StrictMode } from "react";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
@@ -87,6 +87,25 @@ function renderRoute(route: string, client: TauriClient = unavailableClient, str
     </TauriClientProvider>
   );
   return render(strictMode ? <StrictMode>{app}</StrictMode> : app);
+}
+
+type ProviderWizardValues = {
+  providerId: string;
+  baseUrl: string;
+  modelId: string;
+  modelName: string;
+};
+
+async function fillProviderWizard(
+  user: ReturnType<typeof userEvent.setup>,
+  values: ProviderWizardValues,
+) {
+  await user.click(await screen.findByRole("button", { name: "新增 Provider" }));
+  await user.type(screen.getByLabelText("Provider ID"), values.providerId);
+  await user.type(screen.getByLabelText("Base URL"), values.baseUrl);
+  await user.click(screen.getByRole("button", { name: "下一步" }));
+  await user.type(await screen.findByLabelText("Model ID"), values.modelId);
+  await user.type(screen.getByLabelText("名称"), values.modelName);
 }
 
 describe("React page seam", () => {
@@ -682,12 +701,12 @@ describe("React page seam", () => {
     const createCustomProvider = vi.fn(async () => ({ providerId: "new-provider", modelId: "new-model" }));
     renderRoute("/providers", { ...unavailableClient, getOverviewLoad, createCustomProvider });
 
-    await user.click(await screen.findByRole("button", { name: "新增 Provider" }));
-    await user.type(screen.getByLabelText("Provider ID"), " new-provider ");
-    await user.type(screen.getByLabelText("Base URL"), "https://new-provider.example/v1/");
-    await user.click(screen.getByRole("button", { name: "下一步" }));
-    await user.type(await screen.findByLabelText("Model ID"), " new-model ");
-    await user.type(screen.getByLabelText("名称"), "New Model");
+    await fillProviderWizard(user, {
+      providerId: " new-provider ",
+      baseUrl: "https://new-provider.example/v1/",
+      modelId: " new-model ",
+      modelName: "New Model",
+    });
     await user.click(screen.getByRole("button", { name: "创建 Provider" }));
 
     await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
@@ -712,6 +731,33 @@ describe("React page seam", () => {
     expect(getOverviewLoad).toHaveBeenCalledTimes(3);
   });
 
+  it("retries a failed Provider detail read", async () => {
+    const user = userEvent.setup();
+    const getOverviewLoad = vi.fn()
+      .mockRejectedValueOnce({
+        code: "overview-read-failed",
+        message: "无法读取 Provider 配置。",
+        action: "请重新读取。",
+      })
+      .mockResolvedValue(overviewLoad(overviewDto(), readyState));
+    renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法读取 Provider 配置。");
+    await user.click(screen.getByRole("button", { name: "重新读取" }));
+    expect(await screen.findByRole("heading", { name: "dnslin" })).toBeVisible();
+    expect(getOverviewLoad).toHaveBeenCalledTimes(2);
+  });
+
+  it("explains when the requested Provider no longer exists", async () => {
+    renderRoute("/providers/missing-provider", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+    });
+
+    expect(await screen.findByRole("heading", { name: "Provider 不存在" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "返回 Providers" })).toHaveAttribute("href", "/providers");
+  });
+
   it("keeps the completed wizard open on a models Hash conflict until the user explicitly reloads", async () => {
     const user = userEvent.setup();
     const getOverviewLoad = vi.fn(async () => overviewLoad(overviewDto(), readyState));
@@ -724,12 +770,12 @@ describe("React page seam", () => {
     });
     renderRoute("/providers", { ...unavailableClient, getOverviewLoad, createCustomProvider });
 
-    await user.click(await screen.findByRole("button", { name: "新增 Provider" }));
-    await user.type(screen.getByLabelText("Provider ID"), "new-provider");
-    await user.type(screen.getByLabelText("Base URL"), "https://new-provider.example/v1");
-    await user.click(screen.getByRole("button", { name: "下一步" }));
-    await user.type(await screen.findByLabelText("Model ID"), "new-model");
-    await user.type(screen.getByLabelText("名称"), "New Model");
+    await fillProviderWizard(user, {
+      providerId: "new-provider",
+      baseUrl: "https://new-provider.example/v1",
+      modelId: "new-model",
+      modelName: "New Model",
+    });
     await user.click(screen.getByRole("button", { name: "创建 Provider" }));
 
     expect(await screen.findByText("配置冲突")).toBeVisible();
@@ -759,12 +805,12 @@ describe("React page seam", () => {
       createCustomProvider,
     });
 
-    await user.click(await screen.findByRole("button", { name: "新增 Provider" }));
-    await user.type(screen.getByLabelText("Provider ID"), "new-provider");
-    await user.type(screen.getByLabelText("Base URL"), "https://new-provider.example/v1");
-    await user.click(screen.getByRole("button", { name: "下一步" }));
-    await user.type(await screen.findByLabelText("Model ID"), "new-model");
-    await user.type(screen.getByLabelText("名称"), "New Model");
+    await fillProviderWizard(user, {
+      providerId: "new-provider",
+      baseUrl: "https://new-provider.example/v1",
+      modelId: "new-model",
+      modelName: "New Model",
+    });
     await user.click(screen.getByRole("button", { name: "创建 Provider" }));
 
     expect(await screen.findByText("无法创建 Provider")).toBeVisible();
@@ -772,6 +818,80 @@ describe("React page seam", () => {
     expect(screen.getByLabelText("Model ID")).toHaveValue("new-model");
     expect(screen.getByRole("dialog")).toBeVisible();
     expect(createCustomProvider).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows a stale API Key value when authentication is explicitly disabled", async () => {
+    const user = userEvent.setup();
+    renderRoute("/providers", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+    });
+
+    await user.click(await screen.findByRole("button", { name: "新增 Provider" }));
+    await user.type(screen.getByLabelText("Provider ID"), "no-auth-provider");
+    await user.type(screen.getByLabelText("Base URL"), "https://no-auth.example/v1");
+    await user.type(screen.getByLabelText("API Key", { selector: 'input[type="password"]' }), "!stale-key");
+    await user.click(screen.getByRole("radio", { name: "无需认证" }));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+
+    expect(await screen.findByText("步骤 2 / 2 · 首个模型")).toBeVisible();
+    expect(screen.queryByText("Direct API Key 不能以 ! 开头。")).not.toBeInTheDocument();
+  });
+
+  it("returns Provider conflicts to the visible Provider step", async () => {
+    const user = userEvent.setup();
+    const createCustomProvider = vi.fn(async () => {
+      throw {
+        code: "provider-id-conflict",
+        message: "Provider ID 已存在。",
+        action: "请使用其他 Provider ID。",
+      };
+    });
+    renderRoute("/providers", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      createCustomProvider,
+    });
+
+    await fillProviderWizard(user, {
+      providerId: "new-provider",
+      baseUrl: "https://new-provider.example/v1",
+      modelId: "new-model",
+      modelName: "New Model",
+    });
+    await user.click(screen.getByRole("button", { name: "创建 Provider" }));
+
+    expect(await screen.findByText("步骤 1 / 2 · Provider")).toBeVisible();
+    expect(screen.getByText("Provider ID 已存在。")).toBeVisible();
+    expect(screen.getByLabelText("Provider ID")).toHaveValue("new-provider");
+  });
+
+  it("confirms dirty wizard dismissal and closes a clean wizard immediately", async () => {
+    const user = userEvent.setup();
+    renderRoute("/providers", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+    });
+
+    await user.click(await screen.findByRole("button", { name: "新增 Provider" }));
+    await user.type(screen.getByLabelText("Provider ID"), "draft-provider");
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    const cancelHeading = await screen.findByRole("heading", { name: "有未保存的修改" });
+    const cancelDialog = cancelHeading.closest('[role="dialog"]');
+    expect(cancelDialog).not.toBeNull();
+    await user.click(within(cancelDialog as HTMLElement).getByRole("button", { name: "取消" }));
+    expect(screen.getByLabelText("Provider ID")).toHaveValue("draft-provider");
+
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    const discardHeading = await screen.findByRole("heading", { name: "有未保存的修改" });
+    const discardDialog = discardHeading.closest('[role="dialog"]');
+    expect(discardDialog).not.toBeNull();
+    await user.click(within(discardDialog as HTMLElement).getByRole("button", { name: "确认" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    await user.click(await screen.findByRole("button", { name: "新增 Provider" }));
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
   it("lists searchable Provider safety summaries and freezes unsafe actions", async () => {

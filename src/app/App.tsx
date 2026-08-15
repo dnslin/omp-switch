@@ -8,7 +8,7 @@ import { asAppError, useTauriClient, type StartupState } from "../lib/tauri-clie
 import { useUiSettings } from "../store/ui-settings";
 import { MainShell } from "./MainShell";
 import { OverviewPage } from "./OverviewPage";
-import { ProvidersPage } from "./ProvidersPage";
+import { ProvidersPage, providerAuthSummary } from "./ProvidersPage";
 import { useOverviewLoad } from "./overview-load";
 import { fileStatusView, startupShellStatus, targetConfigurationStatusView, type RowStatus } from "./omp-presentation";
 
@@ -366,9 +366,7 @@ function ProviderDetailPage() {
   const { providerId } = useParams();
   const { data, error, loading, reload, shellStatus } = useOverviewLoad(providerDetailLoadCopy);
   const provider = data?.providers.find((item) => item.id === providerId);
-  const authSummary = provider?.authMode === "api-key"
-    ? provider.hasApiKey ? "API Key 已配置" : "API Key 未配置"
-    : provider?.authMode === "none" ? "无需认证" : "不支持的认证";
+  const authSummary = provider ? providerAuthSummary(provider) : "不支持的认证";
 
   return (
     <MainShell status={shellStatus}>

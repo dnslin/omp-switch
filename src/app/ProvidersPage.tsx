@@ -42,7 +42,7 @@ function providerStatus(provider: OverviewProvider): ProviderStatus {
   }
 }
 
-function authSummary(provider: OverviewProvider): string {
+export function providerAuthSummary(provider: OverviewProvider): string {
   if (provider.authMode === "api-key") return provider.hasApiKey ? "API Key 已配置" : "API Key 未配置";
   if (provider.authMode === "none") return "无认证";
   return "不支持的认证";
@@ -57,7 +57,7 @@ function matchesProvider(provider: OverviewProvider, query: string): boolean {
     provider.defaultApi,
     provider.classification,
     provider.readOnlyReason,
-    authSummary(provider),
+    providerAuthSummary(provider),
     ...provider.models.flatMap((model) => [
       model.id,
       model.name,
@@ -215,7 +215,7 @@ function ProviderRows({ provider }: { provider: OverviewProvider }) {
           </div>
         </td>
         <td>{provider.defaultApi ?? "由模型指定"}</td>
-        <td>{authSummary(provider)}</td>
+        <td>{providerAuthSummary(provider)}</td>
         <td>{provider.modelCount}</td>
         <td><StatusIndicator tone={status.tone}>{status.label}</StatusIndicator></td>
         <td className="providers-actions-cell">

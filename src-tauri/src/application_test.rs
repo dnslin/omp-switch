@@ -2608,6 +2608,10 @@ fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
             "before replacement",
             ProviderCreationFailurePoint::BeforeReplacement,
         ),
+        (
+            "after replacement",
+            ProviderCreationFailurePoint::AfterReplacement,
+        ),
     ] {
         let app_data = tempdir().unwrap();
         let target = app_data.path().join("agent");

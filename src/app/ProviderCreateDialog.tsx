@@ -42,7 +42,15 @@ const providerStepSchema = z.object({
     .refine(isHttpUrl, "Base URL 必须是有效的 HTTP 或 HTTPS 地址。"),
   defaultApi: z.union([protocolSchema, z.literal("")]),
   authMode: z.enum(["api-key", "none"]),
-  apiKey: z.string().refine((value) => !value.startsWith("!"), "Direct API Key 不能以 ! 开头。"),
+  apiKey: z.string(),
+}).superRefine((value, context) => {
+  if (value.authMode === "api-key" && value.apiKey.startsWith("!")) {
+    context.addIssue({
+      code: "custom",
+      path: ["apiKey"],
+      message: "Direct API Key 不能以 ! 开头。",
+    });
+  }
 });
 
 const providerCreateSchema = providerStepSchema
@@ -235,7 +243,9 @@ export function ProviderCreateDialog({
       const error = asAppError(cause, "创建 Provider 失败");
       const field = errorField(error.code);
       if (field) {
-        setError(field, { type: "server", message: error.message }, { shouldFocus: true });
+        const returnsToProviderStep = providerStepFields.includes(field as (typeof providerStepFields)[number]);
+        if (returnsToProviderStep) setStep("provider");
+        setError(field, { type: "server", message: error.message }, { shouldFocus: !returnsToProviderStep });
       } else {
         setSubmissionError(error);
       }
