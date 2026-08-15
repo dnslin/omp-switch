@@ -5,15 +5,33 @@ import { toast } from "sonner";
 
 import { Button } from "../components/ui";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
-import { asAppError, useTauriClient, type OverviewDto, type OverviewModel, type OverviewProvider, type StartupState } from "../lib/tauri-client";
+import { asAppError, useTauriClient, type AppError, type OverviewDto, type OverviewModel, type OverviewProvider, type StartupState, type TauriClient, type UiSettingsUpdate } from "../lib/tauri-client";
 import { modelSelectionFields, useUiSettings, type ModelSelection } from "../store/ui-settings";
 import { MainShell } from "./MainShell";
 import { fileStatusView, overviewShellStatus, startupShellStatus } from "./omp-presentation";
+
+type OverviewError = Pick<AppError, "message" | "action">;
 
 type InitialOverviewSelection = {
   selection: ModelSelection;
   staleSavedSelection: boolean;
 };
+
+const overviewSettingsSaveQueues = new WeakMap<TauriClient, Promise<void>>();
+
+function enqueueOverviewSettingsSave(client: TauriClient, settings: UiSettingsUpdate, isActive: () => boolean) {
+  const previous = overviewSettingsSaveQueues.get(client) ?? Promise.resolve();
+  const queued = previous.then(async () => {
+    try {
+      await client.saveUiSettings(settings);
+    } catch (cause: unknown) {
+      if (!isActive()) return;
+      const appError = asAppError(cause, "无法保存快速测试选择");
+      toast.error(appError.message, { description: appError.action });
+    }
+  });
+  overviewSettingsSaveQueues.set(client, queued);
+}
 
 function preferredOverviewModel(models: readonly OverviewModel[]): OverviewModel | null {
   return models.find((model) => model.complete && model.editable)
@@ -81,7 +99,7 @@ export function OverviewPage() {
   const hydrationState = useUiSettings((state) => state.hydrationState);
   const [data, setData] = useState<OverviewDto | null>(null);
   const [startupState, setStartupState] = useState<StartupState | null>(null);
-  const [error, setError] = useState<ReturnType<typeof asAppError> | null>(null);
+  const [error, setError] = useState<OverviewError | null>(null);
   const [loading, setLoading] = useState(true);
   const requestId = useRef(0);
 
@@ -105,7 +123,6 @@ export function OverviewPage() {
         setData(result.overview);
       } else {
         setError({
-          code: "overview-empty-response",
           message: "OMP 没有返回概览数据。",
           action: "请重新读取；如果问题持续，请查看脱敏日志。",
         });
@@ -118,6 +135,16 @@ export function OverviewPage() {
     }
   }
 
+  async function openTargetDirectory() {
+    if (startupState?.kind !== "omp-ready") return;
+    try {
+      await client.openTargetConfigurationDirectory(startupState.executablePath);
+    } catch (cause: unknown) {
+      const appError = asAppError(cause, "无法打开配置目录");
+      toast.error(appError.message, { description: appError.action });
+    }
+  }
+
   useEffect(() => {
     void reload();
     return () => { requestId.current += 1; };
@@ -125,12 +152,19 @@ export function OverviewPage() {
 
   const pageLoading = loading || hydrationState === "loading";
   const pageClass = pageLoading ? "overview-page--loading" : error || !data ? "overview-page--error" : `overview-page--${data.state}`;
-  const shellStatus = data ? overviewShellStatus(data) : startupState ? startupShellStatus(startupState) : undefined;
+  const shellStatus = data
+    ? overviewShellStatus(data)
+    : startupState
+      ? startupShellStatus(startupState)
+      : error
+        ? { title: "OMP 状态不可用", path: "配置目录不可用", status: "请重新读取 OMP", tone: "warning" as const }
+        : { title: "正在检测 OMP", path: "配置目录检测中", status: "请稍候", tone: "warning" as const };
+  const openDirectory = startupState?.kind === "omp-ready" ? openTargetDirectory : null;
   return (
     <MainShell status={shellStatus}>
       <div className={`overview-page ${pageClass}`} aria-busy={pageLoading}>
         <OverviewPageHeader />
-        {pageLoading ? <OverviewLoadingBody /> : error ? <OverviewErrorBody error={error} onReload={reload} /> : data ? <OverviewContentBody data={data} /> : <OverviewErrorBody error={{ message: "OMP 没有返回概览数据。", action: "请重新读取；如果问题持续，请查看脱敏日志。" }} onReload={reload} />}
+        {pageLoading ? <OverviewLoadingBody /> : error ? <OverviewErrorBody error={error} onReload={reload} onOpenTargetDirectory={openDirectory} /> : data ? <OverviewContentBody data={data} /> : <OverviewErrorBody error={{ message: "OMP 没有返回概览数据。", action: "请重新读取；如果问题持续，请查看脱敏日志。" }} onReload={reload} onOpenTargetDirectory={openDirectory} />}
       </div>
     </MainShell>
   );
@@ -145,29 +179,43 @@ function OverviewPageHeader() {
   );
 }
 
-function OverviewLoadingBody() {
+function OverviewSkeletonSlots() {
   return (
-    <div className="overview-loading" role="status" aria-label="正在读取配置" aria-live="polite">
-      <strong>正在读取配置…</strong>
+    <>
       <div className="overview-skeleton overview-skeleton--sync" aria-hidden="true" />
       <div className="overview-skeleton overview-skeleton--environment" aria-hidden="true" />
       <div className="overview-skeleton overview-skeleton--metrics" aria-hidden="true" />
       <div className="overview-skeleton overview-skeleton--test" aria-hidden="true" />
+    </>
+  );
+}
+
+function OverviewLoadingBody() {
+  return (
+    <div className="overview-loading" role="status" aria-label="正在读取配置" aria-live="polite">
+      <strong>正在读取配置…</strong>
+      <OverviewSkeletonSlots />
     </div>
   );
 }
 
-function OverviewErrorBody({ error, onReload }: { error: { message: string; action: string }; onReload: () => Promise<void> }) {
+function OverviewErrorBody({ error, onReload, onOpenTargetDirectory }: { error: OverviewError; onReload: () => Promise<void>; onOpenTargetDirectory: (() => Promise<void>) | null }) {
   return (
-    <section className="overview-error-card" role="alert" aria-live="assertive">
-      <CircleAlert aria-hidden="true" />
-      <div>
-        <h2>无法读取概览</h2>
-        <p>{error.message}</p>
-        <p className="overview-state-detail">{error.action}</p>
-      </div>
-      <Button variant="secondary" onClick={() => void onReload()}>重新读取</Button>
-    </section>
+    <div className="overview-error-scaffold">
+      <section className="overview-error-card" role="alert" aria-live="assertive">
+        <CircleAlert aria-hidden="true" />
+        <div>
+          <h2>无法读取概览</h2>
+          <p>{error.message}</p>
+          <p className="overview-state-detail">{error.action}</p>
+        </div>
+        <div className="overview-error-actions">
+          {onOpenTargetDirectory ? <Button variant="secondary" onClick={() => void onOpenTargetDirectory()}>打开配置目录</Button> : null}
+          <Button variant="secondary" onClick={() => void onReload()}>重新读取</Button>
+        </div>
+      </section>
+      <OverviewSkeletonSlots />
+    </div>
   );
 }
 
@@ -177,21 +225,18 @@ function OverviewContentBody({ data }: { data: OverviewDto }) {
   const storedSelection = useUiSettings((state) => state.selection);
   const savedSelectionInvalid = useUiSettings((state) => state.savedSelectionInvalid);
   const setStoredSelection = useUiSettings((state) => state.setSelection);
-  const saveQueue = useRef<Promise<void>>(Promise.resolve());
+  const isActive = useRef(true);
   const staleSavedSelectionHandled = useRef(false);
   const [initialSelection] = useState(() => resolveInitialOverviewSelection(data, hydrationState, storedSelection, savedSelectionInvalid));
   const [selection, setSelection] = useState<ModelSelection>(initialSelection.selection);
+  useEffect(() => {
+    isActive.current = true;
+    return () => { isActive.current = false; };
+  }, []);
   const enqueueSelectionSave = useCallback((nextSelection: ModelSelection) => {
     const { theme, costNoticeAccepted } = useUiSettings.getState();
     const settings = { theme, ...modelSelectionFields(nextSelection), costNoticeAccepted };
-    saveQueue.current = saveQueue.current.catch(() => undefined).then(async () => {
-      try {
-        await client.saveUiSettings(settings);
-      } catch (cause: unknown) {
-        const appError = asAppError(cause, "无法保存快速测试选择");
-        toast.error(appError.message, { description: appError.action });
-      }
-    });
+    enqueueOverviewSettingsSave(client, settings, () => isActive.current);
   }, [client]);
 
   useEffect(() => {
@@ -219,12 +264,7 @@ function OverviewContentBody({ data }: { data: OverviewDto }) {
   function handleProviderChange(providerId: string) {
     const nextProvider = data.providers.find((provider) => provider.id === providerId);
     if (!nextProvider) return;
-    const retainedModel = selection.kind === "model"
-      ? nextProvider.models.find((model) => model.id === selection.modelId) ?? null
-      : null;
-    commitSelection(retainedModel
-      ? { kind: "model", providerId: nextProvider.id, modelId: retainedModel.id }
-      : { kind: "provider", providerId: nextProvider.id });
+    commitSelection({ kind: "provider", providerId: nextProvider.id });
   }
 
   function handleModelChange(modelId: string) {
@@ -294,16 +334,34 @@ function OverviewMetrics({ data }: { data: OverviewDto }) {
 
 function OverviewStateBanner({ data }: { data: OverviewDto }) {
   const empty = data.state === "empty";
+  const configurationCreationRequired = empty && (
+    data.targetConfiguration.status === "creation-required"
+      || data.files.models.status === "missing"
+      || data.files.config.status === "missing"
+  );
+  const providerManagementReadOnly = !empty
+    && data.targetConfiguration.status === "writable"
+    && data.providers.length > 0
+    && data.providers.every((provider) => !provider.editable);
+  const title = configurationCreationRequired
+    ? "还没有可读取的规范配置文件"
+    : empty
+      ? "还没有可管理的自定义 Provider"
+      : providerManagementReadOnly
+        ? "没有可编辑的自定义 Provider"
+        : "配置只读";
+  const actionLabel = configurationCreationRequired ? "完成首次设置" : empty ? "新增 Provider" : "查看 Providers";
+  const actionPath = configurationCreationRequired ? "/setup" : "/providers";
   return (
     <section className={`overview-state-banner overview-state-banner--${empty ? "empty" : "readonly"}`} aria-live="polite">
       {empty ? <CircleCheck aria-hidden="true" /> : <CircleAlert aria-hidden="true" />}
       <div>
-        <strong>{empty ? "还没有可管理的自定义 Provider" : "配置只读"}</strong>
+        <strong>{title}</strong>
         <p>{empty ? (data.emptyReason ?? "创建一个 Provider，并同时配置它的第一个模型。") : (data.readOnlyReason ?? "当前配置只能查看；OMP Switch 不会修改配置文件。")}</p>
         {data.nextAction ? <p className="overview-state-detail">{data.nextAction}</p> : null}
       </div>
       <Button asChild variant={empty ? "primary" : "secondary"}>
-        <Link to="/providers">{empty ? "新增 Provider" : "查看 Providers"}</Link>
+        <Link to={actionPath}>{actionLabel}</Link>
       </Button>
     </section>
   );
@@ -326,7 +384,7 @@ function QuickTestPanel({
   const finalAddress = endpoint.kind === "available" ? endpoint.value : endpoint.kind === "invalid" ? endpoint.reason : "—";
   const protocol = model?.effectiveApi ? `${model.effectiveApi}  ·  ${model.apiSource === "provider" ? "Provider 默认值" : "模型指定"}` : "—";
   const capabilities = model
-    ? [...model.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : input), ...(model.reasoning === true ? ["Reasoning"] : [])].join("  ·  ") || "—"
+    ? [...model.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : "Unsupported"), ...(model.reasoning === true ? ["Reasoning"] : [])].join("  ·  ") || "—"
     : "—";
   return (
     <section className="overview-panel overview-quick-test" aria-label="快速测试">
@@ -420,9 +478,6 @@ function OverviewResultRow({ label, value }: { label: string; value: string }) {
   return <div className="overview-result-row"><span>{label}</span><span>{value}</span></div>;
 }
 
-function OverviewSkeleton() {
-  return <div className="overview-skeleton" aria-hidden="true" />;
-}
 
 function formatOverviewCount(value: number) {
   return new Intl.NumberFormat("zh-CN").format(value);
@@ -434,6 +489,9 @@ type ModelEndpoint =
   | { kind: "invalid"; reason: string };
 
 function modelEndpoint(provider: OverviewProvider, model: OverviewModel): ModelEndpoint {
+  if (model.hasBaseUrlOverride) {
+    return { kind: "invalid", reason: "模型级 Base URL 覆盖不可安全展示" };
+  }
   const base = provider.baseUrl?.trim();
   if (!base || !model.effectiveApi) return { kind: "not-configured" };
   try {

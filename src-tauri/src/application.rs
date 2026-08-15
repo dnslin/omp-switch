@@ -162,14 +162,14 @@ impl OverviewLoadCoordinator {
         None
     }
 
-    fn finish(&self, result: OverviewLoadDto) {
+    fn finish(&self, result: &OverviewLoadDto) {
         let mut state = self.state.lock();
         let generation = state
             .in_flight
             .take()
             .expect("overview load finished without an active flight");
         if state.waiters.contains_key(&generation) {
-            state.completed.insert(generation, result);
+            state.completed.insert(generation, result.clone());
         }
         self.ready.notify_all();
     }
@@ -256,21 +256,95 @@ impl AppService {
         let result = {
             let _detection = self.detection_lock.lock();
             let startup_state = self.detect_omp_internal();
-            match self.read_overview_for_state(startup_state.clone()) {
+            let safe_startup_state = Self::sanitize_overview_startup_state(&startup_state);
+            match self.read_overview_for_state(startup_state) {
                 Ok(overview) => OverviewLoadDto {
-                    startup_state,
+                    startup_state: safe_startup_state,
                     overview: Some(overview),
                     error: None,
                 },
                 Err(error) => OverviewLoadDto {
-                    startup_state,
+                    startup_state: safe_startup_state,
                     overview: None,
                     error: Some(error),
                 },
             }
         };
-        self.overview_load.finish(result.clone());
+        self.overview_load.finish(&result);
         result
+    }
+
+    pub(crate) fn sanitize_overview_startup_state(state: &StartupState) -> StartupState {
+        match state {
+            StartupState::OmpUnavailable { message } => StartupState::OmpUnavailable {
+                message: redact_diagnostic(message),
+            },
+            StartupState::InvalidExecutable {
+                executable_path,
+                message,
+                diagnostic_code,
+            } => StartupState::InvalidExecutable {
+                executable_path: executable_path.clone(),
+                message: redact_diagnostic(message),
+                diagnostic_code: diagnostic_code.clone(),
+            },
+            StartupState::VersionFailed {
+                executable_path,
+                message,
+                diagnostic_code,
+                exit_code,
+                stderr,
+            } => StartupState::VersionFailed {
+                executable_path: executable_path.clone(),
+                message: redact_diagnostic(message),
+                diagnostic_code: diagnostic_code.clone(),
+                exit_code: *exit_code,
+                stderr: redact_diagnostic(stderr),
+            },
+            StartupState::ConfigPathFailed {
+                executable_path,
+                version,
+                message,
+                diagnostic_code,
+                exit_code,
+                stderr,
+            } => StartupState::ConfigPathFailed {
+                executable_path: executable_path.clone(),
+                version: version.clone(),
+                message: redact_diagnostic(message),
+                diagnostic_code: diagnostic_code.clone(),
+                exit_code: *exit_code,
+                stderr: redact_diagnostic(stderr),
+            },
+            StartupState::OmpReady {
+                executable_path,
+                version,
+                target_configuration,
+                previous_target_configuration,
+                requires_confirmation,
+            } => {
+                let mut target_configuration = target_configuration.as_ref().clone();
+                target_configuration.recovery_notice = target_configuration
+                    .recovery_notice
+                    .as_deref()
+                    .map(redact_diagnostic);
+                target_configuration.warnings = target_configuration
+                    .warnings
+                    .iter()
+                    .map(|warning| redact_diagnostic(warning))
+                    .collect();
+                if let Some(issue) = target_configuration.issue.as_mut() {
+                    issue.message = redact_diagnostic(&issue.message);
+                }
+                StartupState::OmpReady {
+                    executable_path: executable_path.clone(),
+                    version: version.clone(),
+                    target_configuration: Box::new(target_configuration),
+                    previous_target_configuration: previous_target_configuration.clone(),
+                    requires_confirmation: *requires_confirmation,
+                }
+            }
+        }
     }
 
     fn read_overview_for_state(&self, state: StartupState) -> Result<OverviewDto, AppError> {
@@ -302,24 +376,7 @@ impl AppService {
             }
         };
         let result = read_overview(&executable_path, &version, &target_configuration)?;
-        if let Some(snapshot) = result.snapshot.as_ref() {
-            tracing::debug!(
-                operation = "get_overview_load",
-                models_hash = %snapshot.models.raw_hash,
-                config_hash = %snapshot.config.raw_hash,
-                "retained complete configuration snapshot"
-            );
-        }
         *self.configuration_snapshot.write() = result.snapshot;
-        tracing::info!(
-            operation = "get_overview_load",
-            status = "success",
-            provider_count = result.dto.counts.provider_count,
-            model_count = result.dto.counts.model_count,
-            role_count = result.dto.counts.role_count,
-            state = ?result.dto.state,
-            "loaded secret-free overview projection"
-        );
         Ok(result.dto)
     }
 
@@ -792,27 +849,33 @@ fn log_startup_state(operation: &'static str, started_at: Instant, state: &Start
 pub fn get_startup_state(service: tauri::State<'_, AppService>) -> StartupState {
     let started_at = Instant::now();
     let state = service.get_startup_state();
+    let safe_state = AppService::sanitize_overview_startup_state(&state);
     tracing::info!(
         operation = "get_startup_state",
         status = "success",
         elapsed_ms = started_at.elapsed().as_millis() as u64
     );
-    state
+    safe_state
 }
 
 #[tauri::command]
 pub fn get_overview_load(service: tauri::State<'_, AppService>) -> OverviewLoadDto {
     let started_at = Instant::now();
     let result = service.get_overview_load();
-    tracing::info!(
-        operation = "get_overview_load",
-        status = if result.error.is_some() {
-            "error"
-        } else {
-            "success"
-        },
-        elapsed_ms = started_at.elapsed().as_millis() as u64
-    );
+    if let Some(error) = result.error.as_ref() {
+        tracing::info!(
+            operation = "get_overview_load",
+            status = "error",
+            code = error.code,
+            elapsed_ms = started_at.elapsed().as_millis() as u64
+        );
+    } else {
+        tracing::info!(
+            operation = "get_overview_load",
+            status = "success",
+            elapsed_ms = started_at.elapsed().as_millis() as u64
+        );
+    }
     result
 }
 
@@ -839,8 +902,9 @@ pub fn save_ui_settings(
 pub fn detect_omp(service: tauri::State<'_, AppService>) -> StartupState {
     let started_at = Instant::now();
     let state = service.detect_omp();
-    log_startup_state("detect_omp", started_at, &state);
-    state
+    let safe_state = AppService::sanitize_overview_startup_state(&state);
+    log_startup_state("detect_omp", started_at, &safe_state);
+    safe_state
 }
 
 #[tauri::command]
@@ -850,8 +914,9 @@ pub fn validate_selected_omp(
 ) -> StartupState {
     let started_at = Instant::now();
     let state = service.validate_selected_omp(PathBuf::from(executable_path));
-    log_startup_state("validate_selected_omp", started_at, &state);
-    state
+    let safe_state = AppService::sanitize_overview_startup_state(&state);
+    log_startup_state("validate_selected_omp", started_at, &safe_state);
+    safe_state
 }
 
 #[tauri::command]
@@ -863,8 +928,9 @@ pub fn initialize_target_configuration(
     let started_at = Instant::now();
     let result =
         service.initialize_target_configuration(PathBuf::from(executable_path), expectation);
-    log_command_result("initialize_target_configuration", started_at, &result);
-    result
+    let safe_result = result.map(|state| AppService::sanitize_overview_startup_state(&state));
+    log_command_result("initialize_target_configuration", started_at, &safe_result);
+    safe_result
 }
 
 #[tauri::command]

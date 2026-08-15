@@ -30,6 +30,31 @@ impl Serialize for OverviewState {
         })
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum OverviewAuthMode {
+    ApiKey,
+    None,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum OverviewApiSource {
+    Provider,
+    Model,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum OverviewRoleStatus {
+    Configured,
+    Unconfigured,
+    ProviderMissing,
+    ModelMissing,
+    Incomplete,
+    Advanced,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,7 +111,7 @@ pub struct ProviderSummaryDto {
     pub name: Option<String>,
     pub base_url: Option<String>,
     pub default_api: Option<String>,
-    pub auth_mode: String,
+    pub auth_mode: OverviewAuthMode,
     pub has_api_key: bool,
     pub model_count: usize,
     pub classification: ProviderClassification,
@@ -104,6 +129,14 @@ pub(crate) enum ProviderClassification {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum OverviewInput {
+    Text,
+    Image,
+    Unsupported,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSummaryDto {
@@ -111,8 +144,9 @@ pub struct ModelSummaryDto {
     pub id: String,
     pub name: Option<String>,
     pub effective_api: Option<String>,
-    pub api_source: Option<String>,
-    pub input: Vec<String>,
+    pub api_source: Option<OverviewApiSource>,
+    pub has_base_url_override: bool,
+    pub input: Vec<OverviewInput>,
     pub reasoning: Option<bool>,
     pub context_window: Option<u64>,
     pub max_tokens: Option<u64>,
@@ -125,7 +159,7 @@ pub struct ModelSummaryDto {
 #[serde(rename_all = "camelCase")]
 pub struct RoleSummaryDto {
     pub id: String,
-    pub status: String,
+    pub status: OverviewRoleStatus,
     pub selector: Option<String>,
 }
 
@@ -213,7 +247,7 @@ pub(crate) fn read_overview(
     let model_count = models.len();
     let role_count = roles
         .iter()
-        .filter(|role| role.status != "unconfigured")
+        .filter(|role| role.status != OverviewRoleStatus::Unconfigured)
         .count();
     let editable_provider_count = providers
         .iter()
@@ -222,11 +256,10 @@ pub(crate) fn read_overview(
 
     let state = if target.status == TargetConfigurationStatus::CreationRequired {
         OverviewState::Empty
-    } else if target.status != TargetConfigurationStatus::Writable {
-        OverviewState::ReadOnly
-    } else if structure_invalid {
-        OverviewState::ReadOnly
-    } else if catalog.is_none() {
+    } else if target.status != TargetConfigurationStatus::Writable
+        || structure_invalid
+        || catalog.is_none()
+    {
         OverviewState::ReadOnly
     } else if providers.is_empty() {
         OverviewState::Empty
@@ -263,7 +296,7 @@ pub(crate) fn read_overview(
             executable_path: executable_path.to_owned(),
             version: version.to_owned(),
         },
-        target_configuration: target.clone(),
+        target_configuration: sanitized_target_configuration(target),
         files: OverviewFilesDto {
             models: file_dto(&target.models, models_document.as_ref()),
             config: file_dto(&target.config, config_document.as_ref()),
@@ -351,6 +384,22 @@ fn file_dto(
     }
 }
 
+fn sanitized_target_configuration(
+    target: &TargetConfigurationDiscovery,
+) -> TargetConfigurationDiscovery {
+    let mut target = target.clone();
+    target.recovery_notice = target.recovery_notice.as_deref().map(redact_diagnostic);
+    target.warnings = target
+        .warnings
+        .iter()
+        .map(|warning| redact_diagnostic(warning))
+        .collect();
+    if let Some(issue) = target.issue.as_mut() {
+        issue.message = redact_diagnostic(&issue.message);
+    }
+    target
+}
+
 fn read_document(path: &str, label: &str) -> Result<ParsedConfiguration, AppError> {
     let bytes = fs::read(path).map_err(|error| {
         AppError::new(
@@ -399,14 +448,39 @@ fn project_providers(
     let Some(providers_map) = mapping(providers) else {
         return (Vec::new(), false);
     };
-    let structure_valid = providers_map
+    let keys_are_strings = providers_map
         .keys()
         .all(|key| matches!(key, Value::String(_)));
-    let providers = named_entries(providers)
+    let mut providers = named_entries(providers)
         .into_iter()
         .map(|(provider_id, provider_value)| project_provider(provider_id, provider_value, catalog))
-        .collect();
-    (providers, structure_valid)
+        .collect::<Vec<_>>();
+    let mut seen_provider_ids = HashSet::new();
+    let mut colliding_provider_ids = HashSet::new();
+    for provider in &providers {
+        let normalized = provider.id.to_ascii_lowercase();
+        if !seen_provider_ids.insert(normalized.clone()) {
+            colliding_provider_ids.insert(normalized);
+        }
+    }
+    let provider_id_collision = !colliding_provider_ids.is_empty();
+    if provider_id_collision {
+        for provider in &mut providers {
+            if !colliding_provider_ids.contains(&provider.id.to_ascii_lowercase()) {
+                continue;
+            }
+            provider.classification = ProviderClassification::Advanced;
+            provider.editable = false;
+            provider.read_only_reason =
+                Some("Provider ID 在全部 providers 中必须按不区分大小写唯一。".to_owned());
+            for model in &mut provider.models {
+                model.editable = false;
+                model.read_only_reason =
+                    Some("所属 Provider ID 存在不区分大小写的冲突，只能查看。".to_owned());
+            }
+        }
+    }
+    (providers, keys_are_strings && !provider_id_collision)
 }
 
 fn project_provider(
@@ -420,7 +494,7 @@ fn project_provider(
             name: None,
             base_url: None,
             default_api: None,
-            auth_mode: "unsupported".to_owned(),
+            auth_mode: OverviewAuthMode::Unsupported,
             has_api_key: false,
             model_count: 0,
             classification: ProviderClassification::Unsupported,
@@ -454,6 +528,10 @@ fn project_provider(
     let (entries, models_structure_valid) = models_value
         .map(model_entries)
         .unwrap_or((Vec::new(), false));
+    let mut seen_model_ids = HashSet::new();
+    let model_id_collision = entries
+        .iter()
+        .any(|(model_id, _)| !seen_model_ids.insert(model_id.to_ascii_lowercase()));
     let mut models = entries
         .into_iter()
         .map(|(model_id, model_value)| {
@@ -468,6 +546,10 @@ fn project_provider(
         .collect::<Vec<_>>();
     if !models_structure_valid {
         field_reason.get_or_insert_with(|| "Model definition 列表结构无法识别。".to_owned());
+    }
+    if model_id_collision {
+        field_reason
+            .get_or_insert_with(|| "同一 Provider 中 Model ID 必须按不区分大小写唯一。".to_owned());
     }
     if models_value.is_none() || models.is_empty() {
         field_reason.get_or_insert_with(|| "Provider 没有非空模型定义。".to_owned());
@@ -548,6 +630,7 @@ fn project_model(
             name: None,
             effective_api: None,
             api_source: None,
+            has_base_url_override: false,
             input: Vec::new(),
             reasoning: None,
             context_window: None,
@@ -567,6 +650,7 @@ fn project_model(
         "maxTokens",
     ];
     let mut read_only_reason = unsupported_field_reason(model, &supported_fields);
+    let has_base_url_override = mapping_get(model, "baseUrl").is_some();
     let model_api_raw = mapping_get(model, "api");
     let model_api_overrides_provider =
         model_api_raw.is_some_and(|value| !matches!(value, Value::Null));
@@ -576,31 +660,46 @@ fn project_model(
     }
     let (effective_api, api_source) = if model_api_overrides_provider {
         match model_api {
-            Some(api) => (Some(api), Some("model".to_owned())),
+            Some(api) => (Some(api), Some(OverviewApiSource::Model)),
             None => (None, None),
         }
     } else {
         match provider_api {
-            Some(api) => (Some(api.to_owned()), Some("provider".to_owned())),
+            Some(api) => (Some(api.to_owned()), Some(OverviewApiSource::Provider)),
             None => (None, None),
         }
     };
     let input = match mapping_get(model, "input") {
-        Some(value) => string_list(value).unwrap_or_else(|| {
-            read_only_reason
-                .get_or_insert_with(|| "Model definition 的 input 字段格式不受支持。".to_owned());
-            Vec::new()
-        }),
+        Some(value) => string_list(value)
+            .map(|values| {
+                values
+                    .into_iter()
+                    .map(|value| match value.as_str() {
+                        "text" => OverviewInput::Text,
+                        "image" => OverviewInput::Image,
+                        _ => {
+                            read_only_reason.get_or_insert_with(|| {
+                                "Model definition 使用了不支持的输入能力。".to_owned()
+                            });
+                            OverviewInput::Unsupported
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                read_only_reason.get_or_insert_with(|| {
+                    "Model definition 的 input 字段格式不受支持。".to_owned()
+                });
+                Vec::new()
+            }),
         None => Vec::new(),
     };
-    if input
-        .iter()
-        .any(|value| !matches!(value.as_str(), "text" | "image"))
-    {
+    let reasoning_value = mapping_get(model, "reasoning");
+    let reasoning = reasoning_value.and_then(scalar_bool);
+    if reasoning_value.is_some_and(|value| !matches!(value, Value::Bool(_))) {
         read_only_reason
-            .get_or_insert_with(|| "Model definition 使用了不支持的输入能力。".to_owned());
+            .get_or_insert_with(|| "Model definition 的 reasoning 字段格式不受支持。".to_owned());
     }
-    let reasoning = mapping_get(model, "reasoning").and_then(scalar_bool);
     let context_window = mapping_get(model, "contextWindow").and_then(scalar_u64);
     let max_tokens = mapping_get(model, "maxTokens").and_then(scalar_u64);
     let name = mapping_get(model, "name")
@@ -610,7 +709,7 @@ fn project_model(
         && !input.is_empty()
         && input
             .iter()
-            .all(|value| matches!(value.as_str(), "text" | "image"))
+            .all(|value| matches!(value, OverviewInput::Text | OverviewInput::Image))
         && context_window.is_some_and(|value| value > 0)
         && max_tokens.is_some_and(|value| value > 0)
         && context_window
@@ -629,6 +728,7 @@ fn project_model(
         name,
         effective_api,
         api_source,
+        has_base_url_override,
         input,
         reasoning,
         context_window,
@@ -636,25 +736,6 @@ fn project_model(
         complete,
         editable: read_only_reason.is_none(),
         read_only_reason,
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RoleModelStatus {
-    Configured,
-    ProviderMissing,
-    ModelMissing,
-    Incomplete,
-}
-
-impl RoleModelStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Configured => "configured",
-            Self::ProviderMissing => "provider-missing",
-            Self::ModelMissing => "model-missing",
-            Self::Incomplete => "incomplete",
-        }
     }
 }
 
@@ -678,13 +759,13 @@ fn project_roles(
         .map(|(id, value)| match value {
             Value::Null => RoleSummaryDto {
                 id,
-                status: "unconfigured".to_owned(),
+                status: OverviewRoleStatus::Unconfigured,
                 selector: None,
             },
             Value::String(selector) => project_role(id, selector, providers, catalog),
             _ => RoleSummaryDto {
                 id,
-                status: "advanced".to_owned(),
+                status: OverviewRoleStatus::Advanced,
                 selector: None,
             },
         })
@@ -703,20 +784,19 @@ fn project_role(
         return RoleSummaryDto {
             id,
             status: if selector.is_empty() {
-                "unconfigured"
+                OverviewRoleStatus::Unconfigured
             } else {
-                "advanced"
-            }
-            .to_owned(),
+                OverviewRoleStatus::Advanced
+            },
             selector: None,
         };
     };
     let full_status = resolve_role_model(provider_id, model_and_thinking, providers, catalog);
     match full_status {
-        RoleModelStatus::Configured | RoleModelStatus::Incomplete => {
+        OverviewRoleStatus::Configured | OverviewRoleStatus::Incomplete => {
             role_summary(id, full_status, selector)
         }
-        RoleModelStatus::ProviderMissing | RoleModelStatus::ModelMissing => {
+        OverviewRoleStatus::ProviderMissing | OverviewRoleStatus::ModelMissing => {
             let Some((base_model, thinking)) = model_and_thinking.rsplit_once(':') else {
                 return role_summary(id, full_status, selector);
             };
@@ -729,23 +809,26 @@ fn project_role(
             }
             if matches!(
                 resolve_role_model(provider_id, base_model, providers, catalog),
-                RoleModelStatus::Configured | RoleModelStatus::Incomplete
+                OverviewRoleStatus::Configured | OverviewRoleStatus::Incomplete
             ) {
                 return RoleSummaryDto {
                     id,
-                    status: "advanced".to_owned(),
+                    status: OverviewRoleStatus::Advanced,
                     selector: None,
                 };
             }
             role_summary(id, full_status, selector)
         }
+        OverviewRoleStatus::Unconfigured | OverviewRoleStatus::Advanced => {
+            role_summary(id, full_status, selector)
+        }
     }
 }
 
-fn role_summary(id: String, status: RoleModelStatus, selector: &str) -> RoleSummaryDto {
+fn role_summary(id: String, status: OverviewRoleStatus, selector: &str) -> RoleSummaryDto {
     RoleSummaryDto {
         id,
-        status: status.as_str().to_owned(),
+        status,
         selector: Some(safe_projection_text(selector)),
     }
 }
@@ -760,12 +843,7 @@ fn parse_role_selector(selector: &str) -> Option<(&str, &str)> {
     {
         return None;
     }
-    let mut segments = selector.splitn(2, '/');
-    let provider = segments.next()?;
-    let model = segments.next()?;
-    if provider.is_empty() || provider.contains(':') || model.is_empty() {
-        return None;
-    }
+    let (provider, model) = selector.split_once('/')?;
     Some((provider, model))
 }
 
@@ -774,39 +852,42 @@ fn resolve_role_model(
     model_id: &str,
     providers: &[ProviderSummaryDto],
     catalog: Option<&BundledCatalog>,
-) -> RoleModelStatus {
-    let provider = providers
+) -> OverviewRoleStatus {
+    let mut matching_providers = providers
         .iter()
-        .find(|provider| provider.id.eq_ignore_ascii_case(provider_id));
-    match provider {
-        Some(provider) => {
-            if let Some(model) = provider
-                .models
-                .iter()
-                .find(|model| model.id.eq_ignore_ascii_case(model_id))
-            {
-                if model.complete {
-                    RoleModelStatus::Configured
-                } else {
-                    RoleModelStatus::Incomplete
-                }
-            } else if catalog.is_some_and(|catalog| catalog.contains_model(provider_id, model_id)) {
-                RoleModelStatus::Configured
+        .filter(|provider| provider.id.eq_ignore_ascii_case(provider_id));
+    let Some(provider) = matching_providers.next() else {
+        return if catalog.is_some_and(|catalog| catalog.contains_provider(provider_id)) {
+            if catalog.is_some_and(|catalog| catalog.contains_model(provider_id, model_id)) {
+                OverviewRoleStatus::Configured
             } else {
-                RoleModelStatus::ModelMissing
+                OverviewRoleStatus::ModelMissing
             }
-        }
-        None => {
-            if catalog.is_some_and(|catalog| catalog.contains_provider(provider_id)) {
-                if catalog.is_some_and(|catalog| catalog.contains_model(provider_id, model_id)) {
-                    RoleModelStatus::Configured
-                } else {
-                    RoleModelStatus::ModelMissing
-                }
-            } else {
-                RoleModelStatus::ProviderMissing
-            }
-        }
+        } else {
+            OverviewRoleStatus::ProviderMissing
+        };
+    };
+    if matching_providers.next().is_some() {
+        return OverviewRoleStatus::Advanced;
+    }
+
+    let mut matching_models = provider
+        .models
+        .iter()
+        .filter(|model| model.id.eq_ignore_ascii_case(model_id));
+    let Some(model) = matching_models.next() else {
+        return if catalog.is_some_and(|catalog| catalog.contains_model(provider_id, model_id)) {
+            OverviewRoleStatus::Configured
+        } else {
+            OverviewRoleStatus::ModelMissing
+        };
+    };
+    if matching_models.next().is_some() {
+        OverviewRoleStatus::Advanced
+    } else if model.complete {
+        OverviewRoleStatus::Configured
+    } else {
+        OverviewRoleStatus::Incomplete
     }
 }
 
@@ -817,7 +898,7 @@ fn is_supported_thinking(value: &str) -> bool {
     )
 }
 
-fn credential_projection(provider: &Mapping) -> (String, bool, bool) {
+fn credential_projection(provider: &Mapping) -> (OverviewAuthMode, bool, bool) {
     let value = mapping_get(provider, "apiKey");
     let has_api_key = value.is_some_and(|value| match value {
         Value::Null => false,
@@ -830,13 +911,13 @@ fn credential_projection(provider: &Mapping) -> (String, bool, bool) {
         _ => true,
     });
     let auth_mode = if unsupported_credential {
-        "unsupported"
+        OverviewAuthMode::Unsupported
     } else if has_api_key {
-        "api-key"
+        OverviewAuthMode::ApiKey
     } else {
-        "none"
+        OverviewAuthMode::None
     };
-    (auth_mode.to_owned(), has_api_key, unsupported_credential)
+    (auth_mode, has_api_key, unsupported_credential)
 }
 fn unsupported_field_reason(map: &Mapping, supported_fields: &[&str]) -> Option<String> {
     let supported_fields = supported_fields.iter().copied().collect::<HashSet<_>>();
@@ -904,11 +985,7 @@ fn mapping(value: &Value) -> Option<&Mapping> {
 }
 
 fn mapping_get<'a>(map: &'a Mapping, key: &str) -> Option<&'a Value> {
-    mapping_get_in(map, key)
-}
-
-fn mapping_get_in<'a>(map: &'a Mapping, key: &str) -> Option<&'a Value> {
-    map.get(&Value::String(key.to_owned()))
+    map.get(Value::String(key.to_owned()))
 }
 
 fn scalar_string(value: &Value) -> Option<String> {

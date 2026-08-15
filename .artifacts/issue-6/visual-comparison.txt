@@ -1,10 +1,12 @@
 Issue #6 visual verification
 
 Reference: .artifacts/issue-6/chFfk.png (Pencil node chFfk, 1536x1024)
-Implementation: .artifacts/issue-6/implementation-1536x961.png (real Tauri window, 1536x961)
+Implementation: .artifacts/issue-6/implementation-1536x1024-real.png (real Tauri native window capture, 1536x1024)
+Previous content-area smoke: .artifacts/issue-6/implementation-1536x961.png (historical)
 
 Comparison:
-- The real window preserves the native Tauri title bar and controls; no custom title bar is drawn in the page.
-- Sidebar, selected Overview state, 276px sidebar/content split, page title, sync strip, two-row environment grid, three metric cells, and Quick Test/Result panels use the Pencil node hierarchy, density, shared tokens, and labels.
-- The implementation screenshot is 63px shorter because macOS constrains the 1536x1024 configured outer window to the available 961px window height below the native menu/title area. This is an OS-native frame difference, not a page layout change.
-- Responsive CSS keeps the test panels stacked below 1200px and the environment cells single-column below 760px; Overview state variants reuse the same skeleton and token classes.
+- The final real-window capture is exactly 1536x1024 and preserves the native Tauri title bar and controls; no custom title bar is drawn in the page.
+- Sidebar, selected Overview state, 276px sidebar/content split, page title, sync strip, two-row environment grid, three metric cells, read-only banner, and Quick Test/Result panels follow the Pencil node hierarchy, density, shared tokens, and labels.
+- Runtime data is allowed to differ from the Pencil fixture: the smoke target reports omp/17.3.4 with no exact bundled manifest, so Provider/model management correctly appears read-only and the sidebar uses the warning tone.
+- React page seam tests cover Loading, Empty, Error, Normal, and Read-only with shared Overview geometry; Error includes retry and target-directory recovery actions. The native 1536x1024 capture covers the installed target's Read-only runtime state; the other state variants are not claimed as separate native pixel captures.
+- The prior 1536x961 capture is retained as historical evidence only; it is not used for the final comparison.

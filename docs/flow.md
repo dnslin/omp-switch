@@ -269,7 +269,7 @@ OMP Switch MVP 只写入 .yml。当前配置可以查看，但不能修改。
 不允许写入错误文件。
 
 实现状态（issue #5）：6.5–6.7 共用 `02 Page / Setup Success` 的检测表格、状态行、间距体系和操作区，仅按状态替换文案、状态色、路径清单和恢复操作。根据实际窗口缩放反馈，最外层整页卡片装饰已移除，内容在 1100 × 720 最小窗口内响应式收缩；该无外层卡片布局已由产品负责人确认。窗口标题继续由 Tauri 原生窗口组件提供，页面不绘制第二套标题栏。
-实现状态（issue #6）：概览通过 Rust application service 的 `get_overview_load` 读取当前 OMP 返回的真实 Target configuration，保留两份 YAML 完整解析树和原始内容 Hash，仅把安全 Provider、Model definition 与 Model role 摘要投影给 React；Direct API Key 只返回 `hasApiKey` 元数据。React 概览复用 `.pen` 的共享 token 和骨架，覆盖 Loading、Empty、Error、Normal、Read-only，侧边栏状态区进入设置页。Provider/模型使用可访问的 Radix Select；UI settings hydration 完成前保持骨架，恢复时按 Provider 内完整 pair 校验，失效 pair 清理后串行保存完整 UI settings。设置读取失败时选择仅在当前会话生效；所有安全投影条目均可用于查看摘要，模型测试仍保持禁用。窗口标题继续使用 Tauri 原生窗口装饰，页面不绘制第二套标题栏。
+实现状态（issue #6）：概览通过 Rust application service 的 `get_overview_load` 读取当前 OMP 返回的真实 Target configuration，保留两份 YAML 完整解析树和原始内容 Hash，仅把安全 Provider、Model definition 与 Model role 摘要投影给 React；Direct API Key 只返回 `hasApiKey` 元数据。诊断、Target configuration 的 warning/issue/recovery notice 以及所有 StartupState IPC 返回均在边界失败关闭脱敏；非 Bearer 认证头、百分号编码凭据路径和未知查询参数不会进入可读摘要。模型级 Base URL 覆盖也不生成快速测试地址。React 概览复用 `.pen` 的共享 token 和骨架，覆盖 Loading、Empty、Error、Normal、Read-only，侧边栏状态区进入设置页；概览读取错误提供重新读取和打开 Target configuration 目录入口。Provider/模型使用可访问的 Radix Select；UI settings hydration 完成前保持骨架，恢复时按完整 Provider/Model pair 校验，切换 Provider 时清理旧 Model，失效 pair 清理后串行保存完整 UI settings。设置读取失败时选择仅在当前会话生效；所有安全投影条目均可用于查看摘要，模型测试仍保持禁用。窗口标题继续使用 Tauri 原生窗口装饰，页面不绘制第二套标题栏。
 
 
 ## 7. 概览页面

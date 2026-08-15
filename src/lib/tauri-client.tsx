@@ -43,6 +43,11 @@ export type TargetConfigurationDiscovery = {
   issue: ConfigurationIssue | null;
 };
 export type OverviewState = "normal" | "empty" | "read-only";
+export type OverviewApi = "openai-completions" | "openai-responses" | "anthropic-messages" | "google-generative-ai";
+export type OverviewApiSource = "provider" | "model";
+export type OverviewAuthMode = "api-key" | "none" | "unsupported";
+export type OverviewRoleStatus = "configured" | "unconfigured" | "provider-missing" | "model-missing" | "incomplete" | "advanced";
+export type OverviewInput = "text" | "image" | "unsupported";
 export type OverviewFile = {
   canonicalPath: string;
   resolvedPath: string | null;
@@ -53,9 +58,10 @@ export type OverviewModel = {
   providerId: string;
   id: string;
   name: string | null;
-  effectiveApi: string | null;
-  apiSource: string | null;
-  input: string[];
+  effectiveApi: OverviewApi | null;
+  apiSource: OverviewApiSource | null;
+  hasBaseUrlOverride: boolean;
+  input: OverviewInput[];
   reasoning: boolean | null;
   contextWindow: number | null;
   maxTokens: number | null;
@@ -68,8 +74,8 @@ export type OverviewProvider = {
   id: string;
   name: string | null;
   baseUrl: string | null;
-  defaultApi: string | null;
-  authMode: string;
+  defaultApi: OverviewApi | null;
+  authMode: OverviewAuthMode;
   hasApiKey: boolean;
   modelCount: number;
   classification: OverviewProviderClassification;
@@ -77,7 +83,7 @@ export type OverviewProvider = {
   readOnlyReason: string | null;
   models: OverviewModel[];
 };
-export type OverviewRole = { id: string; status: string; selector: string | null };
+export type OverviewRole = { id: string; status: OverviewRoleStatus; selector: string | null };
 export type OverviewDto = {
   state: OverviewState;
   omp: { status: "connected"; executablePath: string; version: string };
