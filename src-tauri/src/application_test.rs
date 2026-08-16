@@ -10,7 +10,9 @@ use std::{
 
 use crate::{
     application::{
-        AppService, AppSettings, OverviewLoadDto, StartupState, Theme, UiSettingsUpdate,
+        AppService, AppSettings, CreateCustomProviderInput, CreateModelFields,
+        CreateProviderFields, OverviewLoadDto, ProviderAuthMode, ProviderCreationFailurePoint,
+        StartupState, SupportedApi, SupportedInput, Theme, UiSettingsUpdate,
     },
     omp_environment::{CommandOutput, OmpEnvironment},
     target_configuration::{
@@ -20,10 +22,42 @@ use crate::{
         initialize_target_configuration_with_failure,
     },
 };
+use fs4::FileExt;
 use parking_lot::Mutex;
 use pretty_assertions::assert_eq;
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
+use tracing_subscriber::prelude::*;
+
+#[derive(Clone)]
+struct CleanupWarningCounter(Arc<AtomicUsize>);
+
+struct CleanupOperationVisitor {
+    is_cleanup: bool,
+}
+
+impl tracing::field::Visit for CleanupOperationVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "operation" && value == "cleanup_partial_models_backup" {
+            self.is_cleanup = true;
+        }
+    }
+
+    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CleanupWarningCounter {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if *event.metadata().level() != tracing::Level::WARN {
+            return;
+        }
+        let mut visitor = CleanupOperationVisitor { is_cleanup: false };
+        event.record(&mut visitor);
+        if visitor.is_cleanup {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
 
 #[derive(Default)]
 struct FakeOmpEnvironment {
@@ -2355,4 +2389,549 @@ fn overview_missing_canonical_files_returns_empty_without_business_snapshot() {
     assert_eq!(dto["counts"]["modelCount"], 0);
     assert_eq!(dto["counts"]["roleCount"], 0);
     assert!(service.configuration_snapshot_for_test().is_none());
+}
+
+fn provider_creation_service(target: &Path, app_data: &Path) -> AppService {
+    fs::create_dir_all(app_data).unwrap();
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.to_path_buf()),
+        inspect_real_target: true,
+        transaction_root: app_data.join("target-initialization-transactions"),
+        ..FakeOmpEnvironment::default()
+    });
+    AppService::new_with_environment(app_data.join("settings.json"), environment).unwrap()
+}
+
+fn provider_creation_input(opened_models_hash: String) -> CreateCustomProviderInput {
+    CreateCustomProviderInput {
+        opened_models_hash,
+        provider: CreateProviderFields {
+            id: "  new-provider  ".to_owned(),
+            base_url: " https://api.new-provider.example/v1/ ".to_owned(),
+            default_api: Some(SupportedApi::OpenAiResponses),
+            auth_mode: ProviderAuthMode::ApiKey,
+            api_key: Some("create-secret-must-not-leak".to_owned()),
+        },
+        first_model: CreateModelFields {
+            id: "  new-model  ".to_owned(),
+            name: "New Model".to_owned(),
+            api: None,
+            reasoning: true,
+            input: vec![SupportedInput::Text, SupportedInput::Image],
+            context_window: 128_000,
+            max_tokens: 8_192,
+        },
+    }
+}
+
+#[test]
+fn custom_provider_creation_preserves_deep_unknown_values_and_creates_a_current_backup() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original = r#"unrecognizedRoot:
+  nested:
+    branches:
+      - leaf: untouched
+providers:
+  legacy:
+    baseUrl: https://legacy.example/v1
+    api: openai-responses
+    models:
+      - id: legacy-model
+        name: Legacy Model
+        reasoning: false
+        input: [text]
+        contextWindow: 4096
+        maxTokens: 1024
+"#;
+    fs::write(target.join("models.yml"), original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap();
+
+    let result = service
+        .create_custom_provider(provider_creation_input(opened_models_hash))
+        .unwrap();
+
+    assert_eq!(result.provider_id, "new-provider");
+    assert_eq!(result.model_id, "new-model");
+    assert!(
+        !serde_json::to_string(&result)
+            .unwrap()
+            .contains("create-secret-must-not-leak")
+    );
+
+    let before: serde_yaml::Value = serde_yaml::from_str(original).unwrap();
+    let after: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    assert_eq!(after["unrecognizedRoot"], before["unrecognizedRoot"]);
+    assert_eq!(after["providers"]["legacy"], before["providers"]["legacy"]);
+    assert_eq!(
+        after["providers"]["new-provider"]["baseUrl"],
+        "https://api.new-provider.example/v1"
+    );
+    assert_eq!(
+        after["providers"]["new-provider"]["apiKey"],
+        "create-secret-must-not-leak"
+    );
+    assert_eq!(
+        after["providers"]["new-provider"]["models"][0]["id"],
+        "new-model"
+    );
+
+    let backup_root = app_data.path().join("target-configuration-backups");
+    let lock_directory = backup_root.join(".locks");
+    let backup_targets = fs::read_dir(&backup_root)
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|entry| entry.file_name() != ".locks")
+        .collect::<Vec<_>>();
+    assert_eq!(backup_targets.len(), 1);
+    let model_backup_directory = backup_targets[0].path().join("models.yml");
+    let model_backups = fs::read_dir(&model_backup_directory)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    assert_eq!(model_backups.len(), 1);
+    assert_eq!(
+        fs::read(model_backups[0].path()).unwrap(),
+        original.as_bytes()
+    );
+    let lock_files = fs::read_dir(&lock_directory)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    assert_eq!(lock_files.len(), 1);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode =
+            |path: &std::path::Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&backup_root), 0o700);
+        assert_eq!(mode(&lock_directory), 0o700);
+        assert_eq!(mode(&lock_files[0].path()), 0o600);
+        assert_eq!(mode(&backup_targets[0].path()), 0o700);
+        assert_eq!(mode(&model_backup_directory), 0o700);
+        assert_eq!(mode(&model_backups[0].path()), 0o600);
+    }
+
+    let refreshed = service.get_overview_load().overview.unwrap();
+    assert!(
+        refreshed
+            .providers
+            .iter()
+            .any(|provider| provider.id == "new-provider" && provider.editable)
+    );
+}
+
+#[test]
+fn custom_provider_creation_preserves_api_key_mode_without_direct_key() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap();
+    let mut input = provider_creation_input(opened_models_hash);
+    input.provider.api_key = None;
+
+    service.create_custom_provider(input).unwrap();
+
+    let created: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    assert_eq!(created["providers"]["new-provider"]["apiKey"], "");
+    let refreshed = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    let provider = refreshed["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["id"] == "new-provider")
+        .unwrap();
+    assert_eq!(provider["authMode"], "api-key");
+    assert_eq!(provider["hasApiKey"], false);
+}
+
+#[test]
+fn custom_provider_creation_accepts_spec_valid_model_suffix_and_limits() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap();
+    let mut input = provider_creation_input(opened_models_hash);
+    input.first_model.id = "  new-model:high  ".to_owned();
+    input.first_model.context_window = 1_024;
+    input.first_model.max_tokens = 2_048;
+
+    let result = service.create_custom_provider(input).unwrap();
+
+    assert_eq!(result.model_id, "new-model:high");
+    let created: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    let model = &created["providers"]["new-provider"]["models"][0];
+    assert_eq!(model["id"], "new-model:high");
+    assert_eq!(model["contextWindow"], 1_024);
+    assert_eq!(model["maxTokens"], 2_048);
+    let refreshed = service.get_overview_load().overview.unwrap();
+    let model = refreshed
+        .models
+        .iter()
+        .find(|model| model.id == "new-model:high")
+        .unwrap();
+    assert!(model.complete);
+    assert!(model.editable);
+}
+
+#[test]
+fn custom_provider_creation_rejects_a_changed_models_hash_before_creating_a_backup() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap();
+    let externally_changed = b"unrecognizedRoot:\n  changed: outside-omp-switch\nproviders: {}\n";
+    fs::write(target.join("models.yml"), externally_changed).unwrap();
+
+    let error = service
+        .create_custom_provider(provider_creation_input(opened_models_hash))
+        .unwrap_err();
+
+    assert_eq!(error.code, "models-hash-conflict");
+    assert_eq!(
+        fs::read(target.join("models.yml")).unwrap(),
+        externally_changed
+    );
+    assert!(
+        !app_data
+            .path()
+            .join("target-configuration-backups")
+            .exists()
+    );
+}
+
+#[test]
+fn custom_provider_creation_stops_when_another_writer_holds_the_target_lock() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original = b"providers: {}\n";
+    fs::write(target.join("models.yml"), original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let resolved_target = fs::canonicalize(&target).unwrap();
+    let fingerprint = Sha256::digest(resolved_target.to_string_lossy().as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let lock_directory = app_data
+        .path()
+        .join("target-configuration-backups")
+        .join(".locks");
+    fs::create_dir_all(&lock_directory).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(lock_directory.join(format!("{fingerprint}.lock")))
+        .unwrap();
+    FileExt::lock(&lock).unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap();
+
+    let error = service
+        .create_custom_provider(provider_creation_input(opened_models_hash))
+        .unwrap_err();
+
+    assert_eq!(error.code, "models-write-in-progress");
+    assert_eq!(fs::read(target.join("models.yml")).unwrap(), original);
+}
+
+#[test]
+fn custom_provider_creation_rejects_invalid_and_colliding_values_without_writing() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original = b"providers:\n  existing:\n    baseUrl: https://existing.example/v1\n    api: openai-responses\n    models:\n      - id: existing-model\n        name: Existing model\n        reasoning: false\n        input: [text]\n        contextWindow: 4096\n        maxTokens: 1024\n";
+    fs::write(target.join("models.yml"), original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap();
+
+    let invalid_cases = [
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.provider.id = "not a provider".to_owned();
+            ("invalid Provider ID", input, "provider-id-invalid")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.provider.id = "EXISTING".to_owned();
+            ("duplicate Provider ID", input, "provider-id-conflict")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.provider.base_url = "ftp://invalid.example".to_owned();
+            ("invalid Base URL", input, "provider-base-url-invalid")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.provider.auth_mode = ProviderAuthMode::None;
+            input.provider.api_key = Some("stale-key".to_owned());
+            (
+                "API Key with disabled authentication",
+                input,
+                "provider-auth-invalid",
+            )
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.provider.api_key = Some("!command credential".to_owned());
+            ("command API Key", input, "provider-api-key-invalid")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.first_model.id = "invalid model".to_owned();
+            ("invalid Model ID", input, "model-id-invalid")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.first_model.name = "  ".to_owned();
+            ("missing Model name", input, "model-name-required")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.first_model.input.clear();
+            ("missing Model capability", input, "model-input-required")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.first_model.context_window = 0;
+            ("zero Context Window", input, "model-context-window-invalid")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash.clone());
+            input.first_model.max_tokens = 0;
+            ("zero Max Tokens", input, "model-token-limit-invalid")
+        },
+        {
+            let mut input = provider_creation_input(opened_models_hash);
+            input.provider.default_api = None;
+            input.first_model.api = None;
+            ("missing Model protocol", input, "model-api-required")
+        },
+    ];
+    for (name, input, expected_code) in invalid_cases {
+        let error = service.create_custom_provider(input).unwrap_err();
+        assert_eq!(error.code, expected_code, "{name}");
+        assert_eq!(
+            fs::read(target.join("models.yml")).unwrap(),
+            original,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
+    let mut failures = vec![
+        ("before backup", ProviderCreationFailurePoint::BeforeBackup),
+        (
+            "backup directory creation",
+            ProviderCreationFailurePoint::BackupDirectoryCreationFailure,
+        ),
+        (
+            "backup file open",
+            ProviderCreationFailurePoint::BackupFileOpenFailure,
+        ),
+        (
+            "backup file write",
+            ProviderCreationFailurePoint::BackupFileWriteFailure,
+        ),
+        (
+            "backup file sync",
+            ProviderCreationFailurePoint::BackupFileSyncFailure,
+        ),
+        (
+            "temporary file open",
+            ProviderCreationFailurePoint::TemporaryFileOpenFailure,
+        ),
+        (
+            "temporary file write",
+            ProviderCreationFailurePoint::TemporaryFileWriteFailure,
+        ),
+        (
+            "temporary file sync",
+            ProviderCreationFailurePoint::TemporaryFileSyncFailure,
+        ),
+        ("after backup", ProviderCreationFailurePoint::AfterBackup),
+        (
+            "before temporary write",
+            ProviderCreationFailurePoint::BeforeTemporaryWrite,
+        ),
+        (
+            "temporary reparse",
+            ProviderCreationFailurePoint::CorruptTemporaryFile,
+        ),
+        (
+            "untouched comparison",
+            ProviderCreationFailurePoint::MutateUntouchedValue,
+        ),
+        (
+            "before replacement",
+            ProviderCreationFailurePoint::BeforeReplacement,
+        ),
+    ];
+    #[cfg(unix)]
+    failures.push((
+        "replacement commit failure",
+        ProviderCreationFailurePoint::CommitFailure,
+    ));
+    for (name, failure) in failures {
+        let app_data = tempdir().unwrap();
+        let target = app_data.path().join("agent");
+        fs::create_dir_all(&target).unwrap();
+        let original = b"unrecognizedRoot:\n  nested:\n    value: preserve-me\nproviders: {}\n";
+        fs::write(target.join("models.yml"), original).unwrap();
+        fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+        let service = provider_creation_service(&target, app_data.path());
+        let opened_models_hash = service
+            .get_overview_load()
+            .overview
+            .unwrap()
+            .files
+            .models
+            .content_hash
+            .unwrap();
+        service.set_provider_creation_failure_for_test(failure);
+
+        assert!(
+            service
+                .create_custom_provider(provider_creation_input(opened_models_hash))
+                .is_err(),
+            "{name}"
+        );
+        assert_eq!(
+            fs::read(target.join("models.yml")).unwrap(),
+            original,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn custom_provider_creation_does_not_report_failure_after_replacing_models() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original = b"unrecognizedRoot:\n  nested:\n    value: preserve-me\nproviders: {}\n";
+    fs::write(target.join("models.yml"), original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap();
+    service.set_provider_creation_failure_for_test(
+        ProviderCreationFailurePoint::AfterAtomicReplacement,
+    );
+
+    let result = service.create_custom_provider(provider_creation_input(opened_models_hash));
+    let written = fs::read(target.join("models.yml")).unwrap();
+    match result {
+        Ok(_) => assert_ne!(
+            written, original,
+            "a successful creation must write the candidate"
+        ),
+        Err(_) => assert_eq!(
+            written, original,
+            "a failed creation must leave models.yml unchanged"
+        ),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn custom_provider_creation_reports_a_partial_backup_cleanup_failure() {
+    let warnings = Arc::new(AtomicUsize::new(0));
+    let subscriber = tracing_subscriber::registry().with(CleanupWarningCounter(warnings.clone()));
+    tracing::subscriber::with_default(subscriber, || {
+        let app_data = tempdir().unwrap();
+        let target = app_data.path().join("agent");
+        fs::create_dir_all(&target).unwrap();
+        let original = b"unrecognizedRoot:\n  nested:\n    value: preserve-me\nproviders: {}\n";
+        fs::write(target.join("models.yml"), original).unwrap();
+        fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+        let service = provider_creation_service(&target, app_data.path());
+        let opened_models_hash = service
+            .get_overview_load()
+            .overview
+            .unwrap()
+            .files
+            .models
+            .content_hash
+            .unwrap();
+        service.set_provider_creation_failure_for_test(
+            ProviderCreationFailurePoint::BackupFilePermissionAndCleanupFailure,
+        );
+
+        let error = service
+            .create_custom_provider(provider_creation_input(opened_models_hash))
+            .unwrap_err();
+        assert_eq!(error.code, "provider-create-failed");
+        assert_eq!(fs::read(target.join("models.yml")).unwrap(), original);
+    });
+    assert_eq!(warnings.load(Ordering::SeqCst), 1);
 }

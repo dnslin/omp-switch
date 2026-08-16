@@ -712,9 +712,6 @@ fn project_model(
             .all(|value| matches!(value, OverviewInput::Text | OverviewInput::Image))
         && context_window.is_some_and(|value| value > 0)
         && max_tokens.is_some_and(|value| value > 0)
-        && context_window
-            .zip(max_tokens)
-            .is_some_and(|(context, max)| max <= context)
         && effective_api.is_some();
     if !complete {
         read_only_reason.get_or_insert_with(|| "Model definition 配置不完整。".to_owned());
@@ -910,9 +907,10 @@ fn credential_projection(provider: &Mapping) -> (OverviewAuthMode, bool, bool) {
         Value::Null => false,
         _ => true,
     });
+    let api_key_mode = matches!(value, Some(Value::String(_)));
     let auth_mode = if unsupported_credential {
         OverviewAuthMode::Unsupported
-    } else if has_api_key {
+    } else if api_key_mode {
         OverviewAuthMode::ApiKey
     } else {
         OverviewAuthMode::None

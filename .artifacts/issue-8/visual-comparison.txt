@@ -1,0 +1,20 @@
+Issue #8 visual verification
+
+References:
+- `.artifacts/issue-8/provider-create-step1-reference.png` — Pencil `23 Provider Create / Step 1`, 1536×1024.
+- `.artifacts/issue-8/provider-create-step2-reference.png` — Pencil `24 Provider Create / Step 2`, 1536×1024.
+
+Implementation captures:
+- `.artifacts/issue-8/provider-create-step1-implementation-1536x1024.png` — real Tauri window, 1536×1024.
+- `.artifacts/issue-8/provider-create-step2-implementation-1536x1024.png` — real Tauri window, 1536×1024.
+- `.artifacts/issue-8/provider-create-discard-confirmation-1536x1024.png` — real Tauri dirty-dismiss confirmation, 1536×1024.
+- `.artifacts/issue-8/provider-create-validation-error-1536x1024.png` — real Tauri Step 1 validation layout, 1536×1024.
+- `.artifacts/issue-8/provider-create-conflict-reload-failure-1536x1024.png` — real Tauri hash-conflict layout, 1536×1024.
+- `.artifacts/issue-8/provider-create-api-key-implementation-1536x1024.png` — real Tauri Step 1 with populated API Key authentication, 1536×1024.
+
+Comparison:
+- Step 1 preserves the approved 814px Dialog geometry, native title bar, modal overlay, two-column field grid, field order, full-width segmented authentication control, masked Direct API Key input with the slashed-eye glyph, security note, and footer actions.
+- The populated API Key capture confirms the default API Key selection, masked key glyphs, slashed-eye control, security note, and enabled transition state at the approved Step 1 layout.
+- Step 2 preserves the approved 752px Dialog geometry, selected circular step-2 marker, Provider summary strip, field order, model-specified protocol source label, checkbox row, final-address preview, safety note, and three-action footer. The normal capture shows the default first-Model form state.
+- The live fixture intentionally differs from the Pencil sample only in dynamic Provider/model values, OMP version, and the empty Providers table behind the Dialog. Those are runtime data differences; the layout hierarchy and component treatment match the reference.
+- The dirty-dismiss capture confirms the required labels `继续编辑` and `放弃修改`. The native validation capture keeps both inline errors in their reserved rows. The native hash-conflict capture preserves all Model values, keeps the Step 2 geometry fixed, and scrolls the actionable error into view.

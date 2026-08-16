@@ -44,6 +44,28 @@ export type TargetConfigurationDiscovery = {
 };
 export type OverviewState = "normal" | "empty" | "read-only";
 export type OverviewApi = "openai-completions" | "openai-responses" | "anthropic-messages" | "google-generative-ai";
+
+export type CreateCustomProviderInput = {
+  openedModelsHash: string;
+  provider: {
+    id: string;
+    baseUrl: string;
+    defaultApi?: OverviewApi;
+    authMode: "api-key" | "none";
+    apiKey?: string;
+  };
+  firstModel: {
+    id: string;
+    name: string;
+    api?: OverviewApi;
+    reasoning: boolean;
+    input: Array<"text" | "image">;
+    contextWindow: number;
+    maxTokens: number;
+  };
+};
+
+export type CreateCustomProviderResult = { providerId: string; modelId: string };
 export type OverviewApiSource = "provider" | "model";
 export type OverviewAuthMode = "api-key" | "none" | "unsupported";
 export type OverviewRoleStatus = "configured" | "unconfigured" | "provider-missing" | "model-missing" | "incomplete" | "advanced";
@@ -153,6 +175,7 @@ export function asAppError(error: unknown, fallbackMessage: string): AppError {
 export interface TauriClient {
   getStartupState(): Promise<StartupState>;
   getOverviewLoad(): Promise<OverviewLoad>;
+  createCustomProvider(input: CreateCustomProviderInput): Promise<CreateCustomProviderResult>;
   detectOmp(): Promise<StartupState>;
   selectOmpExecutable(): Promise<string | null>;
   validateSelectedOmp(executablePath: string): Promise<StartupState>;
@@ -167,6 +190,7 @@ export interface TauriClient {
 export const tauriClient: TauriClient = {
   getStartupState: () => invoke<StartupState>("get_startup_state"),
   getOverviewLoad: () => invoke<OverviewLoad>("get_overview_load"),
+  createCustomProvider: (input) => invoke<CreateCustomProviderResult>("create_custom_provider", { input }),
   detectOmp: () => invoke<StartupState>("detect_omp"),
   selectOmpExecutable: async () => {
     const selected = await open({ multiple: false, directory: false, title: "选择 OMP 可执行文件" });

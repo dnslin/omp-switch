@@ -299,6 +299,9 @@ Provider 默认协议是模型的可选继承值，不是 Provider 的固定协�
 
 新增操作必须同时提交 Provider 和首个模型；表单通过全部 Provider、模型、协议和 ID 校验后，才在一次 `models.yml` 写入中创建完整节点。任何失败都不保存空 Provider。
 
+实现状态（issue #8）：`create_custom_provider` 在 Rust 中一次接收 Provider 与首个 Model definition，并在写入前检查打开表单时的 `models.yml` 内容 Hash、当前配置和 bundled catalog。通过校验后才备份当前文件、在最新树中插入完整节点、fsync 临时文件、重新解析和验证未触及路径，再执行原子替换；任何失败均不写入空 Custom Provider。
+
+
 ### 7.3 Provider ID
 
 新建规则：

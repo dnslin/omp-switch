@@ -24,30 +24,47 @@ export function useOverviewLoad(copy: OverviewLoadCopy) {
   const [loading, setLoading] = useState(true);
   const requestId = useRef(0);
 
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (): Promise<AppError | null> => {
     const currentRequest = ++requestId.current;
     setLoading(true);
     setData(null);
     setError(null);
     try {
       const result = await client.getOverviewLoad();
-      if (currentRequest !== requestId.current) return;
+      if (currentRequest !== requestId.current) {
+        return {
+          code: "overview-reload-superseded",
+          message: "重新读取已被新的请求替代。",
+          action: "请重新读取。",
+        };
+      }
       setStartupState(result.startupState);
       if (result.startupState.kind === "omp-ready" && result.startupState.requiresConfirmation) {
         navigate("/setup", { replace: true });
-        return;
+        return null;
       }
       if (result.error) {
         setError(result.error);
-      } else if (result.overview) {
-        setData(result.overview);
-      } else {
-        setError(copy.missingOverview);
+        return result.error;
       }
+      if (result.overview) {
+        setData(result.overview);
+        return null;
+      }
+      setError(copy.missingOverview);
+      return copy.missingOverview;
     } catch (cause: unknown) {
-      if (currentRequest !== requestId.current) return;
+      const error = asAppError(cause, copy.requestFailure);
+      if (currentRequest !== requestId.current) {
+        return {
+          code: "overview-reload-superseded",
+          message: "重新读取已被新的请求替代。",
+          action: "请重新读取。",
+        };
+      }
       setStartupState(null);
-      setError(asAppError(cause, copy.requestFailure));
+      setError(error);
+      return error;
     } finally {
       if (currentRequest === requestId.current) setLoading(false);
     }

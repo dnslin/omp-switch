@@ -11,10 +11,20 @@ use parking_lot::{Condvar, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_opener::OpenerExt;
 
+pub(crate) use crate::provider_creation::{CreateCustomProviderInput, CreateCustomProviderResult};
+
+#[cfg(test)]
+pub(crate) use crate::provider_creation::{
+    CreateModelFields, CreateProviderFields, ProviderAuthMode, ProviderCreationFailurePoint,
+    SupportedApi, SupportedInput,
+};
+
 use crate::{
+    bundled_catalog,
     error::{AppError, io_error_cause},
     omp_environment::{OmpEnvironment, SystemOmpEnvironment},
     overview::{ConfigurationSnapshot, OverviewDto, read_overview},
+    provider_creation,
     redaction::redact_diagnostic,
     target_configuration::{
         TargetConfigurationDiscovery, TargetConfigurationStatus, TargetInitializationExpectation,
@@ -203,6 +213,7 @@ impl Default for OverviewLoadCoordinator {
 #[derive(Clone)]
 pub struct AppService {
     settings_path: Arc<PathBuf>,
+    backup_root: Arc<PathBuf>,
     settings: Arc<RwLock<AppSettings>>,
     settings_write: Arc<Mutex<()>>,
     environment: Arc<dyn OmpEnvironment>,
@@ -211,6 +222,8 @@ pub struct AppService {
     configuration_snapshot: Arc<RwLock<Option<ConfigurationSnapshot>>>,
     detection_lock: Arc<Mutex<()>>,
     overview_load: Arc<OverviewLoadCoordinator>,
+    #[cfg(test)]
+    provider_creation_failure: Arc<Mutex<Option<ProviderCreationFailurePoint>>>,
 }
 
 impl AppService {
@@ -229,9 +242,14 @@ impl AppService {
         settings_path: PathBuf,
         environment: Arc<dyn OmpEnvironment>,
     ) -> Result<Self, AppError> {
+        let backup_root = settings_path
+            .parent()
+            .ok_or_else(|| AppError::internal("界面设置路径没有父目录"))?
+            .join("target-configuration-backups");
         let settings = load_settings(&settings_path)?;
         Ok(Self {
             settings_path: Arc::new(settings_path),
+            backup_root: Arc::new(backup_root),
             settings: Arc::new(RwLock::new(settings)),
             settings_write: Arc::new(Mutex::new(())),
             environment,
@@ -240,6 +258,8 @@ impl AppService {
             configuration_snapshot: Arc::new(RwLock::new(None)),
             detection_lock: Arc::new(Mutex::new(())),
             overview_load: Arc::new(OverviewLoadCoordinator::default()),
+            #[cfg(test)]
+            provider_creation_failure: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -699,6 +719,66 @@ impl AppService {
         })
     }
 
+    pub fn create_custom_provider(
+        &self,
+        input: CreateCustomProviderInput,
+    ) -> Result<CreateCustomProviderResult, AppError> {
+        let _detection = self.detection_lock.lock();
+        let state = self.detect_omp_internal();
+        let (version, target) = match state {
+            StartupState::OmpReady {
+                version,
+                target_configuration,
+                requires_confirmation: false,
+                ..
+            } => (version, target_configuration),
+            StartupState::OmpReady { .. } => {
+                return Err(AppError::new(
+                    "provider-create-confirmation-required",
+                    "尚未确认新的 OMP 与 Target configuration，不能创建 Provider。",
+                    "请先在设置页面确认 OMP 切换后重试。",
+                ));
+            }
+            _ => {
+                return Err(AppError::new(
+                    "provider-create-unavailable",
+                    "无法重新验证 OMP 的 Target configuration。",
+                    "请重新检测或重新选择 OMP。",
+                ));
+            }
+        };
+        let catalog = bundled_catalog::for_version(&version)?.ok_or_else(|| {
+            AppError::new(
+                "provider-create-catalog-missing",
+                "当前 OMP 版本没有匹配的 bundled Provider 清单。",
+                "为避免覆盖 OMP 内置 Provider，Provider 与模型管理暂时只读。",
+            )
+        })?;
+        #[cfg(test)]
+        let failure = self.provider_creation_failure.lock().take();
+        #[cfg(not(test))]
+        let failure = None;
+        let result = provider_creation::create_custom_provider(
+            &target,
+            &self.backup_root,
+            catalog,
+            &input,
+            failure,
+        );
+        if result.is_ok() {
+            *self.configuration_snapshot.write() = None;
+        }
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_provider_creation_failure_for_test(
+        &self,
+        failure: ProviderCreationFailurePoint,
+    ) {
+        *self.provider_creation_failure.lock() = Some(failure);
+    }
+
     fn update_settings(
         &self,
         mutate: impl FnOnce(&mut AppSettings),
@@ -895,6 +975,17 @@ pub fn save_ui_settings(
     let started_at = Instant::now();
     let result = service.save_ui_settings(settings);
     log_command_result("save_ui_settings", started_at, &result);
+    result
+}
+
+#[tauri::command]
+pub fn create_custom_provider(
+    service: tauri::State<'_, AppService>,
+    input: CreateCustomProviderInput,
+) -> Result<CreateCustomProviderResult, AppError> {
+    let started_at = Instant::now();
+    let result = service.create_custom_provider(input);
+    log_command_result("create_custom_provider", started_at, &result);
     result
 }
 

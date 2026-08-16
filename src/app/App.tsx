@@ -1,6 +1,6 @@
 import { CheckCircle2, File, Folder, Info, SquareTerminal } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, Navigate, Route, Routes, useNavigate } from "react-router";
+import { Link, Navigate, Route, Routes, useNavigate, useParams } from "react-router";
 import { toast, Toaster } from "sonner";
 import { RedetectionLoader } from "../components/redetection-loader";
 import { Button, Card, PageTitle, StatusIndicator } from "../components/ui";
@@ -9,7 +9,8 @@ import { useUiSettings } from "../store/ui-settings";
 import { MainShell } from "./MainShell";
 import { OverviewPage } from "./OverviewPage";
 import { ProvidersPage } from "./ProvidersPage";
-import { fileStatusView, startupShellStatus, targetConfigurationStatusView, type RowStatus } from "./omp-presentation";
+import { useOverviewLoad } from "./overview-load";
+import { fileStatusView, providerAuthSummary, startupShellStatus, targetConfigurationStatusView, type RowStatus } from "./omp-presentation";
 
 
 const REDETECT_MINIMUM_DURATION_MS = 1200;
@@ -339,6 +340,15 @@ function SettingsPage() {
   );
 }
 
+const providerDetailLoadCopy = {
+  missingOverview: {
+    code: "provider-detail-missing-overview",
+    message: "OMP 没有返回 Provider 详情所需的数据。",
+    action: "请重新读取；如果问题持续，请查看脱敏日志。",
+  },
+  requestFailure: "无法读取 Provider 详情",
+};
+
 function PlaceholderPage({ page }: { page: keyof typeof routeCopy }) {
   const [title, description, message] = routeCopy[page];
   return (
@@ -353,10 +363,59 @@ function PlaceholderPage({ page }: { page: keyof typeof routeCopy }) {
 }
 
 function ProviderDetailPage() {
+  const { providerId } = useParams();
+  const { data, error, loading, reload, shellStatus } = useOverviewLoad(providerDetailLoadCopy);
+  const provider = data?.providers.find((item) => item.id === providerId);
+  const authSummary = provider ? providerAuthSummary(provider) : "不支持的认证";
+
   return (
-    <MainShell>
-      <PageTitle title="Provider 详情" description="查看 Provider 与其模型。" />
-      <Card title="未载入 Provider"><p className="placeholder-card">Provider 详情将在后续工单中实现，不显示伪造数据。</p></Card>
+    <MainShell status={shellStatus}>
+      <main className="provider-detail-page" aria-busy={loading}>
+        <Link className="provider-detail-back" to="/providers">← <span>Providers</span></Link>
+        {loading ? (
+          <section className="provider-detail-loading" role="status" aria-live="polite">正在读取 Provider…</section>
+        ) : error ? (
+          <section className="provider-detail-error" role="alert" aria-live="assertive">
+            <div><h1>无法读取 Provider</h1><p>{error.message}</p><p>{error.action}</p></div>
+            <Button type="button" variant="secondary" onClick={() => void reload()}>重新读取</Button>
+          </section>
+        ) : !provider ? (
+          <section className="provider-detail-error" role="alert">
+            <div><h1>Provider 不存在</h1><p>该 Provider 可能已被外部删除或更名。</p></div>
+            <Button asChild variant="secondary"><Link to="/providers">返回 Providers</Link></Button>
+          </section>
+        ) : (
+          <>
+            <header className="provider-detail-heading">
+              <h1>{provider.id}</h1>
+              <code>{provider.baseUrl ?? "未配置地址"}</code>
+            </header>
+            <section className="provider-detail-summary" aria-label="Provider 摘要">
+              <span>默认协议</span><strong>{provider.defaultApi ?? "由模型指定"}</strong>
+              <span>认证</span><strong>{authSummary}</strong>
+              <span>模型</span><strong>{provider.modelCount}</strong>
+              <span>状态</span><StatusIndicator tone={provider.editable ? "success" : "warning"}>{provider.editable ? "正常" : "只读"}</StatusIndicator>
+            </section>
+            <section className="provider-detail-models" aria-labelledby="provider-detail-models-title">
+              <h2 id="provider-detail-models-title">模型</h2>
+              <table>
+                <thead><tr><th scope="col">名称 / Model ID</th><th scope="col">有效协议</th><th scope="col">能力</th><th scope="col">Context</th><th scope="col">Max Tokens</th></tr></thead>
+                <tbody>
+                  {provider.models.map((model) => (
+                    <tr key={model.id}>
+                      <td><strong>{model.name ?? "未命名模型"}</strong><code>{model.id}</code></td>
+                      <td>{model.effectiveApi ?? "未配置"}</td>
+                      <td>{model.input.join(", ") || "未配置"}</td>
+                      <td>{model.contextWindow?.toLocaleString() ?? "未配置"}</td>
+                      <td>{model.maxTokens?.toLocaleString() ?? "未配置"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          </>
+        )}
+      </main>
     </MainShell>
   );
 }

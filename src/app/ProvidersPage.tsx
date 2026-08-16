@@ -1,10 +1,14 @@
 import { CircleAlert, MoreHorizontal } from "lucide-react";
 import { Fragment, useState } from "react";
+import { useNavigate } from "react-router";
+import { toast } from "sonner";
 
 import { Button, SearchInput, StatusIndicator } from "../components/ui";
 import { type AppError, type OverviewDto, type OverviewProvider } from "../lib/tauri-client";
 import { MainShell } from "./MainShell";
+import { ProviderCreateDialog } from "./ProviderCreateDialog";
 import { useOverviewLoad } from "./overview-load";
+import { providerAuthSummary } from "./omp-presentation";
 
 type ProviderStatus = {
   label: string;
@@ -39,11 +43,6 @@ function providerStatus(provider: OverviewProvider): ProviderStatus {
   }
 }
 
-function authSummary(provider: OverviewProvider): string {
-  if (provider.authMode === "api-key") return provider.hasApiKey ? "API Key 已配置" : "API Key 未配置";
-  if (provider.authMode === "none") return "无认证";
-  return "不支持的认证";
-}
 
 function matchesProvider(provider: OverviewProvider, query: string): boolean {
   if (!query) return true;
@@ -54,7 +53,7 @@ function matchesProvider(provider: OverviewProvider, query: string): boolean {
     provider.defaultApi,
     provider.classification,
     provider.readOnlyReason,
-    authSummary(provider),
+    providerAuthSummary(provider),
     ...provider.models.flatMap((model) => [
       model.id,
       model.name,
@@ -67,7 +66,24 @@ function matchesProvider(provider: OverviewProvider, query: string): boolean {
 }
 
 export function ProvidersPage() {
+  const navigate = useNavigate();
   const { data, error, loading, reload, shellStatus } = useOverviewLoad(providersLoadCopy);
+  const [openedModelsHash, setOpenedModelsHash] = useState<string | null>(null);
+  const canCreate = data?.state !== "read-only" && Boolean(data?.files.models.contentHash);
+  const createTitle = data?.state === "read-only"
+    ? data.readOnlyReason ?? "当前 Provider 仅可查看；OMP Switch 不会修改配置文件。"
+    : data?.files.models.contentHash
+      ? ""
+      : "当前 models.yml 没有可用于冲突检查的内容 Hash。";
+
+  const created = async ({ providerId }: { providerId: string }): Promise<AppError | null> => {
+    const reloadError = await reload();
+    if (reloadError) return reloadError;
+    setOpenedModelsHash(null);
+    toast.success("Provider 和首个模型已创建");
+    navigate(`/providers/${encodeURIComponent(providerId)}`);
+    return null;
+  };
 
   return (
     <MainShell status={shellStatus}>
@@ -79,15 +95,27 @@ export function ProvidersPage() {
           </div>
           <Button
             type="button"
-            disabled
+            disabled={!canCreate}
             disabledAppearance="stable"
-            title={data?.readOnlyReason ?? "Provider 写入功能不可用。"}
+            title={createTitle}
+            onClick={() => {
+              const hash = data?.files.models.contentHash;
+              if (hash) setOpenedModelsHash(hash);
+            }}
           >
             新增 Provider
           </Button>
         </header>
         {loading ? <ProvidersLoading /> : error ? <ProvidersError error={error} onReload={reload} /> : data ? <ProvidersTable data={data} /> : <ProvidersError error={providersLoadCopy.missingOverview} onReload={reload} />}
       </main>
+      {openedModelsHash ? (
+        <ProviderCreateDialog
+          openedModelsHash={openedModelsHash}
+          onDismiss={() => setOpenedModelsHash(null)}
+          onReload={reload}
+          onCreated={created}
+        />
+      ) : null}
     </MainShell>
   );
 }
@@ -102,7 +130,7 @@ function ProvidersLoading() {
   );
 }
 
-function ProvidersError({ error, onReload }: { error: AppError; onReload: () => Promise<void> }) {
+function ProvidersError({ error, onReload }: { error: AppError; onReload: () => Promise<AppError | null> }) {
   return (
     <section className="providers-error" role="alert" aria-live="assertive">
       <CircleAlert aria-hidden="true" />
@@ -185,7 +213,7 @@ function ProviderRows({ provider }: { provider: OverviewProvider }) {
           </div>
         </td>
         <td>{provider.defaultApi ?? "由模型指定"}</td>
-        <td>{authSummary(provider)}</td>
+        <td>{providerAuthSummary(provider)}</td>
         <td>{provider.modelCount}</td>
         <td><StatusIndicator tone={status.tone}>{status.label}</StatusIndicator></td>
         <td className="providers-actions-cell">
