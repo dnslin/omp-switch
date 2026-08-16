@@ -123,6 +123,24 @@ pub(crate) enum ProviderCreationFailurePoint {
     BeforeReplacement,
     #[cfg(all(test, unix))]
     CommitFailure,
+    #[cfg(test)]
+    AfterAtomicReplacement,
+    #[cfg(all(test, unix))]
+    BackupFilePermissionAndCleanupFailure,
+    #[cfg(test)]
+    BackupDirectoryCreationFailure,
+    #[cfg(test)]
+    BackupFileOpenFailure,
+    #[cfg(test)]
+    BackupFileWriteFailure,
+    #[cfg(test)]
+    BackupFileSyncFailure,
+    #[cfg(test)]
+    TemporaryFileOpenFailure,
+    #[cfg(test)]
+    TemporaryFileWriteFailure,
+    #[cfg(test)]
+    TemporaryFileSyncFailure,
 }
 
 struct ValidatedCreate {
@@ -164,7 +182,7 @@ pub(crate) fn create_custom_provider(
         return Err(injected_failure("创建当前备份前发生故障。"));
     }
     let _write_lock = acquire_models_write_lock(backup_root, &expected_target)?;
-    create_current_backup(backup_root, &expected_target, &original_bytes)?;
+    create_current_backup(backup_root, &expected_target, &original_bytes, failure)?;
     if failure == Some(ProviderCreationFailurePoint::AfterBackup) {
         return Err(injected_failure("创建当前备份后发生故障。"));
     }
@@ -188,13 +206,33 @@ pub(crate) fn create_custom_provider(
     if failure == Some(ProviderCreationFailurePoint::BeforeTemporaryWrite) {
         return Err(injected_failure("写入临时文件前发生故障。"));
     }
+    #[cfg(test)]
+    inject_io_failure(
+        failure,
+        ProviderCreationFailurePoint::TemporaryFileOpenFailure,
+    )
+    .map_err(|error| write_error("open_models_temporary", error))?;
     let mut temporary = AtomicWriteFile::options()
         .read(true)
         .open(&models_path)
         .map_err(|error| write_error("open_models_temporary", error))?;
+    #[cfg(test)]
+    inject_io_failure(
+        failure,
+        ProviderCreationFailurePoint::TemporaryFileWriteFailure,
+    )
+    .map_err(|error| write_error("write_models_temporary", error))?;
     temporary
         .write_all(serialized.as_bytes())
-        .and_then(|()| temporary.sync_all())
+        .map_err(|error| write_error("write_models_temporary", error))?;
+    #[cfg(test)]
+    inject_io_failure(
+        failure,
+        ProviderCreationFailurePoint::TemporaryFileSyncFailure,
+    )
+    .map_err(|error| write_error("write_models_temporary", error))?;
+    temporary
+        .sync_all()
         .map_err(|error| write_error("write_models_temporary", error))?;
     if failure == Some(ProviderCreationFailurePoint::CorruptTemporaryFile) {
         temporary
@@ -235,14 +273,44 @@ pub(crate) fn create_custom_provider(
     if failure == Some(ProviderCreationFailurePoint::BeforeReplacement) {
         return Err(injected_failure("原子替换前发生故障。"));
     }
-    // In production, commit is deliberately last: a fallible postwrite check
-    // would require a second write to recover and could expose the candidate if recovery failed.
+    // A directory sync can fail after the rename. Re-read the target so the UI
+    // never reports a failed creation when the candidate is already visible.
     #[cfg(all(test, unix))]
     let restricted_directory = restrict_models_directory_for_commit_failure(&models_path, failure)?;
     let commit_result = temporary.commit();
     #[cfg(all(test, unix))]
     restore_models_directory_permissions_for_test(restricted_directory)?;
-    commit_result.map_err(|error| write_error("replace_models", error))?;
+    #[cfg(test)]
+    let commit_result: std::io::Result<()> =
+        if failure == Some(ProviderCreationFailurePoint::AfterAtomicReplacement) {
+            Err(std::io::Error::other(
+                "injected error after the atomic replacement",
+            ))
+        } else {
+            commit_result
+        };
+    if let Err(error) = commit_result {
+        match fs::read(&models_path) {
+            Ok(bytes) if bytes.as_slice() == serialized.as_bytes() => {
+                tracing::warn!(
+                    operation = "reconcile_models_replacement",
+                    cause = io_error_cause(error.kind()),
+                    status = "committed",
+                    "Atomic models replacement reported an error after commit"
+                );
+            }
+            Ok(bytes) if content_hash(&bytes) == original_hash => {
+                return Err(write_error("replace_models", error));
+            }
+            Ok(_) => return Err(replacement_outcome_unknown(error, None)),
+            Err(observation_error) => {
+                return Err(replacement_outcome_unknown(
+                    error,
+                    Some(observation_error.kind()),
+                ));
+            }
+        }
+    }
 
     Ok(CreateCustomProviderResult {
         provider_id: validated.provider_id,
@@ -286,7 +354,7 @@ fn acquire_models_write_lock(
     resolved_target: &Path,
 ) -> Result<fs::File, AppError> {
     let lock_directory = backup_root.join(".locks");
-    create_private_backup_directory(&lock_directory)
+    create_private_backup_directory(&lock_directory, None)
         .map_err(|error| write_error("create_models_lock_directory", error))?;
     let target_fingerprint = content_hash(resolved_target.to_string_lossy().as_bytes());
     let lock_path = lock_directory.join(format!("{target_fingerprint}.lock"));
@@ -297,7 +365,7 @@ fn acquire_models_write_lock(
     let lock = options
         .open(&lock_path)
         .map_err(|error| write_error("open_models_write_lock", error))?;
-    set_private_backup_file_permissions(&lock_path)
+    set_private_backup_file_permissions(&lock_path, None)
         .map_err(|error| write_error("secure_models_write_lock", error))?;
     match FileExt::try_lock(&lock) {
         Ok(()) => Ok(lock),
@@ -730,18 +798,26 @@ fn create_current_backup(
     backup_root: &Path,
     resolved_target: &Path,
     original_bytes: &[u8],
+    failure: Option<ProviderCreationFailurePoint>,
 ) -> Result<(), AppError> {
     let target_fingerprint = content_hash(resolved_target.to_string_lossy().as_bytes());
     let target_directory = backup_root.join(target_fingerprint);
     let directory = target_directory.join("models.yml");
     for path in [backup_root, target_directory.as_path(), directory.as_path()] {
-        create_private_backup_directory(path)
+        create_private_backup_directory(path, failure)
             .map_err(|error| write_error("create_backup_directory", error))?;
     }
-    let (backup_path, mut backup) = allocate_backup_file(&directory)
+    let (backup_path, mut backup) = allocate_backup_file(&directory, failure)
         .map_err(|error| write_error("create_models_backup", error))?;
     let result = (|| -> std::io::Result<()> {
+        #[cfg(test)]
+        inject_io_failure(
+            failure,
+            ProviderCreationFailurePoint::BackupFileWriteFailure,
+        )?;
         backup.write_all(original_bytes)?;
+        #[cfg(test)]
+        inject_io_failure(failure, ProviderCreationFailurePoint::BackupFileSyncFailure)?;
         backup.sync_all()?;
         drop(backup);
         if fs::read(&backup_path)? != original_bytes {
@@ -755,28 +831,45 @@ fn create_current_backup(
     match result {
         Ok(()) => Ok(()),
         Err(error) => {
-            if let Err(cleanup_error) = fs::remove_file(&backup_path)
-                && cleanup_error.kind() != std::io::ErrorKind::NotFound
-            {
-                tracing::warn!(
-                    operation = "cleanup_partial_models_backup",
-                    cause = io_error_cause(cleanup_error.kind()),
-                    "Provider creation backup cleanup failed"
-                );
-            }
+            cleanup_partial_backup(&backup_path);
             Err(write_error("create_models_backup", error))
         }
     }
 }
 
-fn create_private_backup_directory(path: &Path) -> std::io::Result<()> {
+fn cleanup_partial_backup(backup_path: &Path) {
+    if let Err(cleanup_error) = fs::remove_file(backup_path)
+        && cleanup_error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            operation = "cleanup_partial_models_backup",
+            cause = io_error_cause(cleanup_error.kind()),
+            "Provider creation backup cleanup failed"
+        );
+    }
+}
+
+fn create_private_backup_directory(
+    path: &Path,
+    failure: Option<ProviderCreationFailurePoint>,
+) -> std::io::Result<()> {
+    #[cfg(test)]
+    inject_io_failure(
+        failure,
+        ProviderCreationFailurePoint::BackupDirectoryCreationFailure,
+    )?;
+    #[cfg(not(test))]
+    let _ = failure;
     fs::create_dir_all(path)?;
     #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
-fn allocate_backup_file(directory: &Path) -> std::io::Result<(PathBuf, fs::File)> {
+fn allocate_backup_file(
+    directory: &Path,
+    failure: Option<ProviderCreationFailurePoint>,
+) -> std::io::Result<(PathBuf, fs::File)> {
     for _ in 0..BACKUP_ALLOCATION_ATTEMPTS {
         let backup_path =
             backup_candidate_path(directory, BACKUP_SEQUENCE.fetch_add(1, Ordering::Relaxed));
@@ -784,11 +877,21 @@ fn allocate_backup_file(directory: &Path) -> std::io::Result<(PathBuf, fs::File)
         options.write(true).create_new(true);
         #[cfg(unix)]
         options.mode(0o600);
+        #[cfg(test)]
+        inject_io_failure(failure, ProviderCreationFailurePoint::BackupFileOpenFailure)?;
         match options.open(&backup_path) {
             Ok(backup) => {
-                if let Err(error) = set_private_backup_file_permissions(&backup_path) {
+                #[cfg(all(test, unix))]
+                let _restore_backup_directory_permissions = if failure
+                    == Some(ProviderCreationFailurePoint::BackupFilePermissionAndCleanupFailure)
+                {
+                    Some(restrict_backup_directory_until_drop(directory)?)
+                } else {
+                    None
+                };
+                if let Err(error) = set_private_backup_file_permissions(&backup_path, failure) {
                     drop(backup);
-                    let _ = fs::remove_file(&backup_path);
+                    cleanup_partial_backup(&backup_path);
                     return Err(error);
                 }
                 return Ok((backup_path, backup));
@@ -803,9 +906,61 @@ fn allocate_backup_file(directory: &Path) -> std::io::Result<(PathBuf, fs::File)
     ))
 }
 
-fn set_private_backup_file_permissions(path: &Path) -> std::io::Result<()> {
+fn set_private_backup_file_permissions(
+    path: &Path,
+    failure: Option<ProviderCreationFailurePoint>,
+) -> std::io::Result<()> {
+    #[cfg(all(test, unix))]
+    if failure == Some(ProviderCreationFailurePoint::BackupFilePermissionAndCleanupFailure) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "injected backup permission hardening failure",
+        ));
+    }
+    #[cfg(not(test))]
+    let _ = failure;
     #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+struct BackupDirectoryPermissionRestore {
+    path: PathBuf,
+    permissions: fs::Permissions,
+}
+
+#[cfg(all(test, unix))]
+impl Drop for BackupDirectoryPermissionRestore {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.path, self.permissions.clone());
+    }
+}
+
+#[cfg(all(test, unix))]
+fn restrict_backup_directory_until_drop(
+    directory: &Path,
+) -> std::io::Result<BackupDirectoryPermissionRestore> {
+    let permissions = fs::metadata(directory)?.permissions();
+    let mut restricted = permissions.clone();
+    restricted.set_mode(permissions.mode() & !0o222);
+    fs::set_permissions(directory, restricted)?;
+    Ok(BackupDirectoryPermissionRestore {
+        path: directory.to_owned(),
+        permissions,
+    })
+}
+
+#[cfg(test)]
+fn inject_io_failure(
+    failure: Option<ProviderCreationFailurePoint>,
+    point: ProviderCreationFailurePoint,
+) -> std::io::Result<()> {
+    if failure == Some(point) {
+        return Err(std::io::Error::other(
+            "injected provider creation I/O failure",
+        ));
+    }
     Ok(())
 }
 
@@ -849,6 +1004,24 @@ fn write_error(operation: &'static str, error: std::io::Error) -> AppError {
     )
 }
 
+fn replacement_outcome_unknown(
+    replacement_error: std::io::Error,
+    observation_error: Option<std::io::ErrorKind>,
+) -> AppError {
+    tracing::warn!(
+        operation = "reconcile_models_replacement",
+        cause = io_error_cause(replacement_error.kind()),
+        observation_cause = observation_error.map(io_error_cause),
+        status = "unknown",
+        "Atomic models replacement outcome could not be confirmed"
+    );
+    AppError::new(
+        "models-replacement-outcome-unknown",
+        "无法确认 models.yml 是否已写入。",
+        "请重新读取配置并确认 Provider 是否已创建；OMP Switch 不会自动重试。",
+    )
+}
+
 fn mutate_untouched_value_for_test(tree: &mut Value) {
     let Value::Mapping(root) = tree else {
         return;
@@ -889,7 +1062,7 @@ mod tests {
         fs::write(&first_candidate, b"existing backup").unwrap();
         BACKUP_SEQUENCE.store(0, Ordering::Relaxed);
 
-        create_current_backup(&backup_root, &target, original).unwrap();
+        create_current_backup(&backup_root, &target, original, None).unwrap();
 
         assert_eq!(fs::read(first_candidate).unwrap(), b"existing backup");
         assert_eq!(

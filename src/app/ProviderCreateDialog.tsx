@@ -130,6 +130,11 @@ export function ProviderCreateDialog({
   const [submissionError, setSubmissionError] = useState<AppError | null>(null);
   const [postCreateReloadFailure, setPostCreateReloadFailure] = useState<PostCreateReloadFailure | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const feedbackRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!submissionError && !postCreateReloadFailure) return;
+    feedbackRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [postCreateReloadFailure, submissionError]);
   const {
     clearErrors,
     control,
@@ -391,7 +396,7 @@ export function ProviderCreateDialog({
               )}
 
               {postCreateReloadFailure ? (
-                <section className="provider-create-submit-error" role="alert" aria-live="assertive">
+                <section ref={feedbackRef} className="provider-create-submit-error" role="alert" aria-live="assertive">
                   <div>
                     <strong>Provider 已创建，但无法重新读取配置</strong>
                     <p>Provider 和首个模型已写入 models.yml。请重新读取以查看最新配置。</p>
@@ -403,7 +408,7 @@ export function ProviderCreateDialog({
                   </Button>
                 </section>
               ) : submissionError ? (
-                <section className="provider-create-submit-error" role="alert" aria-live="assertive">
+                <section ref={feedbackRef} className="provider-create-submit-error" role="alert" aria-live="assertive">
                   <div>
                     <strong>{submissionError.code === "models-hash-conflict" ? "配置冲突" : "无法创建 Provider"}</strong>
                     <p>{submissionError.message}</p>

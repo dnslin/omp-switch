@@ -27,6 +27,37 @@ use parking_lot::Mutex;
 use pretty_assertions::assert_eq;
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
+use tracing_subscriber::prelude::*;
+
+#[derive(Clone)]
+struct CleanupWarningCounter(Arc<AtomicUsize>);
+
+struct CleanupOperationVisitor {
+    is_cleanup: bool,
+}
+
+impl tracing::field::Visit for CleanupOperationVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "operation" && value == "cleanup_partial_models_backup" {
+            self.is_cleanup = true;
+        }
+    }
+
+    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CleanupWarningCounter {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if *event.metadata().level() != tracing::Level::WARN {
+            return;
+        }
+        let mut visitor = CleanupOperationVisitor { is_cleanup: false };
+        event.record(&mut visitor);
+        if visitor.is_cleanup {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
 
 #[derive(Default)]
 struct FakeOmpEnvironment {
@@ -2753,6 +2784,34 @@ fn custom_provider_creation_rejects_invalid_and_colliding_values_without_writing
 fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
     let mut failures = vec![
         ("before backup", ProviderCreationFailurePoint::BeforeBackup),
+        (
+            "backup directory creation",
+            ProviderCreationFailurePoint::BackupDirectoryCreationFailure,
+        ),
+        (
+            "backup file open",
+            ProviderCreationFailurePoint::BackupFileOpenFailure,
+        ),
+        (
+            "backup file write",
+            ProviderCreationFailurePoint::BackupFileWriteFailure,
+        ),
+        (
+            "backup file sync",
+            ProviderCreationFailurePoint::BackupFileSyncFailure,
+        ),
+        (
+            "temporary file open",
+            ProviderCreationFailurePoint::TemporaryFileOpenFailure,
+        ),
+        (
+            "temporary file write",
+            ProviderCreationFailurePoint::TemporaryFileWriteFailure,
+        ),
+        (
+            "temporary file sync",
+            ProviderCreationFailurePoint::TemporaryFileSyncFailure,
+        ),
         ("after backup", ProviderCreationFailurePoint::AfterBackup),
         (
             "before temporary write",
@@ -2806,4 +2865,73 @@ fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
             "{name}"
         );
     }
+}
+
+#[test]
+fn custom_provider_creation_does_not_report_failure_after_replacing_models() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original = b"unrecognizedRoot:\n  nested:\n    value: preserve-me\nproviders: {}\n";
+    fs::write(target.join("models.yml"), original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap();
+    service.set_provider_creation_failure_for_test(
+        ProviderCreationFailurePoint::AfterAtomicReplacement,
+    );
+
+    let result = service.create_custom_provider(provider_creation_input(opened_models_hash));
+    let written = fs::read(target.join("models.yml")).unwrap();
+    match result {
+        Ok(_) => assert_ne!(
+            written, original,
+            "a successful creation must write the candidate"
+        ),
+        Err(_) => assert_eq!(
+            written, original,
+            "a failed creation must leave models.yml unchanged"
+        ),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn custom_provider_creation_reports_a_partial_backup_cleanup_failure() {
+    let warnings = Arc::new(AtomicUsize::new(0));
+    let subscriber = tracing_subscriber::registry().with(CleanupWarningCounter(warnings.clone()));
+    tracing::subscriber::with_default(subscriber, || {
+        let app_data = tempdir().unwrap();
+        let target = app_data.path().join("agent");
+        fs::create_dir_all(&target).unwrap();
+        let original = b"unrecognizedRoot:\n  nested:\n    value: preserve-me\nproviders: {}\n";
+        fs::write(target.join("models.yml"), original).unwrap();
+        fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+        let service = provider_creation_service(&target, app_data.path());
+        let opened_models_hash = service
+            .get_overview_load()
+            .overview
+            .unwrap()
+            .files
+            .models
+            .content_hash
+            .unwrap();
+        service.set_provider_creation_failure_for_test(
+            ProviderCreationFailurePoint::BackupFilePermissionAndCleanupFailure,
+        );
+
+        let error = service
+            .create_custom_provider(provider_creation_input(opened_models_hash))
+            .unwrap_err();
+        assert_eq!(error.code, "provider-create-failed");
+        assert_eq!(fs::read(target.join("models.yml")).unwrap(), original);
+    });
+    assert_eq!(warnings.load(Ordering::SeqCst), 1);
 }
