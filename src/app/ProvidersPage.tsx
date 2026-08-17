@@ -1,6 +1,6 @@
 import { CircleAlert, MoreHorizontal } from "lucide-react";
 import { Fragment, useState } from "react";
-import { useNavigate } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { toast } from "sonner";
 
 import { Button, SearchInput, StatusIndicator } from "../components/ui";
@@ -218,14 +218,14 @@ function ProviderRows({ provider }: { provider: OverviewProvider }) {
         <td><StatusIndicator tone={status.tone}>{status.label}</StatusIndicator></td>
         <td className="providers-actions-cell">
           <Button
-            type="button"
+            asChild
             variant="secondary"
-            disabledAppearance="stable"
-            aria-label={`${provider.id} 操作`}
-            title={provider.readOnlyReason ?? "Provider 操作不可用。"}
-            disabled
+            aria-label={`${provider.id} 详情`}
+            title="查看 Provider 详情"
           >
-            <MoreHorizontal aria-hidden="true" />
+            <Link to={`/providers/${encodeURIComponent(provider.id)}`}>
+              <MoreHorizontal aria-hidden="true" />
+            </Link>
           </Button>
         </td>
       </tr>

@@ -195,6 +195,16 @@ pub(crate) fn redact_projection(value: &str) -> String {
     redact_diagnostic(url.as_str())
 }
 
+pub(crate) fn url_projection_is_lossless(value: &str) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    if value.contains('@') && (!value.contains("://") || url.host_str().is_none()) {
+        return false;
+    }
+    !url_candidate_contains_secret(value)
+}
+
 fn url_query_key_is_safe(key: &str) -> bool {
     let normalized = key.trim().to_ascii_lowercase().replace('-', "_");
     SAFE_QUERY_NAMES.contains(&normalized.as_str())

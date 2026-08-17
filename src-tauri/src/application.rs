@@ -11,25 +11,31 @@ use parking_lot::{Condvar, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_opener::OpenerExt;
 
-pub(crate) use crate::provider_creation::{CreateCustomProviderInput, CreateCustomProviderResult};
+pub(crate) use crate::provider_creation::{
+    CreateCustomProviderInput, CreateCustomProviderResult, EditCustomProviderInput,
+    EditCustomProviderResult, ReplaceCommandCredentialInput,
+};
 
 #[cfg(test)]
 pub(crate) use crate::provider_creation::{
-    CreateModelFields, CreateProviderFields, ProviderAuthMode, ProviderCreationFailurePoint,
-    SupportedApi, SupportedInput,
+    CreateModelFields, CreateProviderFields, DirectApiKeyIntent, ProviderAuthMode,
+    ProviderCreationFailurePoint, SupportedApi, SupportedInput,
 };
 
 use crate::{
     bundled_catalog,
     error::{AppError, io_error_cause},
     omp_environment::{OmpEnvironment, SystemOmpEnvironment},
-    overview::{ConfigurationSnapshot, OverviewDto, read_overview},
+    overview::{OverviewDto, OverviewReadResult, read_overview},
     provider_creation,
     redaction::redact_diagnostic,
     target_configuration::{
         TargetConfigurationDiscovery, TargetConfigurationStatus, TargetInitializationExpectation,
     },
 };
+
+#[cfg(test)]
+use crate::overview::ConfigurationSnapshot;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(
@@ -219,6 +225,7 @@ pub struct AppService {
     environment: Arc<dyn OmpEnvironment>,
     pending_omp: Arc<RwLock<Option<PathBuf>>>,
     recovery_notice: Arc<RwLock<Option<(PathBuf, String)>>>,
+    #[cfg(test)]
     configuration_snapshot: Arc<RwLock<Option<ConfigurationSnapshot>>>,
     detection_lock: Arc<Mutex<()>>,
     overview_load: Arc<OverviewLoadCoordinator>,
@@ -255,6 +262,7 @@ impl AppService {
             environment,
             pending_omp: Arc::new(RwLock::new(None)),
             recovery_notice: Arc::new(RwLock::new(None)),
+            #[cfg(test)]
             configuration_snapshot: Arc::new(RwLock::new(None)),
             detection_lock: Arc::new(Mutex::new(())),
             overview_load: Arc::new(OverviewLoadCoordinator::default()),
@@ -368,7 +376,7 @@ impl AppService {
     }
 
     fn read_overview_for_state(&self, state: StartupState) -> Result<OverviewDto, AppError> {
-        *self.configuration_snapshot.write() = None;
+        self.clear_configuration_snapshot();
         let (executable_path, version, target_configuration) = match state {
             StartupState::OmpReady {
                 executable_path,
@@ -396,8 +404,26 @@ impl AppService {
             }
         };
         let result = read_overview(&executable_path, &version, &target_configuration)?;
+        Ok(self.finish_overview_read(result))
+    }
+
+    #[cfg(test)]
+    fn clear_configuration_snapshot(&self) {
+        *self.configuration_snapshot.write() = None;
+    }
+
+    #[cfg(not(test))]
+    fn clear_configuration_snapshot(&self) {}
+
+    #[cfg(test)]
+    fn finish_overview_read(&self, result: OverviewReadResult) -> OverviewDto {
         *self.configuration_snapshot.write() = result.snapshot;
-        Ok(result.dto)
+        result.dto
+    }
+
+    #[cfg(not(test))]
+    fn finish_overview_read(&self, result: OverviewReadResult) -> OverviewDto {
+        result.dto
     }
 
     #[cfg(test)]
@@ -766,7 +792,111 @@ impl AppService {
             failure,
         );
         if result.is_ok() {
-            *self.configuration_snapshot.write() = None;
+            self.clear_configuration_snapshot();
+        }
+        result
+    }
+
+    pub fn edit_custom_provider(
+        &self,
+        input: EditCustomProviderInput,
+    ) -> Result<EditCustomProviderResult, AppError> {
+        let _detection = self.detection_lock.lock();
+        let state = self.detect_omp_internal();
+        let (version, target) = match state {
+            StartupState::OmpReady {
+                version,
+                target_configuration,
+                requires_confirmation: false,
+                ..
+            } => (version, target_configuration),
+            StartupState::OmpReady { .. } => {
+                return Err(AppError::new(
+                    "provider-edit-confirmation-required",
+                    "尚未确认新的 OMP 与 Target configuration，不能编辑 Provider。",
+                    "请先在设置页面确认 OMP 切换后重试。",
+                ));
+            }
+            _ => {
+                return Err(AppError::new(
+                    "provider-edit-unavailable",
+                    "无法重新验证 OMP 的 Target configuration。",
+                    "请重新检测或重新选择 OMP。",
+                ));
+            }
+        };
+        let catalog = bundled_catalog::for_version(&version)?.ok_or_else(|| {
+            AppError::new(
+                "provider-edit-catalog-missing",
+                "当前 OMP 版本没有匹配的 bundled Provider 清单。",
+                "为避免覆盖 OMP 内置 Provider，Provider 与模型管理暂时只读。",
+            )
+        })?;
+        #[cfg(test)]
+        let failure = self.provider_creation_failure.lock().take();
+        #[cfg(not(test))]
+        let failure = None;
+        let result = provider_creation::edit_custom_provider(
+            &target,
+            &self.backup_root,
+            catalog,
+            &input,
+            failure,
+        );
+        if result.is_ok() {
+            self.clear_configuration_snapshot();
+        }
+        result
+    }
+
+    pub fn replace_command_credential(
+        &self,
+        input: ReplaceCommandCredentialInput,
+    ) -> Result<EditCustomProviderResult, AppError> {
+        let _detection = self.detection_lock.lock();
+        let state = self.detect_omp_internal();
+        let (version, target) = match state {
+            StartupState::OmpReady {
+                version,
+                target_configuration,
+                requires_confirmation: false,
+                ..
+            } => (version, target_configuration),
+            StartupState::OmpReady { .. } => {
+                return Err(AppError::new(
+                    "provider-edit-confirmation-required",
+                    "尚未确认新的 OMP 与 Target configuration，不能替换 Direct API Key。",
+                    "请先在设置页面确认 OMP 切换后重试。",
+                ));
+            }
+            _ => {
+                return Err(AppError::new(
+                    "provider-edit-unavailable",
+                    "无法重新验证 OMP 的 Target configuration。",
+                    "请重新检测或重新选择 OMP。",
+                ));
+            }
+        };
+        let catalog = bundled_catalog::for_version(&version)?.ok_or_else(|| {
+            AppError::new(
+                "provider-edit-catalog-missing",
+                "当前 OMP 版本没有匹配的 bundled Provider 清单。",
+                "为避免覆盖 OMP 内置 Provider，Provider 与模型管理暂时只读。",
+            )
+        })?;
+        #[cfg(test)]
+        let failure = self.provider_creation_failure.lock().take();
+        #[cfg(not(test))]
+        let failure = None;
+        let result = provider_creation::replace_command_credential(
+            &target,
+            &self.backup_root,
+            catalog,
+            &input,
+            failure,
+        );
+        if result.is_ok() {
+            self.clear_configuration_snapshot();
         }
         result
     }
@@ -986,6 +1116,28 @@ pub fn create_custom_provider(
     let started_at = Instant::now();
     let result = service.create_custom_provider(input);
     log_command_result("create_custom_provider", started_at, &result);
+    result
+}
+
+#[tauri::command]
+pub fn edit_custom_provider(
+    service: tauri::State<'_, AppService>,
+    input: EditCustomProviderInput,
+) -> Result<EditCustomProviderResult, AppError> {
+    let started_at = Instant::now();
+    let result = service.edit_custom_provider(input);
+    log_command_result("edit_custom_provider", started_at, &result);
+    result
+}
+
+#[tauri::command]
+pub fn replace_command_credential(
+    service: tauri::State<'_, AppService>,
+    input: ReplaceCommandCredentialInput,
+) -> Result<EditCustomProviderResult, AppError> {
+    let started_at = Instant::now();
+    let result = service.replace_command_credential(input);
+    log_command_result("replace_command_credential", started_at, &result);
     result
 }
 

@@ -524,6 +524,8 @@ OMP Switch 不会显示或执行该命令。
 [替换为文本 API Key]
 ```
 
+该入口打开只包含 Provider ID（只读）和新 Direct API Key 的编辑器；不显示 Base URL、默认协议或认证方式，保存只替换凭据。仅当 Target configuration 可写且当前 `models.yml` Hash 可用时启用；不以 Provider 全局只读状态替代此判断。
+
 高级 Custom Provider 详情仍可提供“删除完整 Provider”，确认文案说明模型和未知字段会一起删除。OMP 内置 Provider/模型覆盖不显示普通删除入口。
 
 ### 10.2 删除 Provider

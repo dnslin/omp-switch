@@ -66,6 +66,28 @@ export type CreateCustomProviderInput = {
 };
 
 export type CreateCustomProviderResult = { providerId: string; modelId: string };
+
+export type DirectApiKeyIntent =
+  | { kind: "keep" }
+  | { kind: "replace"; value: string }
+  | { kind: "delete" };
+
+export type EditCustomProviderInput = {
+  openedModelsHash: string;
+  providerId: string;
+  baseUrl: string;
+  defaultApi?: OverviewApi;
+  authMode: "api-key" | "none";
+  apiKey: DirectApiKeyIntent;
+};
+
+export type ReplaceCommandCredentialInput = {
+  openedModelsHash: string;
+  providerId: string;
+  apiKey: { kind: "replace"; value: string };
+};
+
+export type EditCustomProviderResult = { providerId: string };
 export type OverviewApiSource = "provider" | "model";
 export type OverviewAuthMode = "api-key" | "none" | "unsupported";
 export type OverviewRoleStatus = "configured" | "unconfigured" | "provider-missing" | "model-missing" | "incomplete" | "advanced";
@@ -100,6 +122,7 @@ export type OverviewProvider = {
   authMode: OverviewAuthMode;
   hasApiKey: boolean;
   modelCount: number;
+  canReplaceCommandCredential: boolean;
   classification: OverviewProviderClassification;
   editable: boolean;
   readOnlyReason: string | null;
@@ -176,6 +199,8 @@ export interface TauriClient {
   getStartupState(): Promise<StartupState>;
   getOverviewLoad(): Promise<OverviewLoad>;
   createCustomProvider(input: CreateCustomProviderInput): Promise<CreateCustomProviderResult>;
+  editCustomProvider(input: EditCustomProviderInput): Promise<EditCustomProviderResult>;
+  replaceCommandCredential(input: ReplaceCommandCredentialInput): Promise<EditCustomProviderResult>;
   detectOmp(): Promise<StartupState>;
   selectOmpExecutable(): Promise<string | null>;
   validateSelectedOmp(executablePath: string): Promise<StartupState>;
@@ -191,6 +216,8 @@ export const tauriClient: TauriClient = {
   getStartupState: () => invoke<StartupState>("get_startup_state"),
   getOverviewLoad: () => invoke<OverviewLoad>("get_overview_load"),
   createCustomProvider: (input) => invoke<CreateCustomProviderResult>("create_custom_provider", { input }),
+  editCustomProvider: (input) => invoke<EditCustomProviderResult>("edit_custom_provider", { input }),
+  replaceCommandCredential: (input) => invoke<EditCustomProviderResult>("replace_command_credential", { input }),
   detectOmp: () => invoke<StartupState>("detect_omp"),
   selectOmpExecutable: async () => {
     const selected = await open({ multiple: false, directory: false, title: "选择 OMP 可执行文件" });

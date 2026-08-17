@@ -11,7 +11,8 @@ use std::{
 use crate::{
     application::{
         AppService, AppSettings, CreateCustomProviderInput, CreateModelFields,
-        CreateProviderFields, OverviewLoadDto, ProviderAuthMode, ProviderCreationFailurePoint,
+        CreateProviderFields, DirectApiKeyIntent, EditCustomProviderInput, OverviewLoadDto,
+        ProviderAuthMode, ProviderCreationFailurePoint, ReplaceCommandCredentialInput,
         StartupState, SupportedApi, SupportedInput, Theme, UiSettingsUpdate,
     },
     omp_environment::{CommandOutput, OmpEnvironment},
@@ -1727,11 +1728,18 @@ otherSettings:
     let overview = service.get_overview_load().overview.unwrap();
     let dto = serde_json::to_value(overview).unwrap();
 
-    assert_eq!(dto["state"], "normal");
-    assert_eq!(dto["counts"]["providerCount"], 1);
+    assert_eq!(dto["state"], "read-only");
+    assert_eq!(dto["counts"]["providerCount"], 0);
     assert_eq!(dto["counts"]["modelCount"], 6);
     assert_eq!(dto["counts"]["roleCount"], 10);
     assert_eq!(dto["providers"][0]["hasApiKey"], true);
+    assert_eq!(dto["providers"][0]["baseUrl"], "https://example.com/v1");
+    assert_eq!(dto["providers"][0]["classification"], "advanced");
+    assert_eq!(dto["providers"][0]["editable"], false);
+    assert_eq!(
+        dto["providers"][0]["readOnlyReason"],
+        "包含 OMP Switch 不支持的高级配置。"
+    );
     assert!(!dto.to_string().contains("super-secret-api-key"));
     assert!(!dto.to_string().contains("user-info-secret"));
     assert!(!dto.to_string().contains("query-secret"));
@@ -1770,7 +1778,7 @@ otherSettings:
             .unwrap()
     };
     assert_eq!(provider("dnslin")["classification"], "advanced");
-    assert_eq!(provider("other")["classification"], "custom");
+    assert_eq!(provider("other")["classification"], "advanced");
     assert_eq!(provider("special")["classification"], "unsupported");
     assert_eq!(provider("dnslin")["baseUrl"], "https://example.com/v1");
     assert_eq!(provider("other")["baseUrl"], "[配置地址因无法解析而已脱敏]");
@@ -2425,6 +2433,543 @@ fn provider_creation_input(opened_models_hash: String) -> CreateCustomProviderIn
     }
 }
 
+fn provider_edit_input(
+    opened_models_hash: String,
+    api_key: DirectApiKeyIntent,
+) -> EditCustomProviderInput {
+    EditCustomProviderInput {
+        opened_models_hash,
+        provider_id: "editable".to_owned(),
+        base_url: " https://edited.example/v1/ ".to_owned(),
+        default_api: Some(SupportedApi::AnthropicMessages),
+        auth_mode: ProviderAuthMode::ApiKey,
+        api_key,
+    }
+}
+
+fn editable_provider_yaml(api_key: Option<&str>) -> String {
+    let api_key = api_key
+        .map(|value| format!("    apiKey: {value}\n"))
+        .unwrap_or_default();
+    format!(
+        "providers:\n  editable:\n    baseUrl: https://original.example/v1\n    api: openai-completions\n{api_key}    models:\n      - id: editable-model\n        name: Editable Model\n        reasoning: false\n        input: [text]\n        contextWindow: 4096\n        maxTokens: 1024\n"
+    )
+}
+
+fn opened_models_hash(service: &AppService) -> String {
+    service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap()
+}
+
+#[test]
+fn provider_edit_replaces_supported_fields_without_leaking_the_direct_api_key() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original = r#"unrecognizedRoot:
+  nested:
+    value: preserve-root
+providers:
+  editable:
+    name: Editable Provider
+    baseUrl: https://original.example/v1
+    api: openai-completions
+    apiKey: fixture-old-direct-key
+    models:
+      - id: editable-model
+        name: Editable Model
+        reasoning: false
+        input: [text]
+        contextWindow: 4096
+        maxTokens: 1024
+        futureModelSetting:
+          value: preserve-target-descendant
+  sibling:
+    baseUrl: https://sibling.example/v1
+    api: openai-responses
+    models:
+      - id: sibling-model
+        name: Sibling Model
+        reasoning: false
+        input: [text]
+        contextWindow: 4096
+        maxTokens: 1024
+"#;
+    fs::write(target.join("models.yml"), original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = service
+        .get_overview_load()
+        .overview
+        .unwrap()
+        .files
+        .models
+        .content_hash
+        .unwrap();
+    let replacement = "fixture-replacement-direct-key";
+
+    let result = service
+        .edit_custom_provider(provider_edit_input(
+            opened_models_hash,
+            DirectApiKeyIntent::Replace {
+                value: replacement.to_owned(),
+            },
+        ))
+        .unwrap();
+
+    assert_eq!(result.provider_id, "editable");
+    assert!(
+        !serde_json::to_string(&result)
+            .unwrap()
+            .contains(replacement)
+    );
+    let before: serde_yaml::Value = serde_yaml::from_str(original).unwrap();
+    let after: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    assert_eq!(after["unrecognizedRoot"], before["unrecognizedRoot"]);
+    assert_eq!(
+        after["providers"]["sibling"],
+        before["providers"]["sibling"]
+    );
+    assert_eq!(
+        after["providers"]["editable"]["models"],
+        before["providers"]["editable"]["models"]
+    );
+    assert_eq!(
+        after["providers"]["editable"]["baseUrl"],
+        "https://edited.example/v1"
+    );
+    assert_eq!(after["providers"]["editable"]["api"], "anthropic-messages");
+    let written_key = after["providers"]["editable"]["apiKey"].as_str().unwrap();
+    assert_eq!(
+        Sha256::digest(written_key.as_bytes()),
+        Sha256::digest(replacement.as_bytes())
+    );
+    let overview_json =
+        serde_json::to_string(&service.get_overview_load().overview.unwrap()).unwrap();
+    assert!(!overview_json.contains(replacement));
+}
+
+#[test]
+fn provider_edit_keeps_an_existing_direct_api_key() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_key = "fixture-direct-key-to-keep";
+    fs::write(
+        target.join("models.yml"),
+        editable_provider_yaml(Some(original_key)),
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+
+    service
+        .edit_custom_provider(provider_edit_input(
+            opened_models_hash(&service),
+            DirectApiKeyIntent::Keep,
+        ))
+        .unwrap();
+
+    let after: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    let key = after["providers"]["editable"]["apiKey"].as_str().unwrap();
+    assert_eq!(
+        Sha256::digest(key.as_bytes()),
+        Sha256::digest(original_key.as_bytes())
+    );
+    assert!(
+        !serde_json::to_string(&service.get_overview_load().overview.unwrap())
+            .unwrap()
+            .contains(original_key)
+    );
+}
+
+#[test]
+fn provider_edit_deletes_the_direct_api_key_for_no_authentication() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_key = "fixture-direct-key-to-delete";
+    fs::write(
+        target.join("models.yml"),
+        editable_provider_yaml(Some(original_key)),
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let mut input = provider_edit_input(opened_models_hash(&service), DirectApiKeyIntent::Delete);
+    input.auth_mode = ProviderAuthMode::None;
+
+    let result = service.edit_custom_provider(input).unwrap();
+
+    assert!(
+        !serde_json::to_string(&result)
+            .unwrap()
+            .contains(original_key)
+    );
+    let after: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    assert!(
+        !after["providers"]["editable"]
+            .as_mapping()
+            .unwrap()
+            .contains_key(serde_yaml::Value::String("apiKey".to_owned()))
+    );
+    let overview = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    let provider = overview["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["id"] == "editable")
+        .unwrap();
+    assert_eq!(provider["authMode"], "none");
+    assert_eq!(provider["hasApiKey"], false);
+    assert!(
+        !serde_json::to_string(provider)
+            .unwrap()
+            .contains(original_key)
+    );
+}
+
+#[test]
+fn provider_edit_rejects_masked_or_command_key_replacements_without_leaking_them() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original = editable_provider_yaml(Some("fixture-existing-direct-key"));
+    fs::write(target.join("models.yml"), &original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    for replacement in [
+        "••••••",
+        "!fixture-command-key-must-not-leak",
+        " !fixture-command-key-must-not-leak",
+    ] {
+        let error = service
+            .edit_custom_provider(provider_edit_input(
+                opened_models_hash(&service),
+                DirectApiKeyIntent::Replace {
+                    value: replacement.to_owned(),
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(error.code, "provider-api-key-invalid");
+        assert!(!serde_json::to_string(&error).unwrap().contains(replacement));
+        assert_eq!(
+            Sha256::digest(fs::read(target.join("models.yml")).unwrap()),
+            Sha256::digest(original.as_bytes()),
+        );
+    }
+}
+
+#[test]
+fn provider_edit_stops_on_an_external_models_hash_conflict() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        editable_provider_yaml(Some("fixture-key")),
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let opened_models_hash = opened_models_hash(&service);
+    let externally_changed = b"unrecognizedRoot:\n  changed: outside-omp-switch\nproviders: {}\n";
+    fs::write(target.join("models.yml"), externally_changed).unwrap();
+
+    let error = service
+        .edit_custom_provider(provider_edit_input(
+            opened_models_hash,
+            DirectApiKeyIntent::Keep,
+        ))
+        .unwrap_err();
+
+    assert_eq!(error.code, "models-hash-conflict");
+    assert_eq!(
+        fs::read(target.join("models.yml")).unwrap(),
+        externally_changed
+    );
+    assert!(
+        !app_data
+            .path()
+            .join("target-configuration-backups")
+            .exists()
+    );
+}
+
+#[test]
+fn provider_edit_failure_injection_keeps_the_original_file_intact() {
+    let mut failures = vec![
+        ("before backup", ProviderCreationFailurePoint::BeforeBackup),
+        (
+            "backup directory",
+            ProviderCreationFailurePoint::BackupDirectoryCreationFailure,
+        ),
+        (
+            "backup file open",
+            ProviderCreationFailurePoint::BackupFileOpenFailure,
+        ),
+        (
+            "backup file write",
+            ProviderCreationFailurePoint::BackupFileWriteFailure,
+        ),
+        (
+            "backup file sync",
+            ProviderCreationFailurePoint::BackupFileSyncFailure,
+        ),
+        (
+            "temporary open",
+            ProviderCreationFailurePoint::TemporaryFileOpenFailure,
+        ),
+        (
+            "temporary write",
+            ProviderCreationFailurePoint::TemporaryFileWriteFailure,
+        ),
+        (
+            "temporary sync",
+            ProviderCreationFailurePoint::TemporaryFileSyncFailure,
+        ),
+        ("after backup", ProviderCreationFailurePoint::AfterBackup),
+        (
+            "before temporary write",
+            ProviderCreationFailurePoint::BeforeTemporaryWrite,
+        ),
+        (
+            "temporary reparse",
+            ProviderCreationFailurePoint::CorruptTemporaryFile,
+        ),
+        (
+            "untouched comparison",
+            ProviderCreationFailurePoint::MutateUntouchedValue,
+        ),
+        (
+            "before replacement",
+            ProviderCreationFailurePoint::BeforeReplacement,
+        ),
+    ];
+    #[cfg(unix)]
+    failures.push((
+        "replacement commit",
+        ProviderCreationFailurePoint::CommitFailure,
+    ));
+    for (name, failure) in failures {
+        let app_data = tempdir().unwrap();
+        let target = app_data.path().join("agent");
+        fs::create_dir_all(&target).unwrap();
+        let original = editable_provider_yaml(Some("fixture-failure-direct-key"));
+        fs::write(target.join("models.yml"), &original).unwrap();
+        fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+        let service = provider_creation_service(&target, app_data.path());
+        let input = provider_edit_input(
+            opened_models_hash(&service),
+            DirectApiKeyIntent::Replace {
+                value: "fixture-replacement-for-injection".to_owned(),
+            },
+        );
+        service.set_provider_creation_failure_for_test(failure);
+
+        let error = service.edit_custom_provider(input).unwrap_err();
+
+        assert_eq!(error.code, "provider-edit-failed", "{name}");
+        assert_eq!(
+            Sha256::digest(fs::read(target.join("models.yml")).unwrap()),
+            Sha256::digest(original.as_bytes()),
+            "{name}",
+        );
+    }
+}
+
+#[test]
+fn provider_edit_refuses_a_base_url_that_was_redacted_from_the_projection() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original = b"providers:\n  editable:\n    baseUrl: https://fixture-user:fixture-base-url-password@example.com/v1\n    api: openai-responses\n    apiKey: fixture-existing-direct-key\n    models:\n      - id: editable-model\n        name: Editable Model\n        reasoning: false\n        input: [text]\n        contextWindow: 4096\n        maxTokens: 1024\n";
+    fs::write(target.join("models.yml"), original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+    let opened_models_hash = overview.files.models.content_hash.clone().unwrap();
+    let projected = serde_json::to_string(&overview).unwrap();
+
+    assert!(!projected.contains("fixture-user"));
+    assert!(!projected.contains("fixture-base-url-password"));
+    assert!(!overview.providers[0].editable);
+    let error = service
+        .edit_custom_provider(provider_edit_input(
+            opened_models_hash,
+            DirectApiKeyIntent::Keep,
+        ))
+        .unwrap_err();
+
+    assert_eq!(error.code, "provider-edit-unavailable");
+    assert_eq!(
+        Sha256::digest(fs::read(target.join("models.yml")).unwrap()),
+        Sha256::digest(original),
+    );
+}
+
+#[test]
+fn provider_replaces_a_tagged_command_credential_without_returning_it() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let command_payload = "fixture-command-credential-must-not-leak";
+    let original = format!(
+        "providers:\n  editable:\n    baseUrl: https://fixture-user:fixture-base-url-password@original.example/v1\n    api: openai-responses\n    apiKey: !command {command_payload}\n    models:\n      - id: editable-model\n        name: Editable Model\n        reasoning: false\n        input: [text]\n        contextWindow: 4096\n        maxTokens: 1024\n"
+    );
+    fs::write(target.join("models.yml"), &original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+    let opened_models_hash = overview.files.models.content_hash.clone().unwrap();
+    let overview_json = serde_json::to_string(&overview).unwrap();
+    let replacement = "fixture-direct-replacement";
+
+    assert_eq!(
+        overview.providers[0].auth_mode,
+        crate::overview::OverviewAuthMode::Unsupported
+    );
+    assert_eq!(
+        overview.providers[0].classification,
+        crate::overview::ProviderClassification::Advanced
+    );
+    assert!(!overview.providers[0].editable);
+    assert!(overview.providers[0].can_replace_command_credential);
+    assert!(!overview_json.contains(command_payload));
+    assert!(!overview_json.contains("fixture-user"));
+    assert!(!overview_json.contains("fixture-base-url-password"));
+    let result = service
+        .replace_command_credential(ReplaceCommandCredentialInput {
+            opened_models_hash,
+            provider_id: "editable".to_owned(),
+            api_key: DirectApiKeyIntent::Replace {
+                value: replacement.to_owned(),
+            },
+        })
+        .unwrap();
+
+    assert!(
+        !serde_json::to_string(&result)
+            .unwrap()
+            .contains(replacement)
+    );
+    let after: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    let provider = &after["providers"]["editable"];
+    let stored = provider["apiKey"].as_str().unwrap();
+    assert_eq!(
+        Sha256::digest(stored.as_bytes()),
+        Sha256::digest(replacement.as_bytes())
+    );
+    assert_eq!(
+        provider["baseUrl"].as_str(),
+        Some("https://fixture-user:fixture-base-url-password@original.example/v1")
+    );
+    assert_eq!(provider["api"].as_str(), Some("openai-responses"));
+    let refreshed = serde_json::to_string(&service.get_overview_load().overview.unwrap()).unwrap();
+    assert!(!refreshed.contains(command_payload));
+    assert!(!refreshed.contains(replacement));
+}
+
+#[test]
+fn tagged_command_credential_requires_an_explicit_replacement_intent() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let command_payload = "fixture-command-credential-must-not-leak";
+    let original = format!(
+        "providers:\n  editable:\n    baseUrl: https://original.example/v1\n    api: openai-responses\n    apiKey: !command {command_payload}\n    models:\n      - id: editable-model\n        name: Editable Model\n        reasoning: false\n        input: [text]\n        contextWindow: 4096\n        maxTokens: 1024\n"
+    );
+    fs::write(target.join("models.yml"), &original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+
+    let error = service
+        .replace_command_credential(ReplaceCommandCredentialInput {
+            opened_models_hash: opened_models_hash(&service),
+            provider_id: "editable".to_owned(),
+            api_key: DirectApiKeyIntent::Keep,
+        })
+        .unwrap_err();
+
+    assert_eq!(error.code, "provider-api-key-replacement-required");
+    assert!(
+        !serde_json::to_string(&error)
+            .unwrap()
+            .contains(command_payload)
+    );
+    assert_eq!(
+        Sha256::digest(fs::read(target.join("models.yml")).unwrap()),
+        Sha256::digest(original.as_bytes()),
+    );
+}
+
+#[test]
+fn tagged_command_credential_with_advanced_fields_replaces_only_its_key() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original = b"providers:\n  restricted:\n    baseUrl: https://original.example/v1\n    api: openai-responses\n    apiKey: !command fixture-command-credential-must-not-leak\n    headers:\n      x-provider-mode: custom\n    models:\n      - id: restricted-model\n        name: Restricted Model\n        reasoning: false\n        input: [text]\n        contextWindow: 4096\n        maxTokens: 1024\n";
+    fs::write(target.join("models.yml"), original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_creation_service(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+    let opened_models_hash = overview.files.models.content_hash.clone().unwrap();
+    let replacement = "fixture-direct-replacement";
+
+    assert_eq!(
+        overview.providers[0].classification,
+        crate::overview::ProviderClassification::Advanced
+    );
+    assert!(!overview.providers[0].editable);
+    assert!(overview.providers[0].can_replace_command_credential);
+    let result = service
+        .replace_command_credential(ReplaceCommandCredentialInput {
+            opened_models_hash,
+            provider_id: "restricted".to_owned(),
+            api_key: DirectApiKeyIntent::Replace {
+                value: replacement.to_owned(),
+            },
+        })
+        .unwrap();
+
+    assert!(
+        !serde_json::to_string(&result)
+            .unwrap()
+            .contains(replacement)
+    );
+    let before: serde_yaml::Value = serde_yaml::from_slice(original).unwrap();
+    let after: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    let provider = &after["providers"]["restricted"];
+    assert_eq!(
+        provider["baseUrl"],
+        before["providers"]["restricted"]["baseUrl"]
+    );
+    assert_eq!(provider["api"], before["providers"]["restricted"]["api"]);
+    assert_eq!(
+        provider["headers"],
+        before["providers"]["restricted"]["headers"]
+    );
+    assert_eq!(
+        provider["models"],
+        before["providers"]["restricted"]["models"]
+    );
+    assert_eq!(
+        Sha256::digest(provider["apiKey"].as_str().unwrap().as_bytes()),
+        Sha256::digest(replacement.as_bytes()),
+    );
+}
+
 #[test]
 fn custom_provider_creation_preserves_deep_unknown_values_and_creates_a_current_backup() {
     let app_data = tempdir().unwrap();
@@ -2667,6 +3212,7 @@ fn custom_provider_creation_stops_when_another_writer_holds_the_target_lock() {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(lock_directory.join(format!("{fingerprint}.lock")))
         .unwrap();
     FileExt::lock(&lock).unwrap();

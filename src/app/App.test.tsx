@@ -39,6 +39,8 @@ const unavailableClient: TauriClient = {
   }),
   getOverviewLoad: async () => overviewLoad(overviewDto({ state: "empty", counts: { providerCount: 0, modelCount: 0, roleCount: 0 }, providers: [], models: [], roles: [], emptyReason: "还没有可管理的自定义 Provider。", nextAction: "创建一个 Provider，并同时配置它的第一个模型。" })),
   createCustomProvider: async () => ({ providerId: "new-provider", modelId: "new-model" }),
+  editCustomProvider: async () => ({ providerId: "dnslin" }),
+  replaceCommandCredential: async () => ({ providerId: "dnslin" }),
   detectOmp: async () => ({ kind: "omp-unavailable", message: "仍未找到 OMP" }),
   selectOmpExecutable: async () => null,
   validateSelectedOmp: async () => ({ kind: "invalid-executable", executablePath: "/tmp/not-omp", message: "无法运行", diagnosticCode: "io-not-found" }),
@@ -1110,7 +1112,7 @@ describe("React page seam", () => {
     expect(screen.getByLabelText("最终地址")).toHaveValue("https://new-provider.example/v1/responses?region=us");
   });
  
-  it("lists searchable Provider safety summaries and freezes unsafe actions", async () => {
+  it("lists searchable Provider safety summaries while allowing safe detail viewing", async () => {
     const user = userEvent.setup();
     const base = overviewDto();
     const openAiModel: OverviewModel = {
@@ -1172,10 +1174,8 @@ describe("React page seam", () => {
     expect(screen.getByText("内置覆盖 · 只读")).toBeVisible();
     expect(screen.getByText("高级配置 · 只读")).toBeVisible();
     expect(screen.getByRole("button", { name: "新增 Provider" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "OpenAI 操作" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "advanced 操作" })).toBeDisabled();
-    expect(screen.queryByRole("link", { name: "OpenAI" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "advanced" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "OpenAI 详情" })).toHaveAttribute("href", "/providers/OpenAI");
+    expect(screen.getByRole("link", { name: "advanced 详情" })).toHaveAttribute("href", "/providers/advanced");
 
     await user.type(screen.getByRole("searchbox", { name: "搜索 Provider" }), "claude");
     expect(screen.queryByText("OpenAI")).not.toBeInTheDocument();
@@ -1358,6 +1358,209 @@ describe("React page seam", () => {
     expect(model).toHaveTextContent("claude-sonnet-4");
     expect(saveUiSettings).not.toHaveBeenCalled();
   });
+  it("submits only an explicit keep-key intent from the Provider editor", async () => {
+    const user = userEvent.setup();
+    const storedKey = "fixture-stored-direct-key-must-not-render";
+    const editCustomProvider = vi.fn(async () => ({ providerId: "dnslin" }));
+    renderRoute("/providers/dnslin", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      editCustomProvider,
+    });
+
+    await user.click(await screen.findByRole("button", { name: "编辑 Provider" }));
+    const dialog = screen.getByRole("dialog");
+    const id = within(dialog).getByLabelText("Provider ID");
+    const apiKey = within(dialog).getByLabelText("API Key", { selector: 'input[type="password"]' });
+    expect(id).toHaveValue("dnslin");
+    expect(id).toHaveAttribute("readonly");
+    expect(apiKey).toHaveValue("");
+    expect(dialog).not.toHaveTextContent(storedKey);
+
+    await user.clear(within(dialog).getByLabelText("Base URL"));
+    await user.type(within(dialog).getByLabelText("Base URL"), "https://edited.example/v1");
+    await user.type(apiKey, "   ");
+    await user.click(within(dialog).getByRole("button", { name: "保存 Provider" }));
+
+    await waitFor(() => expect(editCustomProvider).toHaveBeenCalledWith({
+      openedModelsHash: "models-hash",
+      providerId: "dnslin",
+      baseUrl: "https://edited.example/v1",
+      defaultApi: "openai-responses",
+      authMode: "api-key",
+      apiKey: { kind: "keep" },
+    }));
+  });
+  it("replaces a command credential through the key-only endpoint", async () => {
+    const user = userEvent.setup();
+    const replaceCommandCredential = vi.fn(async () => ({ providerId: "dnslin" }));
+    const editCustomProvider = vi.fn(async () => ({ providerId: "dnslin" }));
+    const baseProvider = overviewDto().providers[0];
+    const commandProvider: OverviewProvider = {
+      ...baseProvider,
+      baseUrl: null,
+      defaultApi: null,
+      authMode: "unsupported",
+      classification: "advanced",
+      editable: false,
+      canReplaceCommandCredential: true,
+      readOnlyReason: "Provider 使用不支持的命令凭据。",
+    };
+    renderRoute("/providers", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto({ providers: [commandProvider] }), readyState),
+      editCustomProvider,
+      replaceCommandCredential,
+    });
+
+    await user.click(await screen.findByRole("link", { name: "dnslin 详情" }));
+    expect(await screen.findByRole("heading", { name: "dnslin" })).toBeVisible();
+
+    await user.click(await screen.findByRole("button", { name: "替换为文本 API Key" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByRole("heading", { name: "替换 Direct API Key" })).toBeVisible();
+    expect(within(dialog).queryByLabelText("Base URL")).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("默认协议（可选）")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("radiogroup", { name: "认证方式" })).not.toBeInTheDocument();
+
+    await user.type(within(dialog).getByLabelText("API Key", { selector: 'input[type="password"]' }), "fixture-direct-replacement");
+    await user.click(within(dialog).getByRole("button", { name: "替换 Direct API Key" }));
+
+    await waitFor(() => expect(replaceCommandCredential).toHaveBeenCalledWith({
+      openedModelsHash: "models-hash",
+      providerId: "dnslin",
+      apiKey: { kind: "replace", value: "fixture-direct-replacement" },
+    }));
+    expect(editCustomProvider).not.toHaveBeenCalled();
+  });
+  it("disables command credential replacement when the Target configuration is not writable", async () => {
+    const baseProvider = overviewDto().providers[0];
+    const commandProvider: OverviewProvider = {
+      ...baseProvider,
+      authMode: "unsupported",
+      classification: "advanced",
+      editable: false,
+      canReplaceCommandCredential: true,
+      readOnlyReason: "Provider 使用不支持的命令凭据。",
+    };
+    renderRoute("/providers/dnslin", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto({
+        state: "read-only",
+        targetConfiguration: targetConfiguration(undefined, { status: "read-only", writable: false }),
+        providers: [commandProvider],
+      }), readyState),
+    });
+
+    expect(await screen.findByRole("button", { name: "替换为文本 API Key" })).toBeDisabled();
+  });
+  it("confirms Direct API Key deletion before switching to no authentication", async () => {
+    const user = userEvent.setup();
+    const typedKey = "fixture-typed-direct-key-must-not-escape";
+    const editCustomProvider = vi.fn(async () => ({ providerId: "dnslin" }));
+    renderRoute("/providers/dnslin", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      editCustomProvider,
+    });
+
+    await user.click(await screen.findByRole("button", { name: "编辑 Provider" }));
+    const editor = screen.getByRole("dialog");
+    const keyInput = within(editor).getByLabelText("API Key", { selector: 'input[type="password"]' });
+    await user.type(keyInput, typedKey);
+    await user.click(within(editor).getByRole("radio", { name: "无需认证" }));
+
+    const confirmationHeading = await screen.findByRole("heading", { name: "删除 Direct API Key？" });
+    const confirmation = confirmationHeading.closest('[role="dialog"]') as HTMLElement;
+    expect(confirmation).toHaveTextContent("删除当前保存的 Direct API Key");
+    await user.click(within(confirmation).getByRole("button", { name: "继续编辑" }));
+    expect(within(editor).getByRole("radio", { name: "API Key 认证" })).toBeChecked();
+    expect(keyInput).not.toHaveValue("");
+
+    await user.click(within(editor).getByRole("radio", { name: "无需认证" }));
+    const secondHeading = await screen.findByRole("heading", { name: "删除 Direct API Key？" });
+    const secondConfirmation = secondHeading.closest('[role="dialog"]') as HTMLElement;
+    await user.click(within(secondConfirmation).getByRole("button", { name: "删除并切换为无需认证" }));
+    expect(within(editor).getByRole("radio", { name: "无需认证" })).toBeChecked();
+    expect(within(editor).queryByLabelText("API Key", { selector: 'input[type="password"]' })).not.toBeInTheDocument();
+
+    await user.click(within(editor).getByRole("button", { name: "保存 Provider" }));
+    await waitFor(() => expect(editCustomProvider).toHaveBeenCalledWith(expect.objectContaining({
+      authMode: "none",
+      apiKey: { kind: "delete" },
+    })));
+    expect(JSON.stringify(editCustomProvider.mock.calls)).not.toContain(typedKey);
+  });
+
+  it("retains the Provider draft through a conflict and confirms reload discard", async () => {
+    const user = userEvent.setup();
+    const getOverviewLoad = vi.fn(async () => overviewLoad(overviewDto(), readyState));
+    const editCustomProvider = vi.fn(async () => {
+      throw {
+        code: "models-hash-conflict",
+        message: "models.yml 在打开表单后已被外部修改。",
+        action: "请重新读取配置；当前表单输入已保留，OMP Switch 不会自动合并。",
+      };
+    });
+    renderRoute("/providers/dnslin", {
+      ...unavailableClient,
+      getOverviewLoad,
+      editCustomProvider,
+    });
+
+    await user.click(await screen.findByRole("button", { name: "编辑 Provider" }));
+    const editor = screen.getByRole("dialog");
+    const baseUrl = within(editor).getByLabelText("Base URL");
+    await user.clear(baseUrl);
+    await user.type(baseUrl, "https://conflict.example/v1");
+    await user.click(within(editor).getByRole("button", { name: "保存 Provider" }));
+    expect(await within(editor).findByText("配置冲突")).toBeVisible();
+    expect(baseUrl).toHaveValue("https://conflict.example/v1");
+
+    await user.click(within(editor).getByRole("button", { name: "重新读取" }));
+    const confirmationHeading = await screen.findByRole("heading", { name: "重新读取 Provider？" });
+    const confirmation = confirmationHeading.closest('[role="dialog"]') as HTMLElement;
+    expect(confirmation).toHaveTextContent("丢失当前未保存的修改");
+    await user.click(within(confirmation).getByRole("button", { name: "继续编辑" }));
+    expect(baseUrl).toHaveValue("https://conflict.example/v1");
+
+    await user.click(within(editor).getByRole("button", { name: "重新读取" }));
+    const secondHeading = await screen.findByRole("heading", { name: "重新读取 Provider？" });
+    const secondConfirmation = secondHeading.closest('[role="dialog"]') as HTMLElement;
+    await user.click(within(secondConfirmation).getByRole("button", { name: "重新读取并丢弃修改" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(getOverviewLoad).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows a detailed write failure in the editor without exposing a Direct API Key", async () => {
+    const user = userEvent.setup();
+    const typedKey = "fixture-write-failure-direct-key-must-not-escape";
+    const editCustomProvider = vi.fn(async () => {
+      throw {
+        code: "provider-edit-failed",
+        message: "无法安全写入 models.yml。",
+        action: "请检查路径、权限和可用磁盘空间后重试。",
+        internal: typedKey,
+      };
+    });
+    renderRoute("/providers/dnslin", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      editCustomProvider,
+    });
+
+    await user.click(await screen.findByRole("button", { name: "编辑 Provider" }));
+    const editor = screen.getByRole("dialog");
+    const keyInput = within(editor).getByLabelText("API Key", { selector: 'input[type="password"]' });
+    await user.type(keyInput, typedKey);
+    await user.click(within(editor).getByRole("button", { name: "保存 Provider" }));
+
+    expect(await within(editor).findByText("无法安全写入 models.yml。")).toBeVisible();
+    expect(within(editor).getByText("请检查路径、权限和可用磁盘空间后重试。")).toBeVisible();
+    expect(keyInput).not.toHaveValue("");
+    expect(document.body.textContent).not.toContain(typedKey);
+    expect(screen.getAllByText("无法保存 Provider").length).toBeGreaterThanOrEqual(1);
+  });
 });
 
 function overviewDto(overrides: Partial<OverviewDto> = {}): OverviewDto {
@@ -1385,7 +1588,7 @@ function overviewDto(overrides: Partial<OverviewDto> = {}): OverviewDto {
       config: { canonicalPath: "/Users/username/.omp/agent/config.yml", resolvedPath: "/Users/username/.omp/agent/config.yml", status: "normal", contentHash: "config-hash" },
     },
     counts: { providerCount: 1, modelCount: 1, roleCount: 2 },
-    providers: [{ id: "dnslin", name: "Local", baseUrl: "https://example.com", defaultApi: "openai-responses", authMode: "api-key", hasApiKey: true, modelCount: 1, classification: "custom", editable: true, readOnlyReason: null, models: [model] }],
+    providers: [{ id: "dnslin", name: "Local", baseUrl: "https://example.com", defaultApi: "openai-responses", authMode: "api-key", hasApiKey: true, modelCount: 1, canReplaceCommandCredential: false, classification: "custom", editable: true, readOnlyReason: null, models: [model] }],
     models: [model],
     roles: [{ id: "default", status: "configured", selector: "dnslin/gpt-5.6-sol:max" }, { id: "task", status: "configured", selector: "dnslin/gpt-5.6-sol" }],
     emptyReason: null,
