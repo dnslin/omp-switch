@@ -111,10 +111,10 @@ export function OverviewPage() {
   const modelTest = useModelTestRunner();
   const refreshedModelTestResult = useRef<ModelTestResult | null>(null);
   useEffect(() => {
-    if (!modelTest.result || !data || loading || refreshedModelTestResult.current === modelTest.result) return;
+    if (modelTest.running || !modelTest.result || !data || loading || refreshedModelTestResult.current === modelTest.result) return;
     refreshedModelTestResult.current = modelTest.result;
     void refresh();
-  }, [loading, modelTest.result, refresh]);
+  }, [loading, modelTest.result, modelTest.running, refresh]);
 
   async function openTargetDirectory() {
     if (startupState?.kind !== "omp-ready") return;

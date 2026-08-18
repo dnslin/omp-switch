@@ -3103,6 +3103,46 @@ describe("Model test page seam", () => {
     expect(getOverviewLoad).toHaveBeenCalledTimes(2);
   });
 
+  it.each(["/overview", "/providers/dnslin"] as const)("refreshes %s once after remote polling finishes", async (route) => {
+    const runningResult = {
+      success: true,
+      providerId: "dnslin",
+      modelId: "gpt-5.6-sol",
+      protocol: "openai-responses" as const,
+      latencyMs: 12,
+      status: 200,
+      message: "旧测试结果",
+    };
+    const completedResult = { ...runningResult, latencyMs: 19, message: "模型连接成功" };
+    const getModelTestState = vi.fn(async () => {
+      if (getModelTestState.mock.calls.length < 4) {
+        return { running: true, providerId: "dnslin", modelId: "gpt-5.6-sol", result: structuredClone(runningResult) };
+      }
+      return { running: false, providerId: null, modelId: null, result: structuredClone(completedResult) };
+    });
+    const getOverviewLoad = vi.fn(async () => overviewLoad(structuredClone(overviewDto()), readyState));
+    renderRoute(route, {
+      ...unavailableClient,
+      getOverviewLoad,
+      getModelTestState,
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        modelTestCostNoticeAccepted: true,
+      }),
+    });
+
+    await screen.findByRole(route === "/overview" ? "region" : "heading", route === "/overview" ? { name: "快速测试" } : { name: "dnslin" });
+    await waitFor(() => expect(getModelTestState).toHaveBeenCalledTimes(4), { timeout: 2000 });
+    await waitFor(() => expect(getOverviewLoad).toHaveBeenCalledTimes(2), { timeout: 2000 });
+    const settle = deferred<void>();
+    window.setTimeout(settle.resolve, 300);
+    await settle.promise;
+    expect(getOverviewLoad).toHaveBeenCalledTimes(2);
+  });
+
   it("does not replace a delayed initial overview load when restoring a previous result", async () => {
     const initialLoad = deferred<OverviewLoad>();
     const restoredResult = {

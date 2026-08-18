@@ -363,10 +363,10 @@ function ProviderDetailPage() {
   const { data, error, loading, reload, refresh, shellStatus } = useOverviewLoad(providerDetailLoadCopy);
   const refreshedModelTestResult = useRef<ModelTestResult | null>(null);
   useEffect(() => {
-    if (!modelTest.result || modelTest.result.providerId !== providerId || !data || loading || refreshedModelTestResult.current === modelTest.result) return;
+    if (modelTest.running || !modelTest.result || modelTest.result.providerId !== providerId || !data || loading || refreshedModelTestResult.current === modelTest.result) return;
     refreshedModelTestResult.current = modelTest.result;
     void refresh();
-  }, [loading, modelTest.result, providerId, refresh]);
+  }, [loading, modelTest.result, modelTest.running, providerId, refresh]);
   const [editing, setEditing] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const [modelEditor, setModelEditor] = useState<{ mode: "create" | "edit" | "view"; model?: OverviewModel; copy?: boolean } | null>(null);
