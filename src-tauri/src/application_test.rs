@@ -3515,6 +3515,48 @@ providers:
 }
 
 #[test]
+fn model_copy_creates_a_new_definition_from_supported_fields_only() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        "providers:\n  editable:\n    baseUrl: https://example.com/v1\n    api: openai-responses\n    models:\n      - id: source\n        name: Source\n        input: [text, image]\n        reasoning: true\n        contextWindow: 100000\n        maxTokens: 10000\n",
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let result = service
+        .create_model(CreateModelInput {
+            opened_models_hash: opened_models_hash(&service),
+            provider_id: "editable".to_owned(),
+            model: ModelDefinitionFields {
+                id: "source-copy".to_owned(),
+                name: "Source Copy".to_owned(),
+                api: None,
+                reasoning: true,
+                input: vec![SupportedInput::Text, SupportedInput::Image],
+                context_window: 100_000,
+                max_tokens: 10_000,
+            },
+        })
+        .unwrap();
+    assert_eq!(result.model_id, "source-copy");
+    let tree: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    let copied = &tree["providers"]["editable"]["models"][1];
+    assert_eq!(copied["id"], "source-copy");
+    assert_eq!(copied["name"], "Source Copy");
+    assert_eq!(copied["api"], serde_yaml::Value::Null);
+    assert_eq!(
+        copied
+            .as_mapping()
+            .unwrap()
+            .get(serde_yaml::Value::String("testResult".to_owned())),
+        None
+    );
+}
+#[test]
 fn model_mutations_enforce_validation_stable_ids_and_read_only_boundaries() {
     let app_data = tempdir().unwrap();
     let target = app_data.path().join("agent");

@@ -516,8 +516,8 @@ function ProviderDetailPage() {
 }
 
 function modelStatusView(model: OverviewModel): { label: string; tone: "success" | "warning" | "danger" } {
-  if (model.status === "incomplete" || !model.complete) return { label: "配置不完整", tone: "warning" };
   if (model.status === "read-only" || !model.editable) return { label: "只读", tone: "danger" };
+  if (model.status === "incomplete" || !model.complete) return { label: "配置不完整", tone: "warning" };
   return { label: "正常", tone: "success" };
 }
 

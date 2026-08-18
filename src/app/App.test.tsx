@@ -1556,18 +1556,23 @@ describe("React page seam", () => {
     const user = userEvent.setup();
     const base = overviewDto();
     const incomplete: OverviewModel = { ...base.models[0], id: "incomplete", name: null, contextWindow: null, maxTokens: null, input: [], complete: false, status: "incomplete", editable: true, referenceCount: 0, referencePaths: [], readOnlyReason: null };
-    const locked: OverviewModel = { ...base.models[0], id: "locked", name: "Locked", status: "read-only", editable: false, referenceCount: 1, referencePaths: ["modelRoles[\"default\"]"], readOnlyReason: "Model definition 包含当前版本不支持的配置，只能查看。" };
+    const locked: OverviewModel = { ...base.models[0], id: "locked", name: "Locked", complete: false, status: "read-only", editable: false, referenceCount: 1, referencePaths: ["modelRoles[\"default\"]"], readOnlyReason: "Model definition 包含当前版本不支持的配置，只能查看。" };
+    const referenced = { ...base.models[0], referenceCount: 1, referencePaths: ["modelRoles[\"default\"]"] };
     const overview = overviewDto({
-      providers: [{ ...base.providers[0], modelCount: 3, models: [base.models[0], incomplete, locked] }],
-      models: [base.models[0], incomplete, locked],
+      providers: [{ ...base.providers[0], modelCount: 3, models: [referenced, incomplete, locked] }],
+      models: [referenced, incomplete, locked],
       counts: { providerCount: 1, modelCount: 3, roleCount: 2 },
     });
+    const createModel = vi.fn(async () => ({ providerId: "dnslin", modelId: "copied-model" }));
+    const editModel = vi.fn(async () => ({ providerId: "dnslin", modelId: "incomplete" }));
     const deleteModel = vi.fn(async () => {
       throw { code: "model-delete-referenced", message: "无法删除 Model：仍有配置引用。", action: "请先处理引用。" };
     });
     renderRoute("/providers/dnslin", {
       ...unavailableClient,
       getOverviewLoad: async () => overviewLoad(overview, readyState),
+      createModel,
+      editModel,
       deleteModel,
     });
 
@@ -1579,13 +1584,22 @@ describe("React page seam", () => {
     const repairSheet = await screen.findByRole("dialog");
     expect(within(repairSheet).getByLabelText("Context Window")).toHaveValue(null);
     expect(within(repairSheet).getByLabelText("Max Tokens")).toHaveValue(null);
-    await user.click(within(repairSheet).getByRole("button", { name: "取消" }));
+    await user.type(within(repairSheet).getByLabelText("名称"), "Repaired");
+    await user.click(within(repairSheet).getByRole("checkbox", { name: "Text" }));
+    await user.type(within(repairSheet).getByLabelText("Context Window"), "100000");
+    await user.type(within(repairSheet).getByLabelText("Max Tokens"), "1000");
+    expect(within(repairSheet).getByLabelText("Model ID")).toHaveAttribute("readonly");
+    await user.click(within(repairSheet).getByRole("button", { name: "保存模型" }));
+    await waitFor(() => expect(editModel).toHaveBeenCalledWith(expect.objectContaining({ modelId: "incomplete", model: expect.objectContaining({ name: "Repaired", input: ["text"], contextWindow: 100000, maxTokens: 1000 }) })));
     await user.click(screen.getByRole("button", { name: "Model 操作 gpt-5.6-sol" }));
     await user.click(screen.getByRole("menuitem", { name: "复制" }));
     const copySheet = await screen.findByRole("dialog");
     expect(within(copySheet).getByLabelText("Model ID")).toHaveValue("gpt-5.6-sol-copy");
     expect(within(copySheet).getByLabelText("名称")).toHaveValue("Sol");
-    await user.click(within(copySheet).getByRole("button", { name: "取消" }));
+    await user.clear(within(copySheet).getByLabelText("Model ID"));
+    await user.type(within(copySheet).getByLabelText("Model ID"), "copied-model");
+    await user.click(within(copySheet).getByRole("button", { name: "保存模型" }));
+    await waitFor(() => expect(createModel).toHaveBeenCalledWith(expect.objectContaining({ model: expect.objectContaining({ id: "copied-model", name: "Sol" }) })));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
 
 
@@ -1593,6 +1607,7 @@ describe("React page seam", () => {
     await user.click(screen.getByRole("menuitem", { name: "删除" }));
     const confirmation = await screen.findByRole("heading", { name: "删除模型？" });
     expect(confirmation.closest('[role="dialog"]')).toHaveTextContent("此操作会创建备份");
+    expect(confirmation.closest('[role="dialog"]')).toHaveTextContent("modelRoles[\"default\"]");
     await user.click(within(confirmation.closest('[role="dialog"]') as HTMLElement).getByRole("button", { name: "删除模型" }));
     expect(await screen.findByText("无法删除 Model：仍有配置引用。")).toBeVisible();
     expect(deleteModel).toHaveBeenCalledTimes(1);
