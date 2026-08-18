@@ -130,15 +130,16 @@ export type OverviewModel = {
   contextWindow: number | null;
   maxTokens: number | null;
   complete: boolean;
+  unsupportedProtocol: boolean;
   status: ModelStatus;
   editable: boolean;
   referenceCount: number;
   referencePaths: string[];
   readOnlyReason: string | null;
 };
-export type OverviewApiSource = "provider" | "model";
 export type OverviewAuthMode = "api-key" | "none" | "unsupported";
-export type OverviewRoleStatus = "configured" | "unconfigured" | "provider-missing" | "model-missing" | "incomplete" | "advanced";
+export type OverviewApiSource = "provider" | "model";
+export type OverviewRoleStatus = "configured" | "unconfigured" | "provider-missing" | "model-missing" | "incomplete" | "unsupported" | "advanced";
 export type OverviewInput = "text" | "image" | "unsupported";
 export type OverviewFile = {
   canonicalPath: string;
@@ -160,7 +161,18 @@ export type OverviewProvider = {
   readOnlyReason: string | null;
   models: OverviewModel[];
 };
-export type OverviewRole = { id: string; status: OverviewRoleStatus; selector: string | null };
+export type OverviewRole = { id: string; status: OverviewRoleStatus; selector: string | null; providerId: string | null; modelId: string | null; thinkingLevel: SupportedThinkingLevel | null };
+
+export type SupportedThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "auto";
+export type ModelRoleChange =
+  | { kind: "set"; roleId: string; providerId: string; modelId: string; thinkingLevel?: SupportedThinkingLevel }
+  | { kind: "create"; roleId: string; providerId: string; modelId: string; thinkingLevel?: SupportedThinkingLevel }
+  | { kind: "rename"; roleId: string; newRoleId: string; providerId: string; modelId: string; thinkingLevel?: SupportedThinkingLevel }
+  | { kind: "clear"; roleId: string }
+  | { kind: "delete"; roleId: string };
+export type SaveModelRolesInput = { openedConfigHash: string; changes: ModelRoleChange[] };
+export type SaveModelRolesResult = { changedRoleCount: number };
+
 export type OverviewDto = {
   state: OverviewState;
   omp: { status: "connected"; executablePath: string; version: string };
@@ -170,6 +182,9 @@ export type OverviewDto = {
   providers: OverviewProvider[];
   models: OverviewModel[];
   roles: OverviewRole[];
+  rolesEditable: boolean;
+  rolesAssignable: boolean;
+  rolesReadOnlyReason: string | null;
   emptyReason: string | null;
   nextAction: string | null;
   readOnlyReason: string | null;
@@ -235,6 +250,7 @@ export interface TauriClient {
   createModel(input: CreateModelInput): Promise<ModelMutationResult>;
   editModel(input: EditModelInput): Promise<ModelMutationResult>;
   deleteModel(input: DeleteModelInput): Promise<ModelMutationResult>;
+  saveModelRoles(input: SaveModelRolesInput): Promise<SaveModelRolesResult>;
   detectOmp(): Promise<StartupState>;
   selectOmpExecutable(): Promise<string | null>;
   validateSelectedOmp(executablePath: string): Promise<StartupState>;
@@ -252,6 +268,7 @@ export const tauriClient: TauriClient = {
   createModel: (input) => invoke<ModelMutationResult>("create_model", { input }),
   editModel: (input) => invoke<ModelMutationResult>("edit_model", { input }),
   deleteModel: (input) => invoke<ModelMutationResult>("delete_model", { input }),
+  saveModelRoles: (input) => invoke<SaveModelRolesResult>("save_model_roles", { input }),
   detectOmp: () => invoke<StartupState>("detect_omp"),
   selectOmpExecutable: async () => {
     const selected = await open({ multiple: false, directory: false, title: "选择 OMP 可执行文件" });

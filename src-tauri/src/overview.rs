@@ -8,7 +8,9 @@ use crate::{
     bundled_catalog::{self, BundledCatalog},
     error::AppError,
     redaction::{redact_diagnostic, redact_projection, url_projection_is_lossless},
-    target_configuration::{TargetConfigurationDiscovery, TargetConfigurationStatus},
+    target_configuration::{
+        ConfigurationFileStatus, TargetConfigurationDiscovery, TargetConfigurationStatus,
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +55,7 @@ pub(crate) enum OverviewRoleStatus {
     ProviderMissing,
     ModelMissing,
     Incomplete,
+    Unsupported,
     Advanced,
 }
 
@@ -67,6 +70,9 @@ pub struct OverviewDto {
     pub providers: Vec<ProviderSummaryDto>,
     pub models: Vec<ModelSummaryDto>,
     pub roles: Vec<RoleSummaryDto>,
+    pub roles_editable: bool,
+    pub roles_assignable: bool,
+    pub roles_read_only_reason: Option<String>,
     pub empty_reason: Option<String>,
     pub next_action: Option<String>,
     pub read_only_reason: Option<String>,
@@ -152,6 +158,7 @@ pub struct ModelSummaryDto {
     pub id: String,
     pub name: Option<String>,
     pub effective_api: Option<String>,
+    pub unsupported_protocol: bool,
     pub api_source: Option<OverviewApiSource>,
     pub has_base_url_override: bool,
     pub input: Vec<OverviewInput>,
@@ -172,6 +179,9 @@ pub struct RoleSummaryDto {
     pub id: String,
     pub status: OverviewRoleStatus,
     pub selector: Option<String>,
+    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
+    pub thinking_level: Option<String>,
 }
 
 #[derive(Clone)]
@@ -254,6 +264,38 @@ pub(crate) fn read_overview(
     let (roles, roles_structure_valid) = config_tree
         .map(|tree| project_roles(tree, &providers, catalog))
         .unwrap_or((Vec::new(), false));
+    let advanced_roles = roles
+        .iter()
+        .any(|role| role.status == OverviewRoleStatus::Advanced);
+    let config_writeable = target.status == TargetConfigurationStatus::Writable
+        && target.writable
+        && matches!(
+            target.config.status,
+            ConfigurationFileStatus::Normal | ConfigurationFileStatus::CanonicalWithAlternate
+        );
+    let roles_editable = config_writeable && roles_structure_valid && !advanced_roles;
+    let roles_assignable = roles_editable
+        && catalog.is_some()
+        && providers.iter().any(|provider| {
+            provider.editable
+                && provider.models.iter().any(|model| {
+                    model.editable
+                        && model.status == ModelStatus::Normal
+                        && model.complete
+                        && is_simple_role_selector(&provider.id, &model.id, None)
+                })
+        });
+    let roles_read_only_reason = if roles_editable {
+        None
+    } else if !roles_structure_valid {
+        Some("config.yml 的 modelRoles 结构无法安全编辑。请在外部修复后重新读取。".to_owned())
+    } else if advanced_roles {
+        Some("存在当前版本不支持的高级模型角色配置。".to_owned())
+    } else if !config_writeable {
+        Some("当前 config.yml 不允许安全保存模型角色。".to_owned())
+    } else {
+        Some("当前配置不允许安全编辑模型角色。".to_owned())
+    };
     let structure_invalid = !providers_structure_valid || !roles_structure_valid;
     let provider_count = providers
         .iter()
@@ -324,6 +366,9 @@ pub(crate) fn read_overview(
         providers,
         models,
         roles,
+        roles_editable,
+        roles_assignable,
+        roles_read_only_reason,
         empty_reason,
         next_action,
         read_only_reason,
@@ -533,6 +578,26 @@ pub(crate) fn is_editable_model_definition(
         })
 }
 
+pub(crate) fn is_assignable_model_definition(
+    tree: &Value,
+    provider_id: &str,
+    model_id: &str,
+    catalog: &BundledCatalog,
+) -> bool {
+    if !is_simple_role_selector(provider_id, model_id, None) {
+        return false;
+    }
+    let (providers, provider_ids_are_safe) = project_providers(tree, Some(catalog));
+    provider_ids_are_safe
+        && providers.iter().any(|provider| {
+            provider.id.eq_ignore_ascii_case(provider_id)
+                && provider.editable
+                && provider.models.iter().any(|model| {
+                    model.id.eq_ignore_ascii_case(model_id) && model.editable && model.complete
+                })
+        })
+}
+
 fn project_provider(
     provider_id: String,
     value: &Value,
@@ -598,6 +663,7 @@ fn project_provider(
                 model_value,
                 default_api.as_deref(),
                 provider_fields_read_only,
+                default_api_is_configured && default_api.is_none(),
             )
         })
         .collect::<Vec<_>>();
@@ -674,13 +740,13 @@ fn project_provider(
         models,
     }
 }
-
 fn project_model(
     provider_id: String,
     model_id: String,
     value: &Value,
     provider_api: Option<&str>,
     provider_read_only: bool,
+    provider_protocol_unsupported: bool,
 ) -> ModelSummaryDto {
     let Some(model) = mapping(value) else {
         return ModelSummaryDto {
@@ -688,6 +754,7 @@ fn project_model(
             id: model_id,
             name: None,
             effective_api: None,
+            unsupported_protocol: false,
             api_source: None,
             has_base_url_override: false,
             input: Vec::new(),
@@ -717,6 +784,8 @@ fn project_model(
     let model_api_overrides_provider =
         model_api_raw.is_some_and(|value| !matches!(value, Value::Null));
     let model_api = supported_api(model_api_raw);
+    let unsupported_protocol =
+        provider_protocol_unsupported || (model_api_overrides_provider && model_api.is_none());
     if model_api_overrides_provider && model_api.is_none() {
         read_only_reason.get_or_insert_with(|| "Model definition 使用了不支持的协议。".to_owned());
     }
@@ -808,6 +877,7 @@ fn project_model(
     ModelSummaryDto {
         provider_id,
         id: model_id,
+        unsupported_protocol,
         name,
         effective_api,
         api_source,
@@ -923,7 +993,10 @@ fn project_roles(
     let Some(roles_map) = mapping(roles) else {
         return (Vec::new(), false);
     };
-    let structure_valid = roles_map.keys().all(|key| matches!(key, Value::String(_)));
+    let structure_valid = roles_map.keys().all(|key| match key {
+        Value::String(id) => is_valid_role_id(id),
+        _ => false,
+    });
     let roles = named_entries(roles)
         .into_iter()
         .map(|(id, value)| match value {
@@ -931,25 +1004,29 @@ fn project_roles(
                 id,
                 status: OverviewRoleStatus::Unconfigured,
                 selector: None,
+                provider_id: None,
+                model_id: None,
+                thinking_level: None,
             },
             Value::String(selector) => project_role(id, selector, providers, catalog),
             _ => RoleSummaryDto {
                 id,
                 status: OverviewRoleStatus::Advanced,
                 selector: None,
+                provider_id: None,
+                model_id: None,
+                thinking_level: None,
             },
         })
         .collect();
     (roles, structure_valid)
 }
-
 fn project_role(
     id: String,
     selector: &str,
     providers: &[ProviderSummaryDto],
     catalog: Option<&BundledCatalog>,
 ) -> RoleSummaryDto {
-    let selector = selector.trim();
     let Some((provider_id, model_and_thinking)) = parse_role_selector(selector) else {
         return RoleSummaryDto {
             id,
@@ -959,51 +1036,159 @@ fn project_role(
                 OverviewRoleStatus::Advanced
             },
             selector: None,
+            provider_id: None,
+            model_id: None,
+            thinking_level: None,
         };
     };
-    let full_status = resolve_role_model(provider_id, model_and_thinking, providers, catalog);
+    let (model_id, thinking_level) = model_and_thinking
+        .rsplit_once(':')
+        .filter(|(_, thinking)| is_supported_thinking(thinking))
+        .map_or((model_and_thinking, None), |(model, thinking)| {
+            (model, Some(thinking))
+        });
+    if thinking_level.is_some() && model_id.is_empty() {
+        return RoleSummaryDto {
+            id,
+            status: OverviewRoleStatus::Advanced,
+            selector: None,
+            provider_id: None,
+            model_id: None,
+            thinking_level: None,
+        };
+    }
+    let full_status = resolve_role_model(provider_id, model_id, providers, catalog);
     match full_status {
-        OverviewRoleStatus::Configured | OverviewRoleStatus::Incomplete => {
-            role_summary(id, full_status, selector)
-        }
+        OverviewRoleStatus::Configured
+        | OverviewRoleStatus::Incomplete
+        | OverviewRoleStatus::Unsupported => role_summary(id, full_status, selector, providers),
         OverviewRoleStatus::ProviderMissing | OverviewRoleStatus::ModelMissing => {
-            let Some((base_model, thinking)) = model_and_thinking.rsplit_once(':') else {
-                return role_summary(id, full_status, selector);
-            };
-            if is_supported_thinking(thinking) {
-                return role_summary(
-                    id,
-                    resolve_role_model(provider_id, base_model, providers, catalog),
-                    selector,
-                );
-            }
-            if matches!(
-                resolve_role_model(provider_id, base_model, providers, catalog),
-                OverviewRoleStatus::Configured | OverviewRoleStatus::Incomplete
-            ) {
-                return RoleSummaryDto {
+            if thinking_level.is_some() || !model_and_thinking.contains(':') {
+                role_summary(id, full_status, selector, providers)
+            } else {
+                RoleSummaryDto {
                     id,
                     status: OverviewRoleStatus::Advanced,
                     selector: None,
-                };
+                    provider_id: None,
+                    model_id: None,
+                    thinking_level: None,
+                }
             }
-            role_summary(id, full_status, selector)
         }
         OverviewRoleStatus::Unconfigured | OverviewRoleStatus::Advanced => {
-            role_summary(id, full_status, selector)
+            role_summary(id, full_status, selector, providers)
         }
     }
 }
 
-fn role_summary(id: String, status: OverviewRoleStatus, selector: &str) -> RoleSummaryDto {
+pub(crate) fn model_roles_have_advanced(
+    config_tree: &Value,
+    models_tree: &Value,
+    catalog: Option<&BundledCatalog>,
+) -> bool {
+    let (providers, _) = project_providers(models_tree, catalog);
+    let (roles, structure_valid) = project_roles(config_tree, &providers, catalog);
+    !structure_valid
+        || roles
+            .iter()
+            .any(|role| role.status == OverviewRoleStatus::Advanced)
+}
+
+fn role_parts(
+    selector: &str,
+    providers: &[ProviderSummaryDto],
+) -> (Option<String>, Option<String>, Option<String>) {
+    let Some((provider_id, model_and_thinking)) = parse_role_selector(selector) else {
+        return (None, None, None);
+    };
+    let (model_id, thinking_level) = model_and_thinking
+        .rsplit_once(':')
+        .filter(|(_, thinking)| is_supported_thinking(thinking))
+        .map_or((model_and_thinking, None), |(model, thinking)| {
+            (model, Some(thinking))
+        });
+    let thinking_level = thinking_level.map(str::to_owned);
+    let fallback = || {
+        (
+            Some(provider_id.to_owned()),
+            Some(model_id.to_owned()),
+            thinking_level.clone(),
+        )
+    };
+    if !safe_role_component(provider_id) || !safe_role_component(model_id) {
+        return (None, None, None);
+    }
+    let Some(provider) = providers
+        .iter()
+        .find(|candidate| candidate.id.eq_ignore_ascii_case(provider_id))
+    else {
+        return fallback();
+    };
+    let Some(model) = provider
+        .models
+        .iter()
+        .find(|candidate| candidate.id.eq_ignore_ascii_case(model_id))
+    else {
+        return fallback();
+    };
+    (
+        Some(provider.id.clone()),
+        Some(model.id.clone()),
+        thinking_level,
+    )
+}
+
+fn safe_role_component(value: &str) -> bool {
+    value
+        .split('/')
+        .all(|component| redact_diagnostic(component) == component)
+}
+
+fn safe_role_selector(selector: &str) -> String {
+    let Some((provider_id, model_and_thinking)) = parse_role_selector(selector) else {
+        return redact_diagnostic(selector);
+    };
+    let model_id = model_and_thinking
+        .rsplit_once(':')
+        .filter(|(_, thinking)| is_supported_thinking(thinking))
+        .map_or(model_and_thinking, |(model, _)| model);
+    if redact_diagnostic(selector) != selector
+        || !safe_role_component(provider_id)
+        || !safe_role_component(model_id)
+    {
+        "[已脱敏]".to_owned()
+    } else {
+        selector.to_owned()
+    }
+}
+
+fn role_summary(
+    id: String,
+    status: OverviewRoleStatus,
+    selector: &str,
+    providers: &[ProviderSummaryDto],
+) -> RoleSummaryDto {
+    let (provider_id, model_id, thinking_level) = role_parts(selector, providers);
     RoleSummaryDto {
         id,
         status,
-        selector: Some(safe_projection_text(selector)),
+        selector: Some(safe_role_selector(selector)),
+        provider_id,
+        model_id,
+        thinking_level,
     }
 }
 
-fn parse_role_selector(selector: &str) -> Option<(&str, &str)> {
+pub(crate) fn is_valid_role_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && !value.chars().any(|character| {
+            character.is_whitespace() || character.is_control() || matches!(character, '/' | ',')
+        })
+}
+
+pub(crate) fn parse_role_selector(selector: &str) -> Option<(&str, &str)> {
     if selector.is_empty()
         || selector
             .chars()
@@ -1014,7 +1199,35 @@ fn parse_role_selector(selector: &str) -> Option<(&str, &str)> {
         return None;
     }
     let (provider, model) = selector.split_once('/')?;
+    if provider.is_empty() || model.is_empty() {
+        return None;
+    }
     Some((provider, model))
+}
+
+pub(crate) fn is_simple_role_selector(
+    provider_id: &str,
+    model_id: &str,
+    thinking_level: Option<&str>,
+) -> bool {
+    let mut selector = format!("{provider_id}/{model_id}");
+    if let Some(level) = thinking_level {
+        selector.push(':');
+        selector.push_str(level);
+    }
+    let Some((parsed_provider_id, parsed_model_with_thinking)) = parse_role_selector(&selector)
+    else {
+        return false;
+    };
+    let (parsed_model_id, parsed_thinking_level) = parsed_model_with_thinking
+        .rsplit_once(':')
+        .filter(|(_, thinking)| is_supported_thinking(thinking))
+        .map_or((parsed_model_with_thinking, None), |(model, thinking)| {
+            (model, Some(thinking))
+        });
+    parsed_provider_id == provider_id
+        && parsed_model_id == model_id
+        && parsed_thinking_level == thinking_level
 }
 
 fn resolve_role_model(
@@ -1054,6 +1267,8 @@ fn resolve_role_model(
     };
     if matching_models.next().is_some() {
         OverviewRoleStatus::Advanced
+    } else if model.unsupported_protocol {
+        OverviewRoleStatus::Unsupported
     } else if model.complete {
         OverviewRoleStatus::Configured
     } else {
@@ -1185,10 +1400,6 @@ fn valid_http_url(value: &str) -> bool {
         return false;
     };
     matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
-}
-
-fn safe_projection_text(value: &str) -> String {
-    redact_diagnostic(value)
 }
 
 fn scalar_bool(value: &Value) -> Option<bool> {

@@ -2,7 +2,6 @@ use std::{
     fs,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
 #[cfg(unix)]
@@ -21,9 +20,8 @@ use crate::{
     },
 };
 
-static BACKUP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
 const BACKUP_ALLOCATION_ATTEMPTS: usize = 128;
+const MAX_BACKUPS_PER_FILE: usize = 10;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ModelsWriteFailurePoint {
     BeforeBackup,
@@ -105,6 +103,14 @@ pub(crate) fn load_models_for_write(
         original_tree,
     })
 }
+pub(crate) fn load_config_for_write(
+    target: &TargetConfigurationDiscovery,
+    opened_config_hash: &str,
+) -> Result<LoadedModels, AppError> {
+    let mut config_target = target.clone();
+    config_target.models = target.config.clone();
+    load_models_for_write(&config_target, opened_config_hash)
+}
 
 pub(crate) fn write_models_mutation<M: ModelsMutation>(
     backup_root: &Path,
@@ -120,9 +126,9 @@ pub(crate) fn write_models_mutation<M: ModelsMutation>(
     create_current_backup(
         backup_root,
         &loaded.expected_target,
+        &loaded.models_path,
         &loaded.original_bytes,
         failure,
-        &BACKUP_SEQUENCE,
     )?;
     if failure == Some(ModelsWriteFailurePoint::AfterBackup) {
         return Err(injected_failure(format!("{verb}当前备份后发生故障。")));
@@ -395,19 +401,23 @@ pub(crate) fn ensure_resolved_file_path(
 }
 fn create_current_backup(
     backup_root: &Path,
-    resolved_target: &Path,
+    target_configuration: &Path,
+    resolved_file: &Path,
     original_bytes: &[u8],
     failure: Option<ModelsWriteFailurePoint>,
-    sequence: &AtomicU64,
 ) -> Result<(), AppError> {
-    let target_fingerprint = content_hash(resolved_target.to_string_lossy().as_bytes());
+    let target_fingerprint = content_hash(target_configuration.to_string_lossy().as_bytes());
     let target_directory = backup_root.join(target_fingerprint);
-    let directory = target_directory.join("models.yml");
+    let file_name = resolved_file
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("configuration.yml");
+    let directory = target_directory.join(file_name);
     for path in [backup_root, target_directory.as_path(), directory.as_path()] {
         create_private_backup_directory(path, failure)
             .map_err(|error| write_error("create_backup_directory", error))?;
     }
-    let (backup_path, mut backup) = allocate_backup_file(&directory, failure, sequence)
+    let (backup_path, mut backup) = allocate_backup_file(&directory, failure)
         .map_err(|error| write_error("create_models_backup", error))?;
     let result = (|| -> std::io::Result<()> {
         #[cfg(test)]
@@ -426,12 +436,75 @@ fn create_current_backup(
         Ok(())
     })();
     match result {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            if let Err(error) = prune_backup_files(&directory, &backup_path) {
+                tracing::warn!(
+                    operation = "prune_configuration_backups",
+                    cause = io_error_cause(error.kind()),
+                    "Configuration backup retention cleanup failed"
+                );
+            }
+            Ok(())
+        }
         Err(error) => {
             cleanup_partial_backup(&backup_path);
             Err(write_error("create_models_backup", error))
         }
     }
+}
+
+fn prune_backup_files(directory: &Path, protected_path: &Path) -> std::io::Result<()> {
+    let mut entries = fs::read_dir(directory)?
+        .map(|entry| {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                return Ok(None);
+            }
+            let modified = entry.metadata()?.modified()?;
+            Ok(Some((modified, entry.path())))
+        })
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if entries.len() <= MAX_BACKUPS_PER_FILE {
+        return Ok(());
+    }
+    entries.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| backup_sort_key(&left.1).cmp(&backup_sort_key(&right.1)))
+    });
+    let mut remaining = entries.len() - MAX_BACKUPS_PER_FILE;
+    for (_, path) in entries {
+        if remaining == 0 {
+            break;
+        }
+        if path == protected_path {
+            continue;
+        }
+        fs::remove_file(path)?;
+        remaining -= 1;
+    }
+    Ok(())
+}
+
+fn backup_sort_key(path: &Path) -> (u8, u64, String, String) {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if let Some(sequence) = backup_sequence_from_path(path) {
+        return (1, sequence, String::new(), file_name.to_owned());
+    }
+    let stem = file_name.strip_suffix(".yml").unwrap_or(file_name);
+    let (process_id, sequence) = stem.rsplit_once('-').unwrap_or((stem, ""));
+    (
+        0,
+        sequence.parse().unwrap_or(u64::MAX),
+        process_id.to_owned(),
+        file_name.to_owned(),
+    )
 }
 
 fn cleanup_partial_backup(backup_path: &Path) {
@@ -466,11 +539,9 @@ fn create_private_backup_directory(
 fn allocate_backup_file(
     directory: &Path,
     failure: Option<ModelsWriteFailurePoint>,
-    sequence: &AtomicU64,
 ) -> std::io::Result<(PathBuf, fs::File)> {
     for _ in 0..BACKUP_ALLOCATION_ATTEMPTS {
-        let backup_path =
-            backup_candidate_path(directory, sequence.fetch_add(1, Ordering::Relaxed));
+        let backup_path = backup_candidate_path(directory, next_backup_sequence(directory)?);
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -502,6 +573,20 @@ fn allocate_backup_file(
         std::io::ErrorKind::AlreadyExists,
         "could not allocate an unused models.yml backup path",
     ))
+}
+
+fn next_backup_sequence(directory: &Path) -> std::io::Result<u64> {
+    let mut next = 0;
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        if let Some(sequence) = backup_sequence_from_path(&entry.path()) {
+            next = next.max(sequence.saturating_add(1));
+        }
+    }
+    Ok(next)
 }
 
 fn set_private_backup_file_permissions(
@@ -563,7 +648,13 @@ fn inject_io_failure(
 }
 
 fn backup_candidate_path(directory: &Path, sequence: u64) -> PathBuf {
-    directory.join(format!("{}-{sequence}.yml", std::process::id()))
+    directory.join(format!("{sequence:020}.yml"))
+}
+
+fn backup_sequence_from_path(path: &Path) -> Option<u64> {
+    let file_name = path.file_name()?.to_str()?;
+    let stem = file_name.strip_suffix(".yml")?;
+    stem.parse().ok()
 }
 
 pub(crate) fn content_hash(bytes: &[u8]) -> String {
@@ -672,22 +763,139 @@ mod tests {
     fn current_backup_retries_when_its_first_candidate_exists() {
         let temporary = tempdir().unwrap();
         let backup_root = temporary.path().join("backups");
-        let target = temporary.path().join("agent/models.yml");
+        let target_configuration = temporary.path().join("agent");
+        let target_file = target_configuration.join("models.yml");
         let original = b"original models";
         let directory = backup_root
-            .join(content_hash(target.to_string_lossy().as_bytes()))
+            .join(content_hash(
+                target_configuration.to_string_lossy().as_bytes(),
+            ))
             .join("models.yml");
         fs::create_dir_all(&directory).unwrap();
-        let first_candidate = directory.join(format!("{}-0.yml", std::process::id()));
+        let first_candidate = backup_candidate_path(&directory, 0);
         fs::write(&first_candidate, b"existing backup").unwrap();
-        let sequence = AtomicU64::new(0);
 
-        create_current_backup(&backup_root, &target, original, None, &sequence).unwrap();
+        create_current_backup(
+            &backup_root,
+            &target_configuration,
+            &target_file,
+            original,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(fs::read(first_candidate).unwrap(), b"existing backup");
         assert_eq!(
-            fs::read(directory.join(format!("{}-1.yml", std::process::id()))).unwrap(),
+            fs::read(backup_candidate_path(&directory, 1)).unwrap(),
             original
         );
+    }
+    #[test]
+    fn current_backup_prunes_to_latest_ten_files() {
+        let temporary = tempdir().unwrap();
+        let backup_root = temporary.path().join("backups");
+        let target_configuration = temporary.path().join("agent");
+        let target_file = target_configuration.join("config.yml");
+        let directory = backup_root
+            .join(content_hash(
+                target_configuration.to_string_lossy().as_bytes(),
+            ))
+            .join("config.yml");
+
+        for _ in 0..11 {
+            create_current_backup(
+                &backup_root,
+                &target_configuration,
+                &target_file,
+                b"original config",
+                None,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            fs::read_dir(&directory).unwrap().count(),
+            MAX_BACKUPS_PER_FILE
+        );
+
+        let retained = (1..=10)
+            .map(|sequence| format!("{sequence:020}.yml"))
+            .collect::<std::collections::BTreeSet<_>>();
+        let actual = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual, retained);
+    }
+
+    #[test]
+    fn backup_pruning_removes_legacy_names_before_global_names_on_ties() {
+        use std::time::{Duration, SystemTime};
+
+        let temporary = tempdir().unwrap();
+        let directory = temporary.path().join("config.yml");
+        fs::create_dir_all(&directory).unwrap();
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let create_at_timestamp = |path: &Path| {
+            let file = fs::File::create(path).unwrap();
+            file.set_times(
+                fs::FileTimes::new()
+                    .set_accessed(timestamp)
+                    .set_modified(timestamp),
+            )
+            .unwrap();
+        };
+        for sequence in 0..9 {
+            create_at_timestamp(&directory.join(format!("1234-{sequence:020}.yml")));
+        }
+        for sequence in 0..2 {
+            create_at_timestamp(&backup_candidate_path(&directory, sequence));
+        }
+        let protected = backup_candidate_path(&directory, 1);
+
+        prune_backup_files(&directory, &protected).unwrap();
+
+        let actual = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut expected = std::collections::BTreeSet::new();
+        for sequence in 1..9 {
+            expected.insert(format!("1234-{sequence:020}.yml"));
+        }
+        expected.insert(format!("{0:020}.yml", 0));
+        expected.insert(format!("{0:020}.yml", 1));
+        assert_eq!(actual, expected);
+    }
+    #[test]
+    fn backup_pruning_orders_same_timestamp_sequences_numerically() {
+        use std::time::{Duration, SystemTime};
+
+        let temporary = tempdir().unwrap();
+        let directory = temporary.path().join("config.yml");
+        fs::create_dir_all(&directory).unwrap();
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        for sequence in 0..12 {
+            let path = backup_candidate_path(&directory, sequence);
+            let file = fs::File::create(&path).unwrap();
+            file.set_times(
+                fs::FileTimes::new()
+                    .set_accessed(timestamp)
+                    .set_modified(timestamp),
+            )
+            .unwrap();
+        }
+        let protected = backup_candidate_path(&directory, 11);
+
+        prune_backup_files(&directory, &protected).unwrap();
+
+        let actual = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = (2..=11)
+            .map(|sequence| format!("{sequence:020}.yml"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual, expected);
     }
 }

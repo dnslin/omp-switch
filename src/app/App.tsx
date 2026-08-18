@@ -11,6 +11,7 @@ import { ModelCreateSheet } from "./ModelCreateSheet";
 import { OverviewPage } from "./OverviewPage";
 import { ProviderEditDialog } from "./ProviderEditDialog";
 import { ProvidersPage } from "./ProvidersPage";
+import { ModelRolesPage } from "./ModelRolesPage";
 import { useOverviewLoad } from "./overview-load";
 import { fileStatusView, providerAuthSummary, startupShellStatus, targetConfigurationStatusView, type RowStatus } from "./omp-presentation";
 
@@ -298,7 +299,6 @@ function formatIssueLocation(line: number | null, column: number | null) {
 
 
 const routeCopy = {
-  roles: ["角色", "管理 OMP 模型角色。", "角色管理将在后续工单中实现。"],
   settings: ["设置", "配置 OMP 路径、主题与轻量界面偏好。", "设置能力将在后续工单中扩展；当前不会保存任何 Provider、Model definition、Model role 或 Direct API Key。"],
 } as const;
 
@@ -351,18 +351,6 @@ const providerDetailLoadCopy = {
   requestFailure: "无法读取 Provider 详情",
 };
 
-function PlaceholderPage({ page }: { page: keyof typeof routeCopy }) {
-  const [title, description, message] = routeCopy[page];
-  return (
-    <MainShell>
-      <PageTitle title={title} description={description} />
-      <Card title="当前状态">
-        <StatusIndicator tone="neutral">尚未检测 OMP</StatusIndicator>
-        <p className="placeholder-card">{message}</p>
-      </Card>
-    </MainShell>
-  );
-}
 
 function ProviderDetailPage() {
   const { providerId } = useParams();
@@ -565,7 +553,7 @@ export function App() {
         <Route path="/overview" element={<OverviewPage />} />
         <Route path="/providers" element={<ProvidersPage />} />
         <Route path="/providers/:providerId" element={<ProviderDetailPage />} />
-        <Route path="/roles" element={<PlaceholderPage page="roles" />} />
+        <Route path="/roles" element={<ModelRolesPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>

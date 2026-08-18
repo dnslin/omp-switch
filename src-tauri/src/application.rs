@@ -19,6 +19,7 @@ pub(crate) use crate::provider_mutation::{
     CreateCustomProviderInput, CreateCustomProviderResult, EditCustomProviderInput,
     EditCustomProviderResult,
 };
+pub(crate) use crate::role_mutation::{SaveModelRolesInput, SaveModelRolesResult};
 
 #[cfg(test)]
 pub(crate) use crate::model_mutation::{ModelDefinitionFields, ModelEditFields};
@@ -36,8 +37,10 @@ use crate::{
     overview::{OverviewDto, OverviewReadResult, read_overview},
     provider_mutation,
     redaction::redact_diagnostic,
+    role_mutation,
     target_configuration::{
-        TargetConfigurationDiscovery, TargetConfigurationStatus, TargetInitializationExpectation,
+        ConfigurationFileStatus, TargetConfigurationDiscovery, TargetConfigurationStatus,
+        TargetInitializationExpectation,
     },
 };
 
@@ -944,6 +947,73 @@ impl AppService {
         result
     }
 
+    pub fn save_model_roles(
+        &self,
+        input: SaveModelRolesInput,
+    ) -> Result<SaveModelRolesResult, AppError> {
+        let _detection = self.detection_lock.lock();
+        let (target, catalog) = self.prepare_role_write()?;
+        let result = role_mutation::save_model_roles(
+            &target,
+            &self.backup_root,
+            catalog,
+            &input,
+            self.take_models_write_failure(),
+        );
+        if result.is_ok() {
+            self.clear_configuration_snapshot();
+        }
+        result
+    }
+
+    fn prepare_role_write(
+        &self,
+    ) -> Result<
+        (
+            Box<TargetConfigurationDiscovery>,
+            Option<&'static bundled_catalog::BundledCatalog>,
+        ),
+        AppError,
+    > {
+        let state = self.detect_omp_internal();
+        let (version, target) = match state {
+            StartupState::OmpReady {
+                version,
+                target_configuration,
+                requires_confirmation: false,
+                ..
+            } => (version, target_configuration),
+            StartupState::OmpReady { .. } => {
+                return Err(AppError::new(
+                    "role-write-confirmation-required",
+                    "尚未确认新的 OMP 与 Target configuration，不能保存模型角色。",
+                    "请先在设置页面确认 OMP 与 Target configuration 后重试。",
+                ));
+            }
+            _ => {
+                return Err(AppError::new(
+                    "role-write-unavailable",
+                    "无法重新验证 OMP 的 Target configuration。",
+                    "请重新检测或重新选择 OMP。",
+                ));
+            }
+        };
+        if target.status != TargetConfigurationStatus::Writable
+            || !target.writable
+            || !matches!(
+                target.config.status,
+                ConfigurationFileStatus::Normal | ConfigurationFileStatus::CanonicalWithAlternate
+            )
+        {
+            return Err(AppError::new(
+                "role-write-unavailable",
+                "当前 config.yml 不允许安全保存模型角色。",
+                "请重新读取配置并处理 config.yml 的当前状态。",
+            ));
+        }
+        Ok((target, bundled_catalog::for_version(&version)?))
+    }
+
     fn prepare_model_write(
         &self,
         operation: ModelWriteOperation,
@@ -1252,6 +1322,17 @@ pub fn delete_model(
     log_command_result("delete_model", started_at, &result);
     result
 }
+#[tauri::command]
+pub fn save_model_roles(
+    service: tauri::State<'_, AppService>,
+    input: SaveModelRolesInput,
+) -> Result<SaveModelRolesResult, AppError> {
+    let started_at = Instant::now();
+    let result = service.save_model_roles(input);
+    log_command_result("save_model_roles", started_at, &result);
+    result
+}
+
 #[tauri::command]
 pub fn detect_omp(service: tauri::State<'_, AppService>) -> StartupState {
     let started_at = Instant::now();

@@ -1,0 +1,22 @@
+Issue #11 visual comparison
+
+Reference: Pencil node i5xFP (06 Page / Roles Dirty), exported as `designs/50-roles-dirty.png` at 1536x1024.
+Implementation: `.artifacts/issue-11/roles-normal-tauri-1536x961.png` and `.artifacts/issue-11/roles-dirty-tauri-1536x961.png`, captured from the running Tauri window with Orca computer-use at 1536x961 logical pixels.
+
+Matched structure and dimensions:
+- Native macOS title bar is used; no second HTML title bar is drawn.
+- Sidebar width, active Roles navigation state, footer status block, page left/right padding, title/description hierarchy, and search control follow the reference tokens.
+- Search width is 352 px; header overflow-menu button is 54 px; table header height is 52 px; role row horizontal cell padding is 18 px.
+- The table uses the Pencil column geometry exactly: Role 192, Description 246, Provider 156, Model 174, Thinking 158, Status 152, Actions 106, total 1184 px; row height and border rhythm match the reference.
+- Dirty state reproduces the reference advisor row: amber row background, `待保存` status indicator, amber unsaved marker, and enabled primary save action without changing the normal table skeleton.
+- Closed Provider, Model, and Thinking controls render as text-first accessible comboboxes; focus styling remains available when a selector is active.
+- Custom `researcher` row shows the complete `自定义` badge without clipping.
+- Selectors expose only the approved Thinking Level values and the action order matches the reference.
+- Normal and dirty captures share the same table skeleton; invalid simple references disable only the unsafe Thinking/editor save path while Provider/Model repair controls remain visible, and advanced/read-only behavior is covered by the same routed page tests.
+- Mixed-case stable Provider/Model IDs keep the original item casing in controlled comboboxes; a real `__none__` Model ID is encoded separately from the empty option.
+
+Capture data:
+- Ten built-in roles are populated from `test-provider-issue10`; `researcher` is the custom role.
+- Dirty draft: `advisor` Model `gpt-5.6-luna` → `gpt-5.6-sol`; Thinking remains `max`.
+
+Viewport note: the reference Pencil frame is 1536x1024. The macOS desktop display exposes a 1536x961 logical app window below the native title/menu area; this is the largest real Tauri capture in the verification environment. The native title-bar height differs from Pencil's simulated frame by the required native-window constraint.
