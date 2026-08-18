@@ -83,16 +83,41 @@ export type EditCustomProviderInput = {
 
 
 export type EditCustomProviderResult = { providerId: string };
-export type OverviewApiSource = "provider" | "model";
-export type OverviewAuthMode = "api-key" | "none" | "unsupported";
-export type OverviewRoleStatus = "configured" | "unconfigured" | "provider-missing" | "model-missing" | "incomplete" | "advanced";
-export type OverviewInput = "text" | "image" | "unsupported";
-export type OverviewFile = {
-  canonicalPath: string;
-  resolvedPath: string | null;
-  status: ConfigurationFileStatus;
-  contentHash: string | null;
+export type ModelStatus = "normal" | "incomplete" | "read-only";
+
+export type ModelDefinitionFields = {
+  id: string;
+  name: string;
+  api?: OverviewApi;
+  reasoning: boolean;
+  input: Array<"text" | "image">;
+  contextWindow: number;
+  maxTokens: number;
 };
+
+export type ModelEditFields = Omit<ModelDefinitionFields, "id">;
+
+export type CreateModelInput = {
+  openedModelsHash: string;
+  providerId: string;
+  model: ModelDefinitionFields;
+};
+
+export type EditModelInput = {
+  openedModelsHash: string;
+  providerId: string;
+  modelId: string;
+  model: ModelEditFields;
+};
+
+export type DeleteModelInput = {
+  openedModelsHash: string;
+  openedConfigHash: string;
+  providerId: string;
+  modelId: string;
+};
+
+export type ModelMutationResult = { providerId: string; modelId: string };
 export type OverviewModel = {
   providerId: string;
   id: string;
@@ -105,8 +130,21 @@ export type OverviewModel = {
   contextWindow: number | null;
   maxTokens: number | null;
   complete: boolean;
+  status: ModelStatus;
   editable: boolean;
+  referenceCount: number;
+  referencePaths: string[];
   readOnlyReason: string | null;
+};
+export type OverviewApiSource = "provider" | "model";
+export type OverviewAuthMode = "api-key" | "none" | "unsupported";
+export type OverviewRoleStatus = "configured" | "unconfigured" | "provider-missing" | "model-missing" | "incomplete" | "advanced";
+export type OverviewInput = "text" | "image" | "unsupported";
+export type OverviewFile = {
+  canonicalPath: string;
+  resolvedPath: string | null;
+  status: ConfigurationFileStatus;
+  contentHash: string | null;
 };
 export type OverviewProviderClassification = "custom" | "built-in-override" | "advanced" | "unsupported" | "unavailable";
 export type OverviewProvider = {
@@ -194,6 +232,9 @@ export interface TauriClient {
   getOverviewLoad(): Promise<OverviewLoad>;
   createCustomProvider(input: CreateCustomProviderInput): Promise<CreateCustomProviderResult>;
   editCustomProvider(input: EditCustomProviderInput): Promise<EditCustomProviderResult>;
+  createModel(input: CreateModelInput): Promise<ModelMutationResult>;
+  editModel(input: EditModelInput): Promise<ModelMutationResult>;
+  deleteModel(input: DeleteModelInput): Promise<ModelMutationResult>;
   detectOmp(): Promise<StartupState>;
   selectOmpExecutable(): Promise<string | null>;
   validateSelectedOmp(executablePath: string): Promise<StartupState>;
@@ -203,13 +244,14 @@ export interface TauriClient {
   getUiSettings(): Promise<UiSettings>;
   saveUiSettings(settings: UiSettingsUpdate): Promise<UiSettings>;
 }
-
-
 export const tauriClient: TauriClient = {
   getStartupState: () => invoke<StartupState>("get_startup_state"),
   getOverviewLoad: () => invoke<OverviewLoad>("get_overview_load"),
   createCustomProvider: (input) => invoke<CreateCustomProviderResult>("create_custom_provider", { input }),
   editCustomProvider: (input) => invoke<EditCustomProviderResult>("edit_custom_provider", { input }),
+  createModel: (input) => invoke<ModelMutationResult>("create_model", { input }),
+  editModel: (input) => invoke<ModelMutationResult>("edit_model", { input }),
+  deleteModel: (input) => invoke<ModelMutationResult>("delete_model", { input }),
   detectOmp: () => invoke<StartupState>("detect_omp"),
   selectOmpExecutable: async () => {
     const selected = await open({ multiple: false, directory: false, title: "选择 OMP 可执行文件" });
@@ -222,6 +264,8 @@ export const tauriClient: TauriClient = {
   getUiSettings: () => invoke<UiSettings>("get_ui_settings"),
   saveUiSettings: (settings) => invoke<UiSettings>("save_ui_settings", { settings }),
 };
+
+
 
 const TauriClientContext = createContext<TauriClient | null>(null);
 

@@ -437,7 +437,7 @@ Model.api ?? Provider.defaultApi
 - 含 `thinking`、`headers`、`compat`、`cost`、`supportsTools`、`premiumMultiplier`、`omitMaxOutputTokens`、`contextPromotionTarget`、`compactionModel`、`remoteCompaction` 或其他不受支持字段。
 - 属于高级或 bundled override Provider。
 
-只读模型仍可以通过普通删除确认删除完整节点；其中高级字段会随模型节点一起删除。
+只读模型不提供复制、删除或测试入口；issue #10 的 Model 管理验收采用此更保守规则。
 
 ### 8.5 复制与删除
 
@@ -454,6 +454,8 @@ Model.api ?? Provider.defaultApi
 - 自动清除简单 `modelRoles` 引用。
 - 遍历完整 `config.yml` 检测其他或疑似选择器引用；发现时阻止删除并显示配置路径，不自动修改其他路径。
 - 使用跨文件事务和备份。
+
+实现状态（issue #10）：Provider 详情已通过 Rust application-service intent seam 与 React routed page seam 管理普通 Model definition 的列表、搜索、新增、编辑、复制和无引用删除。Model definition 按 `normal`、`incomplete`、`read-only` 分类；Stable ID 不可变，协议来源返回继承或模型覆盖，所有修改复用 models.yml 的 Hash、备份、临时重解析、未触及路径比较和原子替换。删除在提交前重新校验 config.yml 真实路径与 Hash，并识别大小写无关的精确、Thinking、数组和 Provider 通配符选择器；存在引用或删除最后模型时停止。未知字段仅保留在完整树中，不进入普通编辑表单。
 
 ## 9. 模型角色
 

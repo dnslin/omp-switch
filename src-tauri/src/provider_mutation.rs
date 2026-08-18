@@ -43,7 +43,7 @@ pub(crate) enum SupportedApi {
 }
 
 impl SupportedApi {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::OpenAiCompletions => "openai-completions",
             Self::OpenAiResponses => "openai-responses",
@@ -68,7 +68,7 @@ pub(crate) enum SupportedInput {
 }
 
 impl SupportedInput {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Text => "text",
             Self::Image => "image",
@@ -166,6 +166,8 @@ pub(crate) enum ProviderMutationFailurePoint {
     TemporaryFileWriteFailure,
     #[cfg(test)]
     TemporaryFileSyncFailure,
+    #[cfg(test)]
+    MutateConfigBeforeReplacement,
 }
 
 struct ValidatedCreate {
@@ -187,14 +189,19 @@ enum ValidatedApiKeyIntent {
     Delete,
 }
 
-trait ProviderMutation {
+pub(crate) trait ModelsMutation {
     fn verb(&self) -> &'static str;
     fn serialization_error(&self) -> (&'static str, &'static str, &'static str);
     fn apply(&self, tree: &mut Value) -> Result<(), AppError>;
     fn validate(&self, candidate: &Value, original: &Value) -> Result<(), AppError>;
+    fn validate_before_commit(&self, _loaded: &LoadedModels) -> Result<(), AppError> {
+        Ok(())
+    }
+    #[cfg(test)]
+    fn mutate_external_state_for_test(&self) {}
 }
 
-impl ProviderMutation for ValidatedCreate {
+impl ModelsMutation for ValidatedCreate {
     fn verb(&self) -> &'static str {
         "创建"
     }
@@ -217,7 +224,7 @@ impl ProviderMutation for ValidatedCreate {
     }
 }
 
-impl ProviderMutation for ValidatedEdit {
+impl ModelsMutation for ValidatedEdit {
     fn verb(&self) -> &'static str {
         "编辑"
     }
@@ -245,12 +252,12 @@ impl ProviderMutation for ValidatedEdit {
     }
 }
 
-struct LoadedModels {
-    expected_target: PathBuf,
-    models_path: PathBuf,
-    original_bytes: Vec<u8>,
-    original_hash: String,
-    original_tree: Value,
+pub(crate) struct LoadedModels {
+    pub(crate) expected_target: PathBuf,
+    pub(crate) models_path: PathBuf,
+    pub(crate) original_bytes: Vec<u8>,
+    pub(crate) original_hash: String,
+    pub(crate) original_tree: Value,
 }
 
 pub(crate) fn create_custom_provider(
@@ -266,7 +273,7 @@ pub(crate) fn create_custom_provider(
         provider_id: validated.provider_id.clone(),
         model_id: validated.model_id.clone(),
     };
-    write_provider_mutation(backup_root, &loaded, &validated, failure)?;
+    write_models_mutation(backup_root, &loaded, &validated, failure)?;
     Ok(result)
 }
 
@@ -283,12 +290,12 @@ pub(crate) fn edit_custom_provider(
     let result = EditCustomProviderResult {
         provider_id: validated.provider_id.clone(),
     };
-    write_provider_mutation(backup_root, &loaded, &validated, failure)
+    write_models_mutation(backup_root, &loaded, &validated, failure)
         .map_err(remap_edit_operation_error)?;
     Ok(result)
 }
 
-fn load_models_for_write(
+pub(crate) fn load_models_for_write(
     target: &TargetConfigurationDiscovery,
     opened_models_hash: &str,
 ) -> Result<LoadedModels, AppError> {
@@ -321,7 +328,7 @@ fn load_models_for_write(
     })
 }
 
-fn write_provider_mutation<M: ProviderMutation>(
+pub(crate) fn write_models_mutation<M: ModelsMutation>(
     backup_root: &Path,
     loaded: &LoadedModels,
     mutation: &M,
@@ -421,6 +428,11 @@ fn write_provider_mutation<M: ProviderMutation>(
     if content_hash(&latest_bytes) != loaded.original_hash {
         return Err(hash_conflict());
     }
+    #[cfg(test)]
+    if failure == Some(ProviderMutationFailurePoint::MutateConfigBeforeReplacement) {
+        mutation.mutate_external_state_for_test();
+    }
+    mutation.validate_before_commit(loaded)?;
     if failure == Some(ProviderMutationFailurePoint::BeforeReplacement) {
         return Err(injected_failure(format!("{verb}原子替换前发生故障。")));
     }
@@ -541,7 +553,9 @@ fn yaml_error(
     AppError::new(code, format!("{message}：{diagnostic}"), action)
 }
 
-fn validate_writable_target(target: &TargetConfigurationDiscovery) -> Result<(), AppError> {
+pub(crate) fn validate_writable_target(
+    target: &TargetConfigurationDiscovery,
+) -> Result<(), AppError> {
     if target.status != TargetConfigurationStatus::Writable || !target.writable {
         return Err(AppError::new(
             "provider-create-unavailable",
@@ -562,7 +576,7 @@ fn validate_writable_target(target: &TargetConfigurationDiscovery) -> Result<(),
     Ok(())
 }
 
-fn resolved_path(path: &Option<String>, label: &str) -> Result<PathBuf, AppError> {
+pub(crate) fn resolved_path(path: &Option<String>, label: &str) -> Result<PathBuf, AppError> {
     path.as_deref().map(PathBuf::from).ok_or_else(|| {
         AppError::new(
             "provider-create-unavailable",
@@ -572,27 +586,38 @@ fn resolved_path(path: &Option<String>, label: &str) -> Result<PathBuf, AppError
     })
 }
 
-fn ensure_resolved_models_path(models_path: &Path, expected_target: &Path) -> Result<(), AppError> {
+pub(crate) fn ensure_resolved_models_path(
+    models_path: &Path,
+    expected_target: &Path,
+) -> Result<(), AppError> {
+    ensure_resolved_file_path(models_path, expected_target, "models.yml")
+}
+
+pub(crate) fn ensure_resolved_file_path(
+    file_path: &Path,
+    expected_target: &Path,
+    label: &str,
+) -> Result<(), AppError> {
     let resolved_target = expected_target
         .canonicalize()
         .map_err(|error| write_error("resolve_target", error))?;
-    let resolved_models = models_path
+    let resolved_file = file_path
         .canonicalize()
-        .map_err(|error| write_error("resolve_models", error))?;
-    if resolved_target != expected_target || resolved_models != models_path {
+        .map_err(|error| write_error("resolve_configuration_file", error))?;
+    if resolved_target != expected_target || resolved_file != file_path {
         return Err(AppError::new(
             "provider-create-target-changed",
-            "Target configuration 的真实文件目标已变化。",
+            format!("Target configuration 的 {label} 真实文件目标已变化。"),
             "请重新检测 OMP；OMP Switch 不会向变化后的路径写入。",
         ));
     }
-    if !fs::metadata(&resolved_models)
-        .map_err(|error| write_error("inspect_models", error))?
+    if !fs::metadata(&resolved_file)
+        .map_err(|error| write_error("inspect_configuration_file", error))?
         .is_file()
     {
         return Err(AppError::new(
             "provider-create-target-changed",
-            "models.yml 的真实目标不是普通文件。",
+            format!("{label} 的真实目标不是普通文件。"),
             "请修复路径后重新检测 OMP。",
         ));
     }
@@ -917,8 +942,7 @@ fn provider_id_error() -> AppError {
         "请移除空白、/、: 和其他不支持的字符。",
     )
 }
-
-fn normalize_model_id(value: &str) -> Result<String, AppError> {
+pub(crate) fn normalize_model_id(value: &str) -> Result<String, AppError> {
     let normalized = value.trim();
     if normalized.is_empty()
         || normalized
@@ -1467,7 +1491,7 @@ fn backup_candidate_path(directory: &Path, sequence: u64) -> PathBuf {
     directory.join(format!("{}-{sequence}.yml", std::process::id()))
 }
 
-fn content_hash(bytes: &[u8]) -> String {
+pub(crate) fn content_hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))

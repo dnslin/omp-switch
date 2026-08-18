@@ -549,7 +549,7 @@ type ModelForm = {
 - 含 `thinking`、`headers`、`compat`、`cost`、`supportsTools`、`premiumMultiplier`、`omitMaxOutputTokens`、`contextPromotionTarget`、`compactionModel`、`remoteCompaction` 或未知字段。
 - 所属 Provider 只读。
 
-允许通过与普通模型相同的删除确认删除整个节点；高级字段会同时删除。
+只读模型不提供复制、删除或测试入口；issue #10 的 Model 管理验收采用此更保守规则。
 
 ### 10.7 复制模型
 
@@ -557,6 +557,8 @@ type ModelForm = {
 - 复制表单支持字段。
 - 临时 ID 按不区分大小写确保不冲突。
 - 保存前不修改配置。
+
+实现状态（issue #10）：Model 列表 DTO 额外返回 `status`、`referenceCount` 和安全引用路径；不完整对象仍可进入修复表单，但缺失字段保持空值，补齐前不能保存或测试。普通模型复制只预填支持字段并要求新的唯一 ID；只读模型的复制、删除和测试入口均锁定。删除确认展示引用和最后模型阻止原因，Rust 在 models.yml 原子替换前再次比较 config.yml Hash，外部新增引用时拒绝提交。
 
 ## 11. 角色页面与规则
 

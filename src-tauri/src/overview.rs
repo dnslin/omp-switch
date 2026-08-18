@@ -131,6 +131,14 @@ pub(crate) enum ProviderClassification {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+pub(crate) enum ModelStatus {
+    Normal,
+    Incomplete,
+    ReadOnly,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum OverviewInput {
     Text,
     Image,
@@ -151,7 +159,10 @@ pub struct ModelSummaryDto {
     pub context_window: Option<u64>,
     pub max_tokens: Option<u64>,
     pub complete: bool,
+    pub status: ModelStatus,
     pub editable: bool,
+    pub reference_count: usize,
+    pub reference_paths: Vec<String>,
     pub read_only_reason: Option<String>,
 }
 
@@ -228,12 +239,14 @@ pub(crate) fn read_overview(
         Some(path) => Some(read_document(path, "config.yml")?),
         None => None,
     };
-
     let models_tree = models_document.as_ref().map(|document| &document.tree);
     let config_tree = config_document.as_ref().map(|document| &document.tree);
-    let (providers, providers_structure_valid) = models_tree
+    let (mut providers, providers_structure_valid) = models_tree
         .map(|tree| project_providers(tree, catalog))
         .unwrap_or((Vec::new(), false));
+    if let Some(config_tree) = config_tree {
+        annotate_model_references(&mut providers, config_tree);
+    }
     let models = providers
         .iter()
         .flat_map(|provider| provider.models.iter().cloned())
@@ -481,6 +494,7 @@ fn project_providers(
             provider.read_only_reason =
                 Some("Provider ID 在全部 providers 中必须按不区分大小写唯一。".to_owned());
             for model in &mut provider.models {
+                model.status = ModelStatus::ReadOnly;
                 model.editable = false;
                 model.read_only_reason =
                     Some("所属 Provider ID 存在不区分大小写的冲突，只能查看。".to_owned());
@@ -500,6 +514,23 @@ pub(crate) fn is_editable_custom_provider(
         && providers
             .iter()
             .any(|provider| provider.id == provider_id && provider.editable)
+}
+pub(crate) fn is_editable_model_definition(
+    tree: &Value,
+    provider_id: &str,
+    model_id: &str,
+    catalog: &BundledCatalog,
+) -> bool {
+    let (providers, provider_ids_are_safe) = project_providers(tree, Some(catalog));
+    provider_ids_are_safe
+        && providers.iter().any(|provider| {
+            provider.id == provider_id
+                && provider.editable
+                && provider
+                    .models
+                    .iter()
+                    .any(|model| model.id == model_id && model.editable)
+        })
 }
 
 fn project_provider(
@@ -617,6 +648,7 @@ fn project_provider(
     };
     if !editable {
         for model in &mut models {
+            model.status = ModelStatus::ReadOnly;
             model.editable = false;
             if model.read_only_reason.is_none() {
                 model.read_only_reason = read_only_reason.clone();
@@ -663,7 +695,10 @@ fn project_model(
             context_window: None,
             max_tokens: None,
             complete: false,
+            status: ModelStatus::ReadOnly,
             editable: false,
+            reference_count: 0,
+            reference_paths: Vec::new(),
             read_only_reason: Some("Model definition 不是可识别的对象。".to_owned()),
         };
     };
@@ -740,12 +775,16 @@ fn project_model(
         && context_window.is_some_and(|value| value > 0)
         && max_tokens.is_some_and(|value| value > 0)
         && effective_api.is_some();
-    if !complete {
-        read_only_reason.get_or_insert_with(|| "Model definition 配置不完整。".to_owned());
-    }
     if provider_read_only {
         read_only_reason.get_or_insert_with(|| "所属 Provider 只读。".to_owned());
     }
+    let status = if read_only_reason.is_some() {
+        ModelStatus::ReadOnly
+    } else if complete {
+        ModelStatus::Normal
+    } else {
+        ModelStatus::Incomplete
+    };
     ModelSummaryDto {
         provider_id,
         id: model_id,
@@ -758,9 +797,87 @@ fn project_model(
         context_window,
         max_tokens,
         complete,
+        status,
         editable: read_only_reason.is_none(),
+        reference_count: 0,
+        reference_paths: Vec::new(),
         read_only_reason,
     }
+}
+
+fn annotate_model_references(providers: &mut [ProviderSummaryDto], config_tree: &Value) {
+    for provider in providers {
+        for model in &mut provider.models {
+            model.reference_paths = model_reference_paths(config_tree, &provider.id, &model.id);
+            model.reference_count = model.reference_paths.len();
+        }
+    }
+}
+
+pub(crate) fn model_reference_paths(
+    config_tree: &Value,
+    provider_id: &str,
+    model_id: &str,
+) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_model_reference_paths(config_tree, "", provider_id, model_id, &mut paths);
+    paths
+}
+
+fn collect_model_reference_paths(
+    value: &Value,
+    path: &str,
+    provider_id: &str,
+    model_id: &str,
+    paths: &mut Vec<String>,
+) {
+    match value {
+        Value::Mapping(map) => {
+            for (key, child) in map {
+                let Some(key) = key.as_str() else { continue };
+                let child_path = if path.is_empty() {
+                    key.to_owned()
+                } else {
+                    format!("{path}[\"{key}\"]")
+                };
+                collect_model_reference_paths(child, &child_path, provider_id, model_id, paths);
+            }
+        }
+        Value::Sequence(values) => {
+            for (index, child) in values.iter().enumerate() {
+                collect_model_reference_paths(
+                    child,
+                    &format!("{path}[{index}]"),
+                    provider_id,
+                    model_id,
+                    paths,
+                );
+            }
+        }
+        Value::String(value) if is_model_selector_reference(value, provider_id, model_id) => {
+            paths.push(path.to_owned());
+        }
+        _ => {}
+    }
+}
+
+fn is_model_selector_reference(value: &str, provider_id: &str, model_id: &str) -> bool {
+    let Some((candidate_provider, candidate_model)) = value.split_once('/') else {
+        return false;
+    };
+    if bundled_catalog::normalize_id(candidate_provider)
+        != bundled_catalog::normalize_id(provider_id)
+    {
+        return false;
+    }
+    if candidate_model == "*" {
+        return true;
+    }
+    let candidate_model = candidate_model
+        .rsplit_once(':')
+        .filter(|(_, thinking)| is_supported_thinking(thinking))
+        .map_or(candidate_model, |(model, _)| model);
+    bundled_catalog::normalize_id(candidate_model) == bundled_catalog::normalize_id(model_id)
 }
 
 fn project_roles(
