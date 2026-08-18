@@ -22,6 +22,7 @@ export function useOverviewLoad(copy: OverviewLoadCopy) {
   const [startupState, setStartupState] = useState<StartupState | null>(null);
   const [error, setError] = useState<AppError | null>(null);
   const [loading, setLoading] = useState(true);
+  const [revision, setRevision] = useState(0);
   const requestId = useRef(0);
 
   const load = useCallback(async (clearBeforeLoad: boolean): Promise<AppError | null> => {
@@ -52,6 +53,7 @@ export function useOverviewLoad(copy: OverviewLoadCopy) {
       if (result.overview) {
         setError(null);
         setData(result.overview);
+        setRevision((current) => current + 1);
         return null;
       }
       const missingOverview = copy.missingOverview;
@@ -92,5 +94,5 @@ export function useOverviewLoad(copy: OverviewLoadCopy) {
         ? { title: "OMP 状态不可用", path: "配置目录不可用", status: "请重新读取 OMP", tone: "warning" }
         : { title: "正在检测 OMP", path: "配置目录检测中", status: "请稍候", tone: "warning" };
 
-  return { data, startupState, error, loading, reload, refresh, shellStatus };
+  return { data, startupState, error, loading, revision, reload, refresh, shellStatus };
 }

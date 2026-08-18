@@ -124,7 +124,7 @@ export type ModelTestResult = {
   success: boolean;
   providerId: string;
   modelId: string;
-  protocol: OverviewApi;
+  protocol: OverviewApi | "unknown";
   latencyMs: number;
   status?: number;
   message: string;

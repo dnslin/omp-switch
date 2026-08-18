@@ -360,26 +360,44 @@ function ProviderDetailPage() {
   const { providerId } = useParams();
   const client = useTauriClient();
   const modelTest = useModelTestRunner();
-  const { data, error, loading, reload, refresh, shellStatus } = useOverviewLoad(providerDetailLoadCopy);
-  useRefreshAfterModelTest({ ready: Boolean(data), loading, providerId, refresh });
+  const { data, error, loading, revision, reload, refresh, shellStatus } = useOverviewLoad(providerDetailLoadCopy);
+  useRefreshAfterModelTest({ ready: Boolean(data), loading, revision, refresh });
   const [editing, setEditing] = useState(false);
+  const [editingModelsHash, setEditingModelsHash] = useState<string | null>(null);
   const [modelSearch, setModelSearch] = useState("");
   const [modelEditor, setModelEditor] = useState<{ mode: "create" | "edit" | "view"; model?: OverviewModel; copy?: boolean } | null>(null);
+  const [modelEditorModelsHash, setModelEditorModelsHash] = useState<string | null>(null);
   const [deletingModel, setDeletingModel] = useState<OverviewModel | null>(null);
+  const [deleteHashes, setDeleteHashes] = useState<{ models: string; config: string } | null>(null);
   const [deleteError, setDeleteError] = useState<ReturnType<typeof asAppError> | null>(null);
   const [openModelActions, setOpenModelActions] = useState<string | null>(null);
   const provider = data?.providers.find((item) => item.id === providerId);
   const authSummary = provider ? providerAuthSummary(provider) : "不支持的认证";
   const latestResult = provider && modelTest.result?.providerId === provider.id ? modelTest.result : null;
   const latestModel = latestResult ? provider?.models.find((model) => model.id === latestResult.modelId) ?? null : null;
-  const activeModel = provider ? provider.models.find((model) => modelTest.isActive(provider.id, model.id)) ?? null : null;
-  const latestEndpoint = latestModel && !latestModel.hasBaseUrlOverride
-    ? buildModelEndpoint(provider?.baseUrl, latestModel.id, latestModel.effectiveApi)
+  const activeProvider = data?.providers.find((item) => item.id === modelTest.activeProviderId) ?? null;
+  const activeModel = activeProvider && modelTest.activeModelId ? activeProvider.models.find((model) => model.id === modelTest.activeModelId) ?? null : null;
+  const latestEndpoint = latestResult && latestModel && latestResult.protocol !== "unknown" && !latestModel.hasBaseUrlOverride
+    ? buildModelEndpoint(provider?.baseUrl, latestModel.id, latestResult.protocol)
     : { kind: "not-configured" as const };
   const openedModelsHash = data?.files.models.contentHash ?? null;
   const openedConfigHash = data?.files.config.contentHash ?? null;
   const targetWritable = data?.targetConfiguration.writable ?? false;
   const canManageModels = Boolean(provider?.editable && openedModelsHash && openedConfigHash && targetWritable);
+  const openModelEditor = (editor: NonNullable<typeof modelEditor>) => {
+    if (!openedModelsHash) return;
+    setModelEditorModelsHash(openedModelsHash);
+    setModelEditor(editor);
+  };
+  const dismissModelEditor = () => {
+    setModelEditor(null);
+    setModelEditorModelsHash(null);
+  };
+  const dismissProviderEditor = () => {
+    setEditing(false);
+    setEditingModelsHash(null);
+  };
+
   const normalizedSearch = modelSearch.trim().toLocaleLowerCase();
   const models = provider?.models.filter((model) => [
     model.id,
@@ -391,24 +409,26 @@ function ProviderDetailPage() {
   ].some((value) => value?.toLocaleLowerCase().includes(normalizedSearch))) ?? [];
 
   const saveModel = async () => {
-    if (!modelEditor || !openedModelsHash || !provider) return null;
+    if (!modelEditor || !modelEditorModelsHash || !provider) return null;
+    const editorMode = modelEditor.mode;
     const reloadError = await reload();
     if (reloadError) return reloadError;
-    setModelEditor(null);
-    toast.success(modelEditor.mode === "edit" ? "Model 已保存" : "Model 已创建");
+    dismissModelEditor();
+    toast.success(editorMode === "edit" ? "Model 已保存" : "Model 已创建");
     return null;
   };
 
   const deleteModel = async () => {
-    if (!deletingModel || !provider || !openedModelsHash || !openedConfigHash) return;
+    if (!deletingModel || !deleteHashes || !provider) return;
     try {
       await client.deleteModel({
-        openedModelsHash,
-        openedConfigHash,
+        openedModelsHash: deleteHashes.models,
+        openedConfigHash: deleteHashes.config,
         providerId: provider.id,
         modelId: deletingModel.id,
       });
       setDeletingModel(null);
+      setDeleteHashes(null);
       setDeleteError(null);
       const reloadError = await reload();
       if (reloadError) {
@@ -418,6 +438,7 @@ function ProviderDetailPage() {
       toast.success("Model 已删除");
     } catch (cause: unknown) {
       setDeletingModel(null);
+      setDeleteHashes(null);
       setDeleteError(asAppError(cause, "删除 Model 失败"));
     }
   };
@@ -446,7 +467,7 @@ function ProviderDetailPage() {
                 <code>{provider.baseUrl ?? "未配置地址"}</code>
               </div>
               <div className="provider-detail-actions">
-                <Button type="button" disabled={!provider.editable || !openedModelsHash || !targetWritable} onClick={() => setEditing(true)}>编辑 Provider</Button>
+                <Button type="button" disabled={!provider.editable || !openedModelsHash || !targetWritable} onClick={() => { if (!openedModelsHash) return; setEditingModelsHash(openedModelsHash); setEditing(true); }}>编辑 Provider</Button>
                 <Button type="button" variant="secondary" className="provider-detail-delete" disabled>删除</Button>
               </div>
             </header>
@@ -459,7 +480,7 @@ function ProviderDetailPage() {
             ) : null}
             <section className="provider-detail-search-row" aria-label="Model 操作">
               <SearchInput name="model-search" aria-label="搜索 Model ID" value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="搜索 Model ID…" />
-              <Button type="button" disabled={!canManageModels} onClick={() => setModelEditor({ mode: "create" })} title={!canManageModels ? "当前 Provider 只读或配置不可写" : undefined}>新增模型</Button>
+              <Button type="button" disabled={!canManageModels} onClick={() => openModelEditor({ mode: "create" })} title={!canManageModels ? "当前 Provider 只读或配置不可写" : undefined}>新增模型</Button>
             </section>
             <section className="provider-detail-summary" aria-label="Provider 摘要">
               <div><span>默认协议</span><strong>{provider.defaultApi ?? "由模型指定"}</strong></div>
@@ -494,14 +515,14 @@ function ProviderDetailPage() {
                         <td><div className="provider-detail-model-actions">
                           <Button type="button" variant="secondary" className="provider-detail-model-action" aria-label={`Model 操作 ${model.id}`} aria-expanded={openModelActions === model.id} title="Model 操作" onClick={() => setOpenModelActions((current) => current === model.id ? null : model.id)}><MoreHorizontal aria-hidden="true" size={18} /></Button>
                           {openModelActions === model.id ? <div className="provider-detail-model-menu" role="menu">
-                            <Button type="button" variant="secondary" role="menuitem" disabled={active ? false : !testable || busy} title={!active && !testable ? "当前 Model definition 不满足测试条件" : !active && busy ? "已有模型测试正在进行" : undefined} onClick={() => { setOpenModelActions(null); if (active) modelTest.cancel(); else modelTest.start(provider.id, model.id); }}><SquareTerminal aria-hidden="true" size={15} />{active ? "取消测试" : "测试模型"}</Button>
+                            <Button type="button" variant="secondary" role="menuitem" disabled={active ? false : !modelTest.settingsReady || !testable || busy} title={!active && !modelTest.settingsReady ? "正在读取设置" : !active && !testable ? "当前 Model definition 不满足测试条件" : !active && busy ? "已有模型测试正在进行" : undefined} onClick={() => { setOpenModelActions(null); if (active) modelTest.cancel(); else modelTest.start(provider.id, model.id); }}><SquareTerminal aria-hidden="true" size={15} />{active ? "取消测试" : "测试模型"}</Button>
                             {model.editable ? (
                               <>
-                                <Button type="button" variant="secondary" role="menuitem" onClick={() => { setOpenModelActions(null); setModelEditor({ mode: "edit", model }); }}><Pencil aria-hidden="true" size={15} />编辑</Button>
-                                {model.status === "normal" ? <Button type="button" variant="secondary" role="menuitem" onClick={() => { setOpenModelActions(null); setModelEditor({ mode: "create", model, copy: true }); }}><Copy aria-hidden="true" size={15} />复制</Button> : null}
-                                <Button type="button" variant="secondary" role="menuitem" className="provider-detail-model-menu__danger" onClick={() => { setOpenModelActions(null); setDeleteError(null); setDeletingModel(model); }}><Trash2 aria-hidden="true" size={15} />删除</Button>
+                                <Button type="button" variant="secondary" role="menuitem" onClick={() => { setOpenModelActions(null); openModelEditor({ mode: "edit", model }); }}><Pencil aria-hidden="true" size={15} />编辑</Button>
+                                {model.status === "normal" ? <Button type="button" variant="secondary" role="menuitem" onClick={() => { setOpenModelActions(null); openModelEditor({ mode: "create", model, copy: true }); }}><Copy aria-hidden="true" size={15} />复制</Button> : null}
+                                <Button type="button" variant="secondary" role="menuitem" className="provider-detail-model-menu__danger" onClick={() => { setOpenModelActions(null); setDeleteError(null); if (!openedModelsHash || !openedConfigHash) return; setDeleteHashes({ models: openedModelsHash, config: openedConfigHash }); setDeletingModel(model); }}><Trash2 aria-hidden="true" size={15} />删除</Button>
                               </>
-                            ) : <Button type="button" variant="secondary" role="menuitem" onClick={() => { setOpenModelActions(null); setModelEditor({ mode: "view", model }); }}><Info aria-hidden="true" size={15} />查看</Button>}
+                            ) : <Button type="button" variant="secondary" role="menuitem" onClick={() => { setOpenModelActions(null); openModelEditor({ mode: "view", model }); }}><Info aria-hidden="true" size={15} />查看</Button>}
                           </div> : null}
                           {!model.editable ? <span className="provider-detail-model-readonly-label">只读</span> : null}
                         </div></td>
@@ -512,13 +533,13 @@ function ProviderDetailPage() {
               </table>
             </section>
             <section className="provider-detail-latest-test" aria-label="最近测试" aria-live="polite">
-              {activeModel ? (
+              {modelTest.running ? (
                 <>
                   <StatusIndicator tone="warning">测试中…</StatusIndicator>
-                  <span>{provider.id}/{activeModel.id}</span>
-                  <span>{activeModel.effectiveApi ?? "—"}</span>
+                  <span>{modelTest.activeProviderId && modelTest.activeModelId ? `${modelTest.activeProviderId}/${modelTest.activeModelId}` : "—"}</span>
+                  <span>{activeModel?.effectiveApi ?? "—"}</span>
                   <span>请求进行中</span>
-                  <Button type="button" variant="secondary" className="provider-detail-latest-test__cancel" aria-label={`取消测试 ${provider.id}/${activeModel.id}`} onClick={() => modelTest.cancel()}>取消测试</Button>
+                  <Button type="button" variant="secondary" className="provider-detail-latest-test__cancel" aria-label={`取消测试 ${modelTest.activeProviderId ?? "模型"}/${modelTest.activeModelId ?? ""}`} onClick={() => modelTest.cancel()}>取消测试</Button>
                 </>
               ) : latestResult ? (
                 <>
@@ -532,9 +553,9 @@ function ProviderDetailPage() {
               ) : <><StatusIndicator tone="neutral">暂无测试结果</StatusIndicator><span>保存后的 Model 测试结果会显示在这里。</span></>}
             </section>
             {modelTest.costNoticeDialog}
-            {deletingModel ? <ConfirmDialog title="删除模型？" confirmLabel="删除模型" onCancel={() => setDeletingModel(null)} onConfirm={() => void deleteModel()}><p>将删除 {provider.id}/{deletingModel.id}。</p>{deletingModel.referenceCount > 0 ? <p>检测到 {deletingModel.referenceCount} 个配置引用：{deletingModel.referencePaths.join("、")}。删除会被阻止。</p> : null}{provider.modelCount <= 1 ? <p>这是 Provider 下的最后一个 Model definition，删除会被阻止。</p> : <p>此操作会创建备份。</p>}</ConfirmDialog> : null}
-            {editing && openedModelsHash ? <ProviderEditDialog provider={provider} openedModelsHash={openedModelsHash} onDismiss={() => setEditing(false)} onReload={reload} onSaved={async () => reload()} /> : null}
-            {modelEditor && openedModelsHash ? <ModelCreateSheet key={`${modelEditor.mode}-${modelEditor.model?.id ?? "new"}-${modelEditor.copy ? "copy" : "edit"}`} provider={provider} targetWritable={targetWritable} openedModelsHash={openedModelsHash} mode={modelEditor.mode} model={modelEditor.model} copy={modelEditor.copy} onDismiss={() => setModelEditor(null)} onReload={reload} onSaved={saveModel} /> : null}
+            {deletingModel ? <ConfirmDialog title="删除模型？" confirmLabel="删除模型" onCancel={() => { setDeletingModel(null); setDeleteHashes(null); }} onConfirm={() => void deleteModel()}><p>将删除 {provider.id}/{deletingModel.id}。</p>{deletingModel.referenceCount > 0 ? <p>检测到 {deletingModel.referenceCount} 个配置引用：{deletingModel.referencePaths.join("、")}。删除会被阻止。</p> : null}{provider.modelCount <= 1 ? <p>这是 Provider 下的最后一个 Model definition，删除会被阻止。</p> : <p>此操作会创建备份。</p>}</ConfirmDialog> : null}
+            {editing && editingModelsHash ? <ProviderEditDialog provider={provider} openedModelsHash={editingModelsHash} onDismiss={dismissProviderEditor} onReload={reload} onSaved={async () => reload()} /> : null}
+            {modelEditor && modelEditorModelsHash ? <ModelCreateSheet key={`${modelEditor.mode}-${modelEditor.model?.id ?? "new"}-${modelEditor.copy ? "copy" : "edit"}`} provider={provider} targetWritable={targetWritable} openedModelsHash={modelEditorModelsHash} mode={modelEditor.mode} model={modelEditor.model} copy={modelEditor.copy} onDismiss={dismissModelEditor} onReload={reload} onSaved={saveModel} /> : null}
           </>
         )}
       </main>
@@ -588,22 +609,32 @@ export function App() {
     prepareModelTestHydration();
     let active = true;
     let timer: number | undefined;
-    const syncModelTestState = async () => {
+    let failureNotified = false;
+    const schedule = () => {
+      if (!active || timer !== undefined) return;
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        void syncModelTestState();
+      }, MODEL_TEST_STATE_POLL_MS);
+    };
+    async function syncModelTestState() {
       const generation = useModelTestStore.getState().generation;
       try {
         const state = await client.getModelTestState();
         if (!active) return;
+        failureNotified = false;
         hydrateModelTest(state, generation);
-        if (state.running) {
-          timer = window.setTimeout(() => void syncModelTestState(), MODEL_TEST_STATE_POLL_MS);
-        }
+        if (state.running) schedule();
       } catch (cause: unknown) {
-        if (active) {
+        if (!active) return;
+        if (!failureNotified) {
           const appError = asAppError(cause, "无法读取模型测试状态");
           toast.error(appError.message, { description: appError.action });
+          failureNotified = true;
         }
+        schedule();
       }
-    };
+    }
     void syncModelTestState();
     return () => {
       active = false;

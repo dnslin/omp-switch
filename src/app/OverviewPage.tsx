@@ -107,9 +107,9 @@ function sameModelSelection(left: ModelSelection, right: ModelSelection) {
 export function OverviewPage() {
   const client = useTauriClient();
   const hydrationState = useUiSettings((state) => state.hydrationState);
-  const { data, startupState, error, loading, reload, refresh, shellStatus } = useOverviewLoad(overviewLoadCopy);
+  const { data, startupState, error, loading, revision, reload, refresh, shellStatus } = useOverviewLoad(overviewLoadCopy);
   const modelTest = useModelTestRunner();
-  useRefreshAfterModelTest({ ready: Boolean(data), loading, refresh });
+  useRefreshAfterModelTest({ ready: Boolean(data), loading, revision, refresh });
 
   async function openTargetDirectory() {
     if (startupState?.kind !== "omp-ready") return;
@@ -245,7 +245,7 @@ function OverviewContentBody({ data, modelTest }: { data: OverviewDto; modelTest
       {data.state === "empty" || data.state === "read-only" ? <OverviewStateBanner data={data} /> : null}
       <div className="overview-test-area">
         <QuickTestPanel providers={data.providers} provider={selectedProvider} model={selectedModel} targetWritable={data.targetConfiguration.status === "writable" && data.targetConfiguration.writable} onProviderChange={handleProviderChange} onModelChange={handleModelChange} modelTest={modelTest} />
-        <TestResultPanel providers={data.providers} result={modelTest.result} running={modelTest.running} providerId={modelTest.activeProviderId} modelId={modelTest.activeModelId} />
+        <TestResultPanel providers={data.providers} result={modelTest.result} running={modelTest.running} providerId={modelTest.activeProviderId} modelId={modelTest.activeModelId} onCancel={modelTest.cancel} />
       </div>
       {modelTest.costNoticeDialog}
     </>
@@ -357,9 +357,9 @@ function QuickTestPanel({
     : "—";
   const canTest = Boolean(provider && model && isModelTestable(provider, model, targetWritable));
   const active = Boolean(provider && model && modelTest.isActive(provider.id, model.id));
-  const disabled = active ? false : !canTest || modelTest.isBusy(provider?.id ?? "", model?.id ?? "");
+  const disabled = active ? false : !modelTest.settingsReady || !canTest || modelTest.isBusy(provider?.id ?? "", model?.id ?? "");
   const testLabel = active ? "取消测试" : "测试模型";
-  const testTitle = active ? undefined : !canTest ? "当前 Model definition 不满足测试条件" : modelTest.running ? "已有模型测试正在进行" : undefined;
+  const testTitle = active ? undefined : !modelTest.settingsReady ? "正在读取设置" : !canTest ? "当前 Model definition 不满足测试条件" : modelTest.running ? "已有模型测试正在进行" : undefined;
   return (
     <section className="overview-panel overview-quick-test" aria-label="快速测试">
       <h2>快速测试</h2>
@@ -389,9 +389,11 @@ function QuickTestPanel({
           aria-label={testLabel}
           title={testTitle}
           onClick={() => {
-            if (!provider || !model) return;
-            if (active) modelTest.cancel();
-            else modelTest.start(provider.id, model.id);
+            if (active) {
+              modelTest.cancel();
+            } else if (!modelTest.running && provider && model) {
+              modelTest.start(provider.id, model.id);
+            }
           }}
         >
           {testLabel}
@@ -449,14 +451,15 @@ function OverviewField({ label, value, mono = false }: { label: string; value: s
   );
 }
 
-function TestResultPanel({ providers, result, running, providerId, modelId }: { providers: readonly OverviewProvider[]; result: ModelTestResult | null; running: boolean; providerId: string | null; modelId: string | null }) {
+function TestResultPanel({ providers, result, running, providerId, modelId, onCancel }: { providers: readonly OverviewProvider[]; result: ModelTestResult | null; running: boolean; providerId: string | null; modelId: string | null; onCancel(): void }) {
   const contextProviderId = running ? providerId : result?.providerId ?? null;
   const contextModelId = running ? modelId : result?.modelId ?? null;
   const contextProvider = contextProviderId ? providers.find((item) => item.id === contextProviderId) : undefined;
   const contextModel = contextProvider && contextModelId ? contextProvider.models.find((item) => item.id === contextModelId) : undefined;
   const protocol = running ? contextModel?.effectiveApi ?? "—" : result?.protocol ?? "—";
+  const resultProtocol = result?.protocol === "unknown" ? undefined : result?.protocol;
   const endpointResult = contextProvider && contextModel && !contextModel.hasBaseUrlOverride
-    ? buildModelEndpoint(contextProvider.baseUrl, contextModel.id, running ? contextModel.effectiveApi : result?.protocol)
+    ? buildModelEndpoint(contextProvider.baseUrl, contextModel.id, running ? contextModel.effectiveApi : resultProtocol)
     : { kind: "not-configured" as const };
   const endpoint = endpointResult.kind === "available" ? endpointResult.value : "—";
   const statusLabel = running ? "测试中…" : result?.message ?? "尚未测试";
@@ -464,7 +467,11 @@ function TestResultPanel({ providers, result, running, providerId, modelId }: { 
   const displayModel = contextProviderId && contextModelId ? `${contextProviderId}/${contextModelId}` : "—";
   return (
     <section className="overview-panel overview-result" aria-label="测试结果" aria-live="polite">
-      <header><h2>测试结果</h2><StatusIndicator tone={tone}>{statusLabel}</StatusIndicator></header>
+      <header>
+        <h2>测试结果</h2>
+        <StatusIndicator tone={tone}>{statusLabel}</StatusIndicator>
+        {running ? <Button type="button" variant="secondary" className="overview-result__cancel" aria-label="取消测试" onClick={onCancel}>取消测试</Button> : null}
+      </header>
       <OverviewResultRow label="模型" value={displayModel} />
       <OverviewResultRow label="有效协议" value={protocol} />
       <OverviewResultRow label="最终地址" value={endpoint} mono />

@@ -17,7 +17,9 @@ Observed:
 - `model-test-cost-notice-tauri-1536x1024.png`: first-run cost notice.
 - `overview-model-test-running-tauri-1536x1024.png`: Overview running/cancel state.
 - `overview-model-test-success-tauri-1536x1024.png`: Overview success result and toast.
+- `overview-model-test-running-selection-tauri-1536x1024.png`: after changing the Overview selection to gpt-5.6-terra, the active gpt-5.6-luna request remains visible, the Terra test button is disabled, and the result-panel cancel button remains available.
 - `overview-model-test-cancelled-tauri-1536x1024.png`: Overview cancellation result.
+- The running screenshot was captured against the local hanging Mock HTTP service before cancellation; the cancellation screenshot records the resulting `测试已取消` state.
 - `provider-detail-test-running-tauri-1536x1024.png`: Provider Detail running state with visible cancel action.
 - `provider-detail-test-cancelled-tauri-1536x1024.png`: Provider Detail cancellation result.
 - `provider-detail-test-success-tauri-1536x1024.png`: Provider Detail success result.

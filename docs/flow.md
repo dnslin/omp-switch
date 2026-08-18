@@ -739,6 +739,7 @@ Sonner 只显示“模型测试失败”；UI 不显示完整响应、认证值�
 - 只保留当前运行期间最近一次脱敏结果。
 - 应用重启后不恢复。
 - 不写入 OMP 配置。
+- 概览或 Provider 刷新完成后重新同步后端测试状态；当前 Target configuration 路径或 `models.yml` 内容 Hash 变化时清除旧结果，Hash 未变化时保留结果。
 - 不保存完整请求或响应。
 
 实现状态（issue #12）：概览、Provider 详情和已保存 Model 编辑 Sheet 均只测试已保存的普通 Model definition；Rust application service 重新读取配置，按四种 Supported protocol 生成固定最小 POST 请求。测试在应用内单并发、可取消并受固定超时约束；认证、响应体和错误只以脱敏结果返回。首次测试的费用说明通过 `modelTestCostNoticeAccepted` 原子偏好确认并持久化，模型测试请求和响应不写入配置或应用设置。

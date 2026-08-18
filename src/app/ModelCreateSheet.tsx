@@ -117,7 +117,7 @@ export function ModelCreateSheet({
   const canSave = !isViewing && isDirty && modelSchema.safeParse(values).success && !submitting;
   const canTest = Boolean(source && isEditing && isModelTestable(provider, source, targetWritable));
   const activeTest = Boolean(source && modelTest.isActive(provider.id, source.id));
-  const testDisabled = activeTest ? false : !canTest || modelTest.isBusy(provider.id, source?.id ?? "");
+  const testDisabled = activeTest ? false : !modelTest.settingsReady || !canTest || modelTest.isBusy(provider.id, source?.id ?? "");
   const testLabel = activeTest ? "取消测试" : "测试模型";
 
   useEffect(() => {
@@ -275,7 +275,7 @@ export function ModelCreateSheet({
               <p className="provider-create-model-note"><Info aria-hidden="true" />模型只修改所属 Provider 下的目标路径；未知配置会原样保留。</p>
               {isViewing ? <p className="provider-create-model-readonly-note" role="status"><LockKeyhole aria-hidden="true" />{source?.readOnlyReason ?? "当前 Model definition 只读。"}</p> : null}
               <div className="model-create-sheet-test">
-                <Button type="button" variant="secondary" disabled={testDisabled} title={activeTest ? undefined : !canTest ? (isViewing ? "只读 Model definition 不能测试" : "请先保存 Model definition") : modelTest.running ? "已有模型测试正在进行" : undefined} onClick={() => { if (!source) return; if (activeTest) modelTest.cancel(); else modelTest.start(provider.id, source.id); }}>{testLabel}</Button>
+                <Button type="button" variant="secondary" disabled={testDisabled} title={activeTest ? undefined : !modelTest.settingsReady ? "正在读取设置" : !canTest ? (isViewing ? "只读 Model definition 不能测试" : "请先保存 Model definition") : modelTest.running ? "已有模型测试正在进行" : undefined} onClick={() => { if (!source) return; if (activeTest) modelTest.cancel(); else modelTest.start(provider.id, source.id); }}>{testLabel}</Button>
                 <span>{isViewing ? "只读 Model definition 不可测试" : activeTest ? "正在测试已保存的 Model definition" : "仅可测试已保存模型"}</span>
               </div>
               {submissionError ? (

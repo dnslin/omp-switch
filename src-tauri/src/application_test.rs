@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::HashMap,
     fs,
@@ -14,6 +16,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use std::ffi::CString;
+
 use crate::{
     application::{
         AppService, AppSettings, CreateCustomProviderInput, CreateModelFields, CreateModelInput,
@@ -22,7 +27,7 @@ use crate::{
         OverviewLoadDto, ProviderAuthMode, StartupState, SupportedApi, SupportedInput, Theme,
         UiSettingsUpdate,
     },
-    omp_environment::{CommandOutput, OmpEnvironment},
+    omp_environment::{CommandOutput, CommandRunError, OmpEnvironment, SystemOmpEnvironment},
     overview::{ModelTestConfiguration, OverviewAuthMode},
     target_configuration::{
         ConfigurationFileDiscovery, ConfigurationFileStatus, ConfigurationIssue,
@@ -157,6 +162,21 @@ impl OmpEnvironment for FakeOmpEnvironment {
             ("noisy-path", ["config", "path"]) => Ok(CommandOutput::success("/tmp/one\n/tmp/two")),
             _ => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
         }
+    }
+    fn run_with_deadline(
+        &self,
+        executable: &Path,
+        arguments: &[&str],
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<CommandOutput, CommandRunError> {
+        if cancellation.is_cancelled() {
+            return Err(CommandRunError::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(CommandRunError::TimedOut);
+        }
+        self.run(executable, arguments).map_err(CommandRunError::Io)
     }
     fn inspect_target(&self, target: &Path) -> std::io::Result<TargetConfigurationDiscovery> {
         if let Some(kind) = self.inspect_target_error {
@@ -468,6 +488,16 @@ fn application_service_uses_an_exact_catalog_and_locks_only_provider_management_
         input: [text]
         contextWindow: 128000
         maxTokens: 4096
+  custom:
+    baseUrl: https://custom.example/v1
+    api: openai-responses
+    models:
+      - id: too-large
+        name: Too Large
+        input: [text]
+        contextWindow: 1000
+        maxTokens: 2000
+
 "#,
     )
     .unwrap();
@@ -494,6 +524,9 @@ fn application_service_uses_an_exact_catalog_and_locks_only_provider_management_
     assert_eq!(provider("OPENAI")["editable"], false);
     assert_eq!(provider("advanced")["classification"], "advanced");
     assert_eq!(provider("advanced")["editable"], false);
+    assert_eq!(provider("custom")["editable"], true);
+    assert_eq!(provider("custom")["models"][0]["complete"], false);
+    assert_eq!(provider("custom")["models"][0]["status"], "incomplete");
     assert_eq!(
         exact_environment.calls(),
         vec![
@@ -693,6 +726,70 @@ fn startup_detection_requires_confirmation_before_replacing_unusable_saved_execu
             .as_deref(),
         Some("/bin/path-omp")
     );
+}
+#[tokio::test]
+async fn model_test_rejects_an_unconfirmed_path_omp_replacement() {
+    let environment = Arc::new(FakeOmpEnvironment::with_path("/bin/path-omp"));
+    let service = service_with(environment.clone(), Some("/bin/missing-omp"));
+    service.accept_model_test_cost_notice().unwrap();
+
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "provider",
+        "modelId": "model"
+    }))
+    .unwrap();
+    let error = service.test_model(input).await.unwrap_err();
+
+    assert_eq!(error.code, "model-test-omp-confirmation-required");
+    assert_eq!(
+        environment.calls(),
+        vec![(
+            PathBuf::from("/bin/missing-omp"),
+            vec!["--version".to_owned()]
+        )]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn omp_deadline_covers_inherited_output_pipes() {
+    let root = tempdir().unwrap();
+    let executable = root.path().join("spawn-descendant");
+    fs::write(&executable, "#!/bin/sh\nsleep 5 &\nexit 0\n").unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+
+    let environment = SystemOmpEnvironment::new(root.path().join("transactions"));
+    let started = Instant::now();
+    let result = environment.run_with_deadline(
+        &executable,
+        &[],
+        &CancellationToken::new(),
+        Instant::now() + Duration::from_millis(50),
+    );
+
+    assert!(matches!(result, Err(CommandRunError::TimedOut)));
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+#[cfg(windows)]
+#[test]
+fn omp_deadline_covers_windows_inherited_output_pipes() {
+    let environment = SystemOmpEnvironment::new(PathBuf::from("transactions"));
+    let started = Instant::now();
+    let result = environment.run_with_deadline(
+        Path::new("cmd.exe"),
+        &[
+            "/D",
+            "/C",
+            "start \"\" /B cmd.exe /D /C \"ping.exe -n 6 127.0.0.1 >NUL\"",
+        ],
+        &CancellationToken::new(),
+        Instant::now() + Duration::from_millis(50),
+    );
+
+    assert!(matches!(result, Err(CommandRunError::TimedOut)));
+    assert!(started.elapsed() < Duration::from_secs(1));
 }
 
 #[test]
@@ -3230,7 +3327,7 @@ fn custom_provider_creation_accepts_spec_valid_model_suffix_and_limits() {
     let mut input = provider_creation_input(opened_models_hash);
     input.first_model.id = "  new-model:high  ".to_owned();
     input.first_model.context_window = 1_024;
-    input.first_model.max_tokens = 2_048;
+    input.first_model.max_tokens = 512;
 
     let result = service.create_custom_provider(input).unwrap();
 
@@ -3240,7 +3337,7 @@ fn custom_provider_creation_accepts_spec_valid_model_suffix_and_limits() {
     let model = &created["providers"]["new-provider"]["models"][0];
     assert_eq!(model["id"], "new-model:high");
     assert_eq!(model["contextWindow"], 1_024);
-    assert_eq!(model["maxTokens"], 2_048);
+    assert_eq!(model["maxTokens"], 512);
     let refreshed = service.get_overview_load().overview.unwrap();
     let model = refreshed
         .models
@@ -4494,6 +4591,64 @@ async fn model_test_reloads_saved_openai_completions_and_uses_a_minimal_authenti
             .unwrap()
             .contains("saved-secret")
     );
+    let overview = service.get_overview_load().overview.unwrap();
+    let save_roles =
+        serde_json::from_value::<crate::application::SaveModelRolesInput>(serde_json::json!({
+            "openedConfigHash": overview.files.config.content_hash.unwrap(),
+            "changes": [{
+                "kind": "create",
+                "roleId": "researcher",
+                "providerId": "test-provider",
+                "modelId": "test-model"
+            }]
+        }))
+        .unwrap();
+    service.save_model_roles(save_roles).unwrap();
+    assert!(service.get_model_test_state().result.is_some());
+    fs::write(target.join("models.yml"), "providers: [\n").unwrap();
+    let failed_reload = service.get_overview_load();
+    assert_eq!(
+        failed_reload.error.as_ref().map(|error| error.code),
+        Some("overview-parse-error")
+    );
+    assert!(service.get_model_test_state().result.is_none());
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn model_test_rejects_a_non_file_models_path_quickly() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let fifo = target.join("models.fifo");
+    let fifo_path = CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+
+    let mut target_override = writable_target(&target);
+    target_override.models.canonical_path = fifo.to_string_lossy().into_owned();
+    target_override.models.resolved_path = Some(fifo.to_string_lossy().into_owned());
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.clone()),
+        target_override: Some(target_override),
+        transaction_root: target.parent().unwrap().join(".app-transactions"),
+        ..FakeOmpEnvironment::default()
+    });
+    let service = service_with(environment, None);
+    service.accept_model_test_cost_notice().unwrap();
+    service.set_model_test_timeout_for_test(Duration::from_millis(50));
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "blocked-provider",
+        "modelId": "blocked-model"
+    }))
+    .unwrap();
+
+    let started = Instant::now();
+    let outcome = tokio::time::timeout(Duration::from_millis(300), service.test_model(input)).await;
+    let error = outcome
+        .expect("model test should reject non-file paths before the deadline")
+        .unwrap_err();
+    assert_eq!(error.code, "overview-read-failed");
+    assert!(started.elapsed() < Duration::from_millis(250));
 }
 
 struct CapturedModelTestRequest {
@@ -4758,6 +4913,8 @@ async fn model_test_classifies_base_dns_connection_and_tls_failures_safely() {
         protocol: SupportedApi::OpenAiResponses,
         auth_mode: OverviewAuthMode::None,
         api_key: None,
+        target_path: "/tmp/test-target".to_owned(),
+        models_hash: "test-models-hash".to_owned(),
     };
     let invalid_error =
         crate::model_test::execute(invalid, CancellationToken::new(), Duration::from_secs(2))
@@ -4815,6 +4972,8 @@ fn direct_model_test_configuration() -> ModelTestConfiguration {
         protocol: SupportedApi::OpenAiResponses,
         auth_mode: OverviewAuthMode::None,
         api_key: None,
+        target_path: "/tmp/test-target".to_owned(),
+        models_hash: "test-models-hash".to_owned(),
     }
 }
 
@@ -5061,4 +5220,106 @@ async fn model_test_is_single_concurrent_cancellable_and_time_bounded() {
     assert_eq!(cancelled.error_code.as_deref(), Some("cancelled"));
     assert!(!service.get_model_test_state().running);
     server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn model_test_cancels_and_times_out_a_hanging_omp_preflight() {
+    let app_data = tempdir().unwrap().keep();
+    let executable = app_data.join("hanging-omp");
+    fs::write(&executable, "#!/bin/sh\nwhile :; do :; done\n").unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    let settings_path = app_data.join("settings.json");
+    fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&AppSettings {
+            omp_executable_path: Some(executable.to_string_lossy().into_owned()),
+            ..AppSettings::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let environment = Arc::new(SystemOmpEnvironment::new(
+        app_data.join("target-initialization-transactions"),
+    ));
+    let service = AppService::new_with_environment(settings_path, environment).unwrap();
+    service.accept_model_test_cost_notice().unwrap();
+    service.set_model_test_timeout_for_test(Duration::from_secs(2));
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "hanging-provider",
+        "modelId": "hanging-model"
+    }))
+    .unwrap();
+
+    let first_service = service.clone();
+    let first_input = input.clone();
+    let started = Instant::now();
+    let first = tokio::spawn(async move { first_service.test_model(first_input).await.unwrap() });
+    for _ in 0..100 {
+        if service.get_model_test_state().running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(service.cancel_model_test());
+    let cancelled = first.await.unwrap();
+    assert_eq!(cancelled.error_code.as_deref(), Some("cancelled"));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(!service.get_model_test_state().running);
+
+    service.set_model_test_timeout_for_test(Duration::from_millis(50));
+    let started = Instant::now();
+    let timed_out = service.test_model(input).await.unwrap();
+    assert_eq!(timed_out.error_code.as_deref(), Some("timeout"));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(!service.get_model_test_state().running);
+}
+
+#[tokio::test]
+async fn model_test_times_out_while_waiting_for_a_stuck_omp_detection_lock() {
+    let root = tempdir().unwrap();
+    let target = root.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let release_detection = Arc::new(Barrier::new(2));
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.clone()),
+        inspect_real_target: true,
+        transaction_root: root.path().join("transactions"),
+        block_first_version: Some((release_detection.clone(), Arc::new(AtomicBool::new(false)))),
+        ..FakeOmpEnvironment::default()
+    });
+    let service = service_with(environment.clone(), None);
+    let detection_service = service.clone();
+    let detection = thread::spawn(move || detection_service.get_startup_state());
+    let mut command_started = false;
+    for _ in 0..100 {
+        if !environment.calls().is_empty() {
+            command_started = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(command_started);
+    service.accept_model_test_cost_notice().unwrap();
+    service.set_model_test_timeout_for_test(Duration::from_millis(50));
+    let started = Instant::now();
+    let result = service
+        .test_model(
+            serde_json::from_value(serde_json::json!({
+                "providerId": "blocked-provider",
+                "modelId": "blocked-model"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.error_code.as_deref(), Some("timeout"));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    release_detection.wait();
+    detection.join().unwrap();
 }

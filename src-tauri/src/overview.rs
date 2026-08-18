@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs};
+use std::{collections::HashSet, fs, io, time::Instant};
 
 use serde::{Serialize, Serializer};
 use serde_yaml::{Mapping, Value};
@@ -212,6 +212,8 @@ pub(crate) struct ModelTestConfiguration {
     pub(crate) protocol: SupportedApi,
     pub(crate) auth_mode: OverviewAuthMode,
     pub(crate) api_key: Option<String>,
+    pub(crate) target_path: String,
+    pub(crate) models_hash: String,
 }
 pub(crate) fn read_overview(
     executable_path: &str,
@@ -476,16 +478,168 @@ fn sanitized_target_configuration(
 }
 
 fn read_document(path: &str, label: &str) -> Result<ParsedConfiguration, AppError> {
-    let bytes = fs::read(path).map_err(|error| {
-        AppError::new(
-            "overview-read-failed",
-            format!(
-                "无法读取 {label}。诊断代码：{}。",
-                crate::error::io_error_cause(error.kind())
-            ),
-            "请检查配置文件路径和权限后重新读取。",
-        )
-    })?;
+    let mut file =
+        open_configuration_file(path).map_err(|error| document_read_error(label, error))?;
+    ensure_regular_file(&file, label)?;
+    let mut bytes = Vec::new();
+    use std::io::Read;
+    file.read_to_end(&mut bytes)
+        .map_err(|error| document_read_error(label, error))?;
+    parse_document(bytes, label)
+}
+
+fn open_configuration_file(path: &str) -> io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::File::open(path)
+    }
+}
+
+fn ensure_regular_file(file: &fs::File, label: &str) -> Result<(), AppError> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| document_read_error(label, error))?;
+    if metadata.is_file() {
+        return Ok(());
+    }
+    Err(document_read_error(
+        label,
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "configuration path is not a file",
+        ),
+    ))
+}
+
+fn read_document_with_deadline(
+    path: &str,
+    label: &str,
+    cancellation: &tokio_util::sync::CancellationToken,
+    deadline: Instant,
+) -> Result<ParsedConfiguration, AppError> {
+    let bytes = read_bytes_with_deadline(path, label, cancellation, deadline)?;
+    parse_document(bytes, label)
+}
+
+fn read_bytes_with_deadline(
+    path: &str,
+    label: &str,
+    cancellation: &tokio_util::sync::CancellationToken,
+    deadline: Instant,
+) -> Result<Vec<u8>, AppError> {
+    if cancellation.is_cancelled() {
+        return Err(AppError::new(
+            "model-test-cancelled",
+            "模型测试已取消。",
+            "无需继续操作。",
+        ));
+    }
+    if Instant::now() >= deadline {
+        return Err(AppError::new(
+            "model-test-timeout",
+            "模型测试准备超时。",
+            "请检查 OMP 可执行文件和配置目录后重试。",
+        ));
+    }
+    let mut file =
+        open_configuration_file(path).map_err(|error| document_read_error(label, error))?;
+    ensure_regular_file(&file, label)?;
+    if cancellation.is_cancelled() {
+        return Err(AppError::new(
+            "model-test-cancelled",
+            "模型测试已取消。",
+            "无需继续操作。",
+        ));
+    }
+    if Instant::now() >= deadline {
+        return Err(AppError::new(
+            "model-test-timeout",
+            "模型测试准备超时。",
+            "请检查 OMP 可执行文件和配置目录后重试。",
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::io::{ErrorKind, Read};
+
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(AppError::new(
+                    "model-test-cancelled",
+                    "模型测试已取消。",
+                    "无需继续操作。",
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err(AppError::new(
+                    "model-test-timeout",
+                    "模型测试准备超时。",
+                    "请检查 OMP 可执行文件和配置目录后重试。",
+                ));
+            }
+            match file.read(&mut chunk) {
+                Ok(0) => return Ok(bytes),
+                Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => return Err(document_read_error(label, error)),
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(AppError::new(
+                    "model-test-cancelled",
+                    "模型测试已取消。",
+                    "无需继续操作。",
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err(AppError::new(
+                    "model-test-timeout",
+                    "模型测试准备超时。",
+                    "请检查 OMP 可执行文件和配置目录后重试。",
+                ));
+            }
+            match file.read(&mut chunk) {
+                Ok(0) => return Ok(bytes),
+                Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+                Err(error) => return Err(document_read_error(label, error)),
+            }
+        }
+    }
+}
+
+fn document_read_error(label: &str, error: io::Error) -> AppError {
+    AppError::new(
+        "overview-read-failed",
+        format!(
+            "无法读取 {label}。诊断代码：{}。",
+            crate::error::io_error_cause(error.kind())
+        ),
+        "请检查配置文件路径和权限后重新读取。",
+    )
+}
+
+fn parse_document(bytes: Vec<u8>, label: &str) -> Result<ParsedConfiguration, AppError> {
     let raw_hash = content_hash(&bytes);
     let tree = serde_yaml::from_slice::<Value>(&bytes).map_err(|error| {
         AppError::new(
@@ -505,6 +659,8 @@ pub(crate) fn read_model_test_configuration(
     catalog: &BundledCatalog,
     provider_id: &str,
     model_id: &str,
+    cancellation: &tokio_util::sync::CancellationToken,
+    deadline: Instant,
 ) -> Result<ModelTestConfiguration, AppError> {
     if !matches!(target.status, TargetConfigurationStatus::Writable) || !target.writable {
         return Err(model_test_not_eligible(
@@ -516,7 +672,7 @@ pub(crate) fn read_model_test_configuration(
         .resolved_path
         .as_deref()
         .unwrap_or(&target.models.canonical_path);
-    let document = read_document(path, "models.yml")?;
+    let document = read_document_with_deadline(path, "models.yml", cancellation, deadline)?;
     let (providers, provider_ids_are_safe) = project_providers(&document.tree, Some(catalog));
     let provider = providers
         .iter()
@@ -587,6 +743,8 @@ pub(crate) fn read_model_test_configuration(
         protocol,
         auth_mode: provider.auth_mode,
         api_key,
+        target_path: target.path.clone(),
+        models_hash: document.raw_hash,
     })
 }
 
@@ -971,6 +1129,7 @@ fn project_model(
             .all(|value| matches!(value, OverviewInput::Text | OverviewInput::Image))
         && context_window.is_some_and(|value| value > 0)
         && max_tokens.is_some_and(|value| value > 0)
+        && matches!((context_window, max_tokens), (Some(context), Some(max)) if max <= context)
         && effective_api.is_some();
     if provider_read_only {
         read_only_reason.get_or_insert_with(|| "所属 Provider 只读。".to_owned());
@@ -1528,5 +1687,40 @@ fn string_list(value: &Value) -> Option<Vec<String>> {
     match value {
         Value::Sequence(values) => values.iter().map(scalar_string).collect(),
         _ => None,
+    }
+}
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{
+        ffi::CString,
+        time::{Duration, Instant},
+    };
+
+    use tempfile::tempdir;
+    use tokio_util::sync::CancellationToken;
+
+    use super::read_document_with_deadline;
+
+    #[test]
+    fn model_test_configuration_read_rejects_non_file_paths() {
+        let root = tempdir().unwrap();
+        let fifo = root.path().join("models.fifo");
+        let fifo_path = CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+
+        let started = Instant::now();
+        let result = read_document_with_deadline(
+            fifo.to_str().unwrap(),
+            "models.yml",
+            &CancellationToken::new(),
+            Instant::now() + Duration::from_secs(5),
+        );
+
+        let error = match result {
+            Ok(_) => panic!("non-file configuration path was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "overview-read-failed");
+        assert!(started.elapsed() < Duration::from_millis(250));
     }
 }

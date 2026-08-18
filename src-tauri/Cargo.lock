@@ -2518,6 +2518,7 @@ dependencies = [
  "atomic-write-file",
  "cap-std",
  "fs4",
+ "libc",
  "parking_lot",
  "pretty_assertions",
  "reqwest",

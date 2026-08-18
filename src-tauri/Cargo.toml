@@ -32,12 +32,13 @@ same-file = "1.0.6"
 sha2 = "0.10.9"
 url = "2.5.8"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+libc = "0.2.189"
 tokio = { version = "1.53.1", features = ["macros", "rt", "time"] }
 tokio-util = { version = "0.7.19", features = ["rt"] }
 cap-std = "4.0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

@@ -57,6 +57,12 @@ pub(crate) struct ModelTestState {
     pub(crate) result: Option<ModelTestResult>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelTestBinding {
+    pub(crate) target_path: String,
+    pub(crate) models_hash: String,
+}
+
 #[derive(Clone)]
 pub(crate) struct ModelTestCoordinator {
     state: Arc<Mutex<CoordinatorState>>,
@@ -67,6 +73,7 @@ pub(crate) struct ModelTestCoordinator {
 struct CoordinatorState {
     active: Option<ActiveModelTest>,
     result: Option<ModelTestResult>,
+    result_binding: Option<ModelTestBinding>,
 }
 
 struct ActiveModelTest {
@@ -74,6 +81,8 @@ struct ActiveModelTest {
     provider_id: String,
     model_id: String,
     cancellation: CancellationToken,
+    binding: Option<ModelTestBinding>,
+    invalidated: bool,
 }
 
 pub(crate) struct ModelTestGuard {
@@ -112,6 +121,8 @@ impl ModelTestCoordinator {
             provider_id: provider_id.to_owned(),
             model_id: model_id.to_owned(),
             cancellation: cancellation.clone(),
+            binding: None,
+            invalidated: false,
         });
         Ok(ModelTestGuard {
             coordinator: self.clone(),
@@ -135,6 +146,48 @@ impl ModelTestCoordinator {
         }
     }
 
+    pub(crate) fn bind(&self, id: u64, binding: ModelTestBinding) {
+        let mut state = self.state.lock();
+        if let Some(active) = state.active.as_mut().filter(|active| active.id == id) {
+            active.binding = Some(binding);
+        }
+    }
+
+    pub(crate) fn invalidate(&self) {
+        let mut state = self.state.lock();
+        if let Some(active) = state.active.as_mut() {
+            active.invalidated = true;
+            active.cancellation.cancel();
+        }
+        state.result = None;
+        state.result_binding = None;
+    }
+
+    pub(crate) fn invalidate_if_changed(&self, target_path: &str, models_hash: Option<&str>) {
+        let mut state = self.state.lock();
+        let active_changed = state
+            .active
+            .as_ref()
+            .and_then(|active| active.binding.as_ref())
+            .is_some_and(|binding| {
+                binding.target_path != target_path
+                    || Some(binding.models_hash.as_str()) != models_hash
+            });
+        let result_changed = state.result.is_some()
+            && state.result_binding.as_ref().is_none_or(|binding| {
+                binding.target_path != target_path
+                    || Some(binding.models_hash.as_str()) != models_hash
+            });
+        if active_changed || result_changed {
+            if let Some(active) = state.active.as_mut() {
+                active.invalidated = true;
+                active.cancellation.cancel();
+            }
+            state.result = None;
+            state.result_binding = None;
+        }
+    }
+
     pub(crate) fn state(&self) -> ModelTestState {
         let state = self.state.lock();
         ModelTestState {
@@ -148,11 +201,18 @@ impl ModelTestCoordinator {
         }
     }
 
-    fn complete(&self, id: u64, result: ModelTestResult) {
+    fn complete(&self, id: u64, result: ModelTestResult, binding: Option<ModelTestBinding>) {
         let mut state = self.state.lock();
         if state.active.as_ref().is_some_and(|active| active.id == id) {
-            state.result = Some(result);
+            let invalidated = state
+                .active
+                .as_ref()
+                .is_some_and(|active| active.invalidated);
             state.active = None;
+            if !invalidated {
+                state.result = Some(result);
+                state.result_binding = binding;
+            }
         }
     }
 
@@ -169,8 +229,12 @@ impl ModelTestGuard {
         self.cancellation.clone()
     }
 
-    pub(crate) fn complete(self, result: ModelTestResult) {
-        self.coordinator.complete(self.id, result);
+    pub(crate) fn bind(&self, binding: ModelTestBinding) {
+        self.coordinator.bind(self.id, binding);
+    }
+
+    pub(crate) fn complete(self, result: ModelTestResult, binding: Option<ModelTestBinding>) {
+        self.coordinator.complete(self.id, result, binding);
     }
 }
 
@@ -197,19 +261,32 @@ enum RequestFailure {
     ResponseFormat,
 }
 
+#[cfg(test)]
 pub(crate) async fn execute(
     configuration: ModelTestConfiguration,
     cancellation: CancellationToken,
     timeout: Duration,
+) -> Result<ModelTestResult, AppError> {
+    execute_until(configuration, cancellation, Instant::now() + timeout).await
+}
+
+pub(crate) async fn execute_until(
+    configuration: ModelTestConfiguration,
+    cancellation: CancellationToken,
+    deadline: Instant,
 ) -> Result<ModelTestResult, AppError> {
     let request = build_request(&configuration)?;
     let started_at = Instant::now();
     if cancellation.is_cancelled() {
         return Ok(cancelled_result(&configuration, elapsed_ms(started_at)));
     }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Ok(timeout_result(&configuration, elapsed_ms(started_at)));
+    }
     let client = reqwest::Client::builder()
-        .connect_timeout(timeout)
-        .timeout(timeout)
+        .connect_timeout(remaining)
+        .timeout(remaining)
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| {
@@ -219,6 +296,9 @@ pub(crate) async fn execute(
                 "请重试；如果问题持续，请查看脱敏日志。",
             )
         })?;
+    if Instant::now() >= deadline {
+        return Ok(timeout_result(&configuration, elapsed_ms(started_at)));
+    }
     let response_future = async move {
         let mut response = client
             .request(request.method, request.url)
@@ -237,7 +317,7 @@ pub(crate) async fn execute(
     };
     let response = tokio::select! {
         _ = cancellation.cancelled() => Err(RequestFailure::Cancelled),
-        _ = tokio::time::sleep(timeout) => Err(RequestFailure::Timeout),
+        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => Err(RequestFailure::Timeout),
         response = response_future => response,
     };
     let latency_ms = elapsed_ms(started_at);
@@ -603,6 +683,35 @@ fn cancelled_result(configuration: &ModelTestConfiguration, latency_ms: u64) -> 
         "测试已取消",
     )
 }
+pub(crate) fn preparation_failure_result(
+    provider_id: &str,
+    model_id: &str,
+    error_code: &str,
+    message: &str,
+    latency_ms: u64,
+) -> ModelTestResult {
+    ModelTestResult {
+        success: false,
+        provider_id: provider_id.to_owned(),
+        model_id: model_id.to_owned(),
+        protocol: "unknown".to_owned(),
+        latency_ms,
+        status: None,
+        message: message.to_owned(),
+        error_code: Some(error_code.to_owned()),
+    }
+}
+
+fn timeout_result(configuration: &ModelTestConfiguration, latency_ms: u64) -> ModelTestResult {
+    failure_result(
+        configuration,
+        configuration.protocol,
+        latency_ms,
+        None,
+        "timeout",
+        "请求超时，请检查网络或服务响应。",
+    )
+}
 
 fn failure_result(
     configuration: &ModelTestConfiguration,
@@ -648,6 +757,8 @@ mod tests {
             protocol: SupportedApi::AnthropicMessages,
             auth_mode: OverviewAuthMode::ApiKey,
             api_key: Some("saved-key".to_owned()),
+            target_path: "/tmp/test-target".to_owned(),
+            models_hash: "test-models-hash".to_owned(),
         }
     }
 
@@ -663,5 +774,105 @@ mod tests {
         assert_eq!(custom.url.path(), "/v1/messages");
         assert_eq!(custom.headers[AUTHORIZATION], "Bearer saved-key");
         assert!(!custom.headers.contains_key("x-api-key"));
+    }
+
+    #[test]
+    fn keeps_results_when_bound_target_and_models_hash_stay_same() {
+        let coordinator = ModelTestCoordinator::default();
+        let guard = coordinator.begin("provider", "model").unwrap();
+        let binding = ModelTestBinding {
+            target_path: "/tmp/target".to_owned(),
+            models_hash: "models-v1".to_owned(),
+        };
+        guard.bind(binding.clone());
+        guard.complete(
+            ModelTestResult {
+                success: true,
+                provider_id: "provider".to_owned(),
+                model_id: "model".to_owned(),
+                protocol: "openai-responses".to_owned(),
+                latency_ms: 12,
+                status: Some(200),
+                message: "模型连接成功".to_owned(),
+                error_code: None,
+            },
+            Some(binding),
+        );
+
+        coordinator.invalidate_if_changed("/tmp/target", Some("models-v1"));
+
+        assert!(coordinator.state().result.is_some());
+        assert!(!coordinator.state().running);
+    }
+
+    #[test]
+    fn invalidates_results_when_bound_target_or_models_hash_changes() {
+        let coordinator = ModelTestCoordinator::default();
+        let guard = coordinator.begin("provider", "model").unwrap();
+        let binding = ModelTestBinding {
+            target_path: "/tmp/target".to_owned(),
+            models_hash: "models-v1".to_owned(),
+        };
+        guard.bind(binding.clone());
+        guard.complete(
+            ModelTestResult {
+                success: true,
+                provider_id: "provider".to_owned(),
+                model_id: "model".to_owned(),
+                protocol: "openai-responses".to_owned(),
+                latency_ms: 12,
+                status: Some(200),
+                message: "模型连接成功".to_owned(),
+                error_code: None,
+            },
+            Some(binding),
+        );
+        assert!(coordinator.state().result.is_some());
+
+        coordinator.invalidate_if_changed("/tmp/target", Some("models-v2"));
+
+        assert!(coordinator.state().result.is_none());
+        assert!(!coordinator.state().running);
+    }
+    #[test]
+    fn invalidates_unbound_results_when_overview_refreshes() {
+        let coordinator = ModelTestCoordinator::default();
+        let guard = coordinator.begin("provider", "model").unwrap();
+        guard.complete(
+            ModelTestResult {
+                success: false,
+                provider_id: "provider".to_owned(),
+                model_id: "model".to_owned(),
+                protocol: "unknown".to_owned(),
+                latency_ms: 12,
+                status: None,
+                message: "测试已取消".to_owned(),
+                error_code: Some("cancelled".to_owned()),
+            },
+            None,
+        );
+        assert!(coordinator.state().result.is_some());
+
+        coordinator.invalidate_if_changed("/tmp/target", Some("models-v1"));
+
+        assert!(coordinator.state().result.is_none());
+    }
+
+    #[test]
+    fn invalidation_keeps_active_test_busy_until_guard_finishes() {
+        let coordinator = ModelTestCoordinator::default();
+        let guard = coordinator.begin("provider", "model").unwrap();
+        coordinator.invalidate();
+
+        assert_eq!(
+            coordinator
+                .begin("other-provider", "other-model")
+                .err()
+                .unwrap()
+                .code,
+            "model-test-busy"
+        );
+        drop(guard);
+        assert!(!coordinator.state().running);
     }
 }

@@ -193,6 +193,7 @@ a { color: inherit; text-decoration: none; }
 .overview-panel-actions .app-button { min-height: 46px; padding-inline: 24px; }
 .overview-result { gap: 28px; padding: 20px; }
 .overview-result > header { display: flex; align-items: center; gap: 16px; }
+.overview-result > header .overview-result__cancel { flex: 0 0 auto; margin-left: auto; }
 .overview-result > header .status-indicator { color: var(--color-text-secondary); font-size: var(--font-size-body); }
 .overview-result > header .status-indicator--success { color: var(--color-success); }
 .overview-result > header .status-indicator--warning { color: var(--color-warning); }
