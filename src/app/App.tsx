@@ -406,10 +406,10 @@ function ProviderDetailPage() {
               <div className="provider-detail-actions">
                 <Button
                   type="button"
-                  disabled={(!provider.editable && !provider.canReplaceCommandCredential) || !openedModelsHash || !targetWritable}
+                  disabled={!provider.editable || !openedModelsHash || !targetWritable}
                   onClick={() => setEditing(true)}
                 >
-                  {provider.canReplaceCommandCredential ? "替换为文本 API Key" : "编辑 Provider"}
+                  编辑 Provider
                 </Button>
                 <Button type="button" variant="secondary" className="provider-detail-delete" disabled>
                   删除

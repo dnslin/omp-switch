@@ -40,7 +40,6 @@ const unavailableClient: TauriClient = {
   getOverviewLoad: async () => overviewLoad(overviewDto({ state: "empty", counts: { providerCount: 0, modelCount: 0, roleCount: 0 }, providers: [], models: [], roles: [], emptyReason: "还没有可管理的自定义 Provider。", nextAction: "创建一个 Provider，并同时配置它的第一个模型。" })),
   createCustomProvider: async () => ({ providerId: "new-provider", modelId: "new-model" }),
   editCustomProvider: async () => ({ providerId: "dnslin" }),
-  replaceCommandCredential: async () => ({ providerId: "dnslin" }),
   detectOmp: async () => ({ kind: "omp-unavailable", message: "仍未找到 OMP" }),
   selectOmpExecutable: async () => null,
   validateSelectedOmp: async () => ({ kind: "invalid-executable", executablePath: "/tmp/not-omp", message: "无法运行", diagnosticCode: "io-not-found" }),
@@ -1391,69 +1390,32 @@ describe("React page seam", () => {
       apiKey: { kind: "keep" },
     }));
   });
-  it("replaces a command credential through the key-only endpoint", async () => {
+  it("keeps an unchanged no-auth credential while saving other Provider fields", async () => {
     const user = userEvent.setup();
-    const replaceCommandCredential = vi.fn(async () => ({ providerId: "dnslin" }));
     const editCustomProvider = vi.fn(async () => ({ providerId: "dnslin" }));
-    const baseProvider = overviewDto().providers[0];
-    const commandProvider: OverviewProvider = {
-      ...baseProvider,
-      baseUrl: null,
-      defaultApi: null,
-      authMode: "unsupported",
-      classification: "advanced",
-      editable: false,
-      canReplaceCommandCredential: true,
-      readOnlyReason: "Provider 使用不支持的命令凭据。",
-    };
-    renderRoute("/providers", {
-      ...unavailableClient,
-      getOverviewLoad: async () => overviewLoad(overviewDto({ providers: [commandProvider] }), readyState),
-      editCustomProvider,
-      replaceCommandCredential,
-    });
-
-    await user.click(await screen.findByRole("link", { name: "dnslin 详情" }));
-    expect(await screen.findByRole("heading", { name: "dnslin" })).toBeVisible();
-
-    await user.click(await screen.findByRole("button", { name: "替换为文本 API Key" }));
-    const dialog = screen.getByRole("dialog");
-    expect(within(dialog).getByRole("heading", { name: "替换 Direct API Key" })).toBeVisible();
-    expect(within(dialog).queryByLabelText("Base URL")).not.toBeInTheDocument();
-    expect(within(dialog).queryByLabelText("默认协议（可选）")).not.toBeInTheDocument();
-    expect(within(dialog).queryByRole("radiogroup", { name: "认证方式" })).not.toBeInTheDocument();
-
-    await user.type(within(dialog).getByLabelText("API Key", { selector: 'input[type="password"]' }), "fixture-direct-replacement");
-    await user.click(within(dialog).getByRole("button", { name: "替换 Direct API Key" }));
-
-    await waitFor(() => expect(replaceCommandCredential).toHaveBeenCalledWith({
-      openedModelsHash: "models-hash",
-      providerId: "dnslin",
-      apiKey: { kind: "replace", value: "fixture-direct-replacement" },
-    }));
-    expect(editCustomProvider).not.toHaveBeenCalled();
-  });
-  it("disables command credential replacement when the Target configuration is not writable", async () => {
-    const baseProvider = overviewDto().providers[0];
-    const commandProvider: OverviewProvider = {
-      ...baseProvider,
-      authMode: "unsupported",
-      classification: "advanced",
-      editable: false,
-      canReplaceCommandCredential: true,
-      readOnlyReason: "Provider 使用不支持的命令凭据。",
+    const noAuthProvider: OverviewProvider = {
+      ...overviewDto().providers[0],
+      authMode: "none",
+      hasApiKey: false,
     };
     renderRoute("/providers/dnslin", {
       ...unavailableClient,
-      getOverviewLoad: async () => overviewLoad(overviewDto({
-        state: "read-only",
-        targetConfiguration: targetConfiguration(undefined, { status: "read-only", writable: false }),
-        providers: [commandProvider],
-      }), readyState),
+      getOverviewLoad: async () => overviewLoad(overviewDto({ providers: [noAuthProvider] }), readyState),
+      editCustomProvider,
     });
 
-    expect(await screen.findByRole("button", { name: "替换为文本 API Key" })).toBeDisabled();
+    await user.click(await screen.findByRole("button", { name: "编辑 Provider" }));
+    const dialog = screen.getByRole("dialog");
+    await user.clear(within(dialog).getByLabelText("Base URL"));
+    await user.type(within(dialog).getByLabelText("Base URL"), "https://edited.example/v1");
+    await user.click(within(dialog).getByRole("button", { name: "保存 Provider" }));
+
+    await waitFor(() => expect(editCustomProvider).toHaveBeenCalledWith(expect.objectContaining({
+      authMode: "none",
+      apiKey: { kind: "keep" },
+    })));
   });
+
   it("confirms Direct API Key deletion before switching to no authentication", async () => {
     const user = userEvent.setup();
     const typedKey = "fixture-typed-direct-key-must-not-escape";
@@ -1588,7 +1550,7 @@ function overviewDto(overrides: Partial<OverviewDto> = {}): OverviewDto {
       config: { canonicalPath: "/Users/username/.omp/agent/config.yml", resolvedPath: "/Users/username/.omp/agent/config.yml", status: "normal", contentHash: "config-hash" },
     },
     counts: { providerCount: 1, modelCount: 1, roleCount: 2 },
-    providers: [{ id: "dnslin", name: "Local", baseUrl: "https://example.com", defaultApi: "openai-responses", authMode: "api-key", hasApiKey: true, modelCount: 1, canReplaceCommandCredential: false, classification: "custom", editable: true, readOnlyReason: null, models: [model] }],
+    providers: [{ id: "dnslin", name: "Local", baseUrl: "https://example.com", defaultApi: "openai-responses", authMode: "api-key", hasApiKey: true, modelCount: 1, classification: "custom", editable: true, readOnlyReason: null, models: [model] }],
     models: [model],
     roles: [{ id: "default", status: "configured", selector: "dnslin/gpt-5.6-sol:max" }, { id: "task", status: "configured", selector: "dnslin/gpt-5.6-sol" }],
     emptyReason: null,

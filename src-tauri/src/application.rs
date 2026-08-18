@@ -11,15 +11,15 @@ use parking_lot::{Condvar, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_opener::OpenerExt;
 
-pub(crate) use crate::provider_creation::{
+pub(crate) use crate::provider_mutation::{
     CreateCustomProviderInput, CreateCustomProviderResult, EditCustomProviderInput,
-    EditCustomProviderResult, ReplaceCommandCredentialInput,
+    EditCustomProviderResult, ProviderMutationFailurePoint,
 };
 
 #[cfg(test)]
-pub(crate) use crate::provider_creation::{
-    CreateModelFields, CreateProviderFields, DirectApiKeyIntent, ProviderAuthMode,
-    ProviderCreationFailurePoint, SupportedApi, SupportedInput,
+pub(crate) use crate::provider_mutation::{
+    CreateModelFields, CreateProviderFields, DirectApiKeyIntent, ProviderAuthMode, SupportedApi,
+    SupportedInput,
 };
 
 use crate::{
@@ -27,7 +27,7 @@ use crate::{
     error::{AppError, io_error_cause},
     omp_environment::{OmpEnvironment, SystemOmpEnvironment},
     overview::{OverviewDto, OverviewReadResult, read_overview},
-    provider_creation,
+    provider_mutation,
     redaction::redact_diagnostic,
     target_configuration::{
         TargetConfigurationDiscovery, TargetConfigurationStatus, TargetInitializationExpectation,
@@ -230,9 +230,66 @@ pub struct AppService {
     detection_lock: Arc<Mutex<()>>,
     overview_load: Arc<OverviewLoadCoordinator>,
     #[cfg(test)]
-    provider_creation_failure: Arc<Mutex<Option<ProviderCreationFailurePoint>>>,
+    provider_mutation_failure: Arc<Mutex<Option<ProviderMutationFailurePoint>>>,
 }
 
+#[derive(Clone, Copy)]
+enum ProviderWriteOperation {
+    Create,
+    Edit,
+}
+
+impl ProviderWriteOperation {
+    fn confirmation_required_error(self) -> AppError {
+        match self {
+            Self::Create => AppError::new(
+                "provider-create-confirmation-required",
+                "尚未确认新的 OMP 与 Target configuration，不能创建 Provider。",
+                "请先在设置页面确认 OMP 切换后重试。",
+            ),
+            Self::Edit => AppError::new(
+                "provider-edit-confirmation-required",
+                "尚未确认新的 OMP 与 Target configuration，不能编辑 Provider。",
+                "请先在设置页面确认 OMP 切换后重试。",
+            ),
+        }
+    }
+
+    fn unavailable_error(self) -> AppError {
+        match self {
+            Self::Create => AppError::new(
+                "provider-create-unavailable",
+                "无法重新验证 OMP 的 Target configuration。",
+                "请重新检测或重新选择 OMP。",
+            ),
+            Self::Edit => AppError::new(
+                "provider-edit-unavailable",
+                "无法重新验证 OMP 的 Target configuration。",
+                "请重新检测或重新选择 OMP。",
+            ),
+        }
+    }
+
+    fn catalog_missing_error(self) -> AppError {
+        match self {
+            Self::Create => AppError::new(
+                "provider-create-catalog-missing",
+                "当前 OMP 版本没有匹配的 bundled Provider 清单。",
+                "为避免覆盖 OMP 内置 Provider，Provider 与模型管理暂时只读。",
+            ),
+            Self::Edit => AppError::new(
+                "provider-edit-catalog-missing",
+                "当前 OMP 版本没有匹配的 bundled Provider 清单。",
+                "为避免覆盖 OMP 内置 Provider，Provider 与模型管理暂时只读。",
+            ),
+        }
+    }
+}
+
+struct ProviderWriteContext {
+    target: Box<TargetConfigurationDiscovery>,
+    catalog: &'static bundled_catalog::BundledCatalog,
+}
 impl AppService {
     pub fn new(settings_path: PathBuf) -> Result<Self, AppError> {
         let transaction_root = settings_path
@@ -267,7 +324,7 @@ impl AppService {
             detection_lock: Arc::new(Mutex::new(())),
             overview_load: Arc::new(OverviewLoadCoordinator::default()),
             #[cfg(test)]
-            provider_creation_failure: Arc::new(Mutex::new(None)),
+            provider_mutation_failure: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -750,46 +807,13 @@ impl AppService {
         input: CreateCustomProviderInput,
     ) -> Result<CreateCustomProviderResult, AppError> {
         let _detection = self.detection_lock.lock();
-        let state = self.detect_omp_internal();
-        let (version, target) = match state {
-            StartupState::OmpReady {
-                version,
-                target_configuration,
-                requires_confirmation: false,
-                ..
-            } => (version, target_configuration),
-            StartupState::OmpReady { .. } => {
-                return Err(AppError::new(
-                    "provider-create-confirmation-required",
-                    "尚未确认新的 OMP 与 Target configuration，不能创建 Provider。",
-                    "请先在设置页面确认 OMP 切换后重试。",
-                ));
-            }
-            _ => {
-                return Err(AppError::new(
-                    "provider-create-unavailable",
-                    "无法重新验证 OMP 的 Target configuration。",
-                    "请重新检测或重新选择 OMP。",
-                ));
-            }
-        };
-        let catalog = bundled_catalog::for_version(&version)?.ok_or_else(|| {
-            AppError::new(
-                "provider-create-catalog-missing",
-                "当前 OMP 版本没有匹配的 bundled Provider 清单。",
-                "为避免覆盖 OMP 内置 Provider，Provider 与模型管理暂时只读。",
-            )
-        })?;
-        #[cfg(test)]
-        let failure = self.provider_creation_failure.lock().take();
-        #[cfg(not(test))]
-        let failure = None;
-        let result = provider_creation::create_custom_provider(
-            &target,
+        let context = self.prepare_provider_write(ProviderWriteOperation::Create)?;
+        let result = provider_mutation::create_custom_provider(
+            &context.target,
             &self.backup_root,
-            catalog,
+            context.catalog,
             &input,
-            failure,
+            self.take_provider_mutation_failure(),
         );
         if result.is_ok() {
             self.clear_configuration_snapshot();
@@ -802,46 +826,13 @@ impl AppService {
         input: EditCustomProviderInput,
     ) -> Result<EditCustomProviderResult, AppError> {
         let _detection = self.detection_lock.lock();
-        let state = self.detect_omp_internal();
-        let (version, target) = match state {
-            StartupState::OmpReady {
-                version,
-                target_configuration,
-                requires_confirmation: false,
-                ..
-            } => (version, target_configuration),
-            StartupState::OmpReady { .. } => {
-                return Err(AppError::new(
-                    "provider-edit-confirmation-required",
-                    "尚未确认新的 OMP 与 Target configuration，不能编辑 Provider。",
-                    "请先在设置页面确认 OMP 切换后重试。",
-                ));
-            }
-            _ => {
-                return Err(AppError::new(
-                    "provider-edit-unavailable",
-                    "无法重新验证 OMP 的 Target configuration。",
-                    "请重新检测或重新选择 OMP。",
-                ));
-            }
-        };
-        let catalog = bundled_catalog::for_version(&version)?.ok_or_else(|| {
-            AppError::new(
-                "provider-edit-catalog-missing",
-                "当前 OMP 版本没有匹配的 bundled Provider 清单。",
-                "为避免覆盖 OMP 内置 Provider，Provider 与模型管理暂时只读。",
-            )
-        })?;
-        #[cfg(test)]
-        let failure = self.provider_creation_failure.lock().take();
-        #[cfg(not(test))]
-        let failure = None;
-        let result = provider_creation::edit_custom_provider(
-            &target,
+        let context = self.prepare_provider_write(ProviderWriteOperation::Edit)?;
+        let result = provider_mutation::edit_custom_provider(
+            &context.target,
             &self.backup_root,
-            catalog,
+            context.catalog,
             &input,
-            failure,
+            self.take_provider_mutation_failure(),
         );
         if result.is_ok() {
             self.clear_configuration_snapshot();
@@ -849,11 +840,10 @@ impl AppService {
         result
     }
 
-    pub fn replace_command_credential(
+    fn prepare_provider_write(
         &self,
-        input: ReplaceCommandCredentialInput,
-    ) -> Result<EditCustomProviderResult, AppError> {
-        let _detection = self.detection_lock.lock();
+        operation: ProviderWriteOperation,
+    ) -> Result<ProviderWriteContext, AppError> {
         let state = self.detect_omp_internal();
         let (version, target) = match state {
             StartupState::OmpReady {
@@ -862,51 +852,31 @@ impl AppService {
                 requires_confirmation: false,
                 ..
             } => (version, target_configuration),
-            StartupState::OmpReady { .. } => {
-                return Err(AppError::new(
-                    "provider-edit-confirmation-required",
-                    "尚未确认新的 OMP 与 Target configuration，不能替换 Direct API Key。",
-                    "请先在设置页面确认 OMP 切换后重试。",
-                ));
-            }
-            _ => {
-                return Err(AppError::new(
-                    "provider-edit-unavailable",
-                    "无法重新验证 OMP 的 Target configuration。",
-                    "请重新检测或重新选择 OMP。",
-                ));
-            }
+            StartupState::OmpReady { .. } => return Err(operation.confirmation_required_error()),
+            _ => return Err(operation.unavailable_error()),
         };
-        let catalog = bundled_catalog::for_version(&version)?.ok_or_else(|| {
-            AppError::new(
-                "provider-edit-catalog-missing",
-                "当前 OMP 版本没有匹配的 bundled Provider 清单。",
-                "为避免覆盖 OMP 内置 Provider，Provider 与模型管理暂时只读。",
-            )
-        })?;
+        let catalog = bundled_catalog::for_version(&version)?
+            .ok_or_else(|| operation.catalog_missing_error())?;
+        Ok(ProviderWriteContext { target, catalog })
+    }
+
+    fn take_provider_mutation_failure(&self) -> Option<ProviderMutationFailurePoint> {
         #[cfg(test)]
-        let failure = self.provider_creation_failure.lock().take();
-        #[cfg(not(test))]
-        let failure = None;
-        let result = provider_creation::replace_command_credential(
-            &target,
-            &self.backup_root,
-            catalog,
-            &input,
-            failure,
-        );
-        if result.is_ok() {
-            self.clear_configuration_snapshot();
+        {
+            self.provider_mutation_failure.lock().take()
         }
-        result
+        #[cfg(not(test))]
+        {
+            None
+        }
     }
 
     #[cfg(test)]
-    pub(crate) fn set_provider_creation_failure_for_test(
+    pub(crate) fn set_provider_mutation_failure_for_test(
         &self,
-        failure: ProviderCreationFailurePoint,
+        failure: ProviderMutationFailurePoint,
     ) {
-        *self.provider_creation_failure.lock() = Some(failure);
+        *self.provider_mutation_failure.lock() = Some(failure);
     }
 
     fn update_settings(
@@ -1127,17 +1097,6 @@ pub fn edit_custom_provider(
     let started_at = Instant::now();
     let result = service.edit_custom_provider(input);
     log_command_result("edit_custom_provider", started_at, &result);
-    result
-}
-
-#[tauri::command]
-pub fn replace_command_credential(
-    service: tauri::State<'_, AppService>,
-    input: ReplaceCommandCredentialInput,
-) -> Result<EditCustomProviderResult, AppError> {
-    let started_at = Instant::now();
-    let result = service.replace_command_credential(input);
-    log_command_result("replace_command_credential", started_at, &result);
     result
 }
 

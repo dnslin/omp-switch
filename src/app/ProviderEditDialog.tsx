@@ -58,12 +58,6 @@ const providerEditSchema = z.object({
   apiKey: directApiKeySchema,
 });
 
-const commandCredentialReplacementSchema = z.object({
-  baseUrl: z.string(),
-  defaultApi: z.union([protocolSchema, z.literal("")]),
-  authMode: z.enum(["api-key", "none"]),
-  apiKey: directApiKeySchema,
-});
 
 type ProviderEditValues = z.infer<typeof providerEditSchema>;
 
@@ -93,17 +87,14 @@ export function ProviderEditDialog({
   const submissionInFlight = useRef(false);
   const successfulSubmission = useRef(false);
   const feedbackRef = useRef<HTMLElement>(null);
-  const commandCredential = provider.canReplaceCommandCredential;
   const startedWithApiKey = provider.authMode === "api-key";
   const defaultValues: ProviderEditValues = {
     baseUrl: provider.baseUrl ?? "",
     defaultApi: provider.defaultApi ?? "",
-    authMode: startedWithApiKey || commandCredential ? "api-key" : "none",
+    authMode: startedWithApiKey ? "api-key" : "none",
     apiKey: "",
   };
-  const validationSchema = commandCredential
-    ? commandCredentialReplacementSchema
-    : providerEditSchema;
+  const validationSchema = providerEditSchema;
   const {
     clearErrors,
     control,
@@ -121,8 +112,7 @@ export function ProviderEditDialog({
     defaultValues,
   });
   const values = watch();
-  const requiresReplacement = commandCredential
-    || (values.authMode === "api-key" && !startedWithApiKey);
+  const requiresReplacement = values.authMode === "api-key" && !startedWithApiKey;
   const canSave = isDirty
     && validationSchema.safeParse(values).success
     && (!requiresReplacement || values.apiKey.trim().length > 0);
@@ -164,23 +154,16 @@ export function ProviderEditDialog({
 
   const requestNoAuthentication = useCallback(() => {
     if (values.authMode === "none") return;
-    if (commandCredential) {
-      setError("apiKey", {
-        type: "validate",
-        message: "当前命令凭据只能替换为新的 Direct API Key。",
-      }, { shouldFocus: true });
-      return;
-    }
     if (provider.hasApiKey) {
       setConfirmNoAuth(true);
       return;
     }
     applyNoAuthentication();
-  }, [applyNoAuthentication, commandCredential, provider.hasApiKey, setError, values.authMode]);
+  }, [applyNoAuthentication, provider.hasApiKey, values.authMode]);
 
   const submit = async (form: ProviderEditValues) => {
     if (submissionInFlight.current || postSaveError) return;
-    if (form.authMode === "api-key" && (!startedWithApiKey || commandCredential) && !form.apiKey.trim()) {
+    if (form.authMode === "api-key" && !startedWithApiKey && !form.apiKey.trim()) {
       setError("apiKey", {
         type: "validate",
         message: "为 API Key 认证输入新的 Direct API Key。",
@@ -192,20 +175,14 @@ export function ProviderEditDialog({
     setSubmitting(true);
     setSubmissionError(null);
     try {
-      const result = commandCredential
-        ? await client.replaceCommandCredential({
-          openedModelsHash,
-          providerId: provider.id,
-          apiKey: { kind: "replace", value: form.apiKey },
-        })
-        : await client.editCustomProvider({
-          openedModelsHash,
-          providerId: provider.id,
-          baseUrl: form.baseUrl.trim().replace(/\/+$/, ""),
-          defaultApi: form.defaultApi || undefined,
-          authMode: form.authMode,
-          apiKey: keyIntent(form),
-        });
+      const result = await client.editCustomProvider({
+        openedModelsHash,
+        providerId: provider.id,
+        baseUrl: form.baseUrl.trim().replace(/\/+$/, ""),
+        defaultApi: form.defaultApi || undefined,
+        authMode: form.authMode,
+        apiKey: keyIntent(form, startedWithApiKey),
+      });
       reset({ ...form, apiKey: "" });
       successfulSubmission.current = true;
       const reloadError = await onSaved(result);
@@ -288,15 +265,13 @@ export function ProviderEditDialog({
           >
             <div className="provider-edit-form__body">
               <header className="provider-edit-heading">
-                <DialogTitle>{commandCredential ? "替换 Direct API Key" : "编辑 Provider"}</DialogTitle>
+                <DialogTitle>编辑 Provider</DialogTitle>
                 <DialogDescription id="provider-edit-description">
-                  {commandCredential
-                    ? "此 Provider 使用不受支持的命令凭据。只能用新的 Direct API Key 替换它；其他字段保持只读。"
-                    : "只更新已支持的 Provider 字段。Provider ID 保持不变，现有 Direct API Key 不会显示。"}
+                  只更新已支持的 Provider 字段。Provider ID 保持不变，现有 Direct API Key 不会显示。
                 </DialogDescription>
               </header>
 
-              <section className="provider-create-fields provider-edit-fields" aria-label={commandCredential ? "命令凭据替换字段" : "Provider 编辑字段"}>
+              <section className="provider-create-fields provider-edit-fields" aria-label="Provider 编辑字段">
                 <EditField label="Provider ID" htmlFor="provider-edit-id">
                   <Input
                     id="provider-edit-id"
@@ -307,8 +282,6 @@ export function ProviderEditDialog({
                   />
                   <p id="provider-edit-id-note" className="provider-edit-field-note">Stable ID 创建后不可修改。</p>
                 </EditField>
-                {!commandCredential ? (
-                  <>
                 <EditField label="Base URL" htmlFor="provider-edit-base-url" error={errors.baseUrl?.message}>
                   <Input
                     id="provider-edit-base-url"
@@ -360,7 +333,6 @@ export function ProviderEditDialog({
                             checked={field.value === "none"}
                             aria-label="无需认证"
                             onChange={requestNoAuthentication}
-                            disabled={commandCredential}
                           />
                           <span>无需认证</span>
                         </label>
@@ -368,8 +340,6 @@ export function ProviderEditDialog({
                     )}
                   />
                 </div>
-                  </>
-                ) : null}
                 {values.authMode === "api-key" ? (
                   <EditField label="API Key" htmlFor="provider-edit-api-key" error={errors.apiKey?.message}>
                     <div className="provider-create-key-input">
@@ -385,12 +355,10 @@ export function ProviderEditDialog({
                         {showApiKey ? <Eye aria-hidden="true" /> : <EyeOff aria-hidden="true" />}
                       </button>
                     </div>
-                    <p className={`provider-edit-key-status${commandCredential ? " provider-edit-key-status--warning" : ""}`}>
-                      {commandCredential
-                        ? "当前 Provider 使用不受支持的命令凭据。OMP Switch 不会显示或执行它；输入新的 Direct API Key 才能替换。"
-                        : provider.hasApiKey ? "已配置。留空会保留当前密钥。" : "未配置。"}
+                    <p className="provider-edit-key-status">
+                      {provider.hasApiKey ? "已配置。留空会保留当前密钥。" : "未配置。"}
                     </p>
-                    {provider.hasApiKey && !commandCredential ? (
+                    {provider.hasApiKey ? (
                       <Button type="button" variant="secondary" className="provider-edit-delete-key" onClick={requestNoAuthentication}>
                         删除 API Key
                       </Button>
@@ -416,7 +384,7 @@ export function ProviderEditDialog({
               ) : submissionError ? (
                 <section ref={feedbackRef} className="provider-create-submit-error" role="alert" aria-live="assertive">
                   <div>
-                    <strong>{submissionError.code === "models-hash-conflict" ? "配置冲突" : commandCredential ? "无法替换 Direct API Key" : "无法保存 Provider"}</strong>
+                    <strong>{submissionError.code === "models-hash-conflict" ? "配置冲突" : "无法保存 Provider"}</strong>
                     <p>{submissionError.message}</p>
                     <p>{submissionError.action}</p>
                   </div>
@@ -433,7 +401,7 @@ export function ProviderEditDialog({
               <div className="provider-create-footer__actions">
                 <Button type="button" variant="secondary" disabled={submitting} onClick={requestDismiss}>取消</Button>
                 <Button type="submit" disabled={!canSave || submitting || Boolean(postSaveError)} aria-busy={submitting}>
-                  {submitting ? "保存中…" : commandCredential ? "替换 Direct API Key" : "保存 Provider"}
+                  {submitting ? "保存中…" : "保存 Provider"}
                 </Button>
               </div>
             </footer>
@@ -515,8 +483,11 @@ function EditField({
   );
 }
 
-function keyIntent(values: ProviderEditValues): EditCustomProviderInput["apiKey"] {
-  if (values.authMode === "none") return { kind: "delete" };
+function keyIntent(
+  values: ProviderEditValues,
+  startedWithApiKey: boolean,
+): EditCustomProviderInput["apiKey"] {
+  if (values.authMode === "none") return startedWithApiKey ? { kind: "delete" } : { kind: "keep" };
   if (values.apiKey.trim()) return { kind: "replace", value: values.apiKey };
   return { kind: "keep" };
 }

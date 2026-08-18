@@ -12,8 +12,8 @@ use crate::{
     application::{
         AppService, AppSettings, CreateCustomProviderInput, CreateModelFields,
         CreateProviderFields, DirectApiKeyIntent, EditCustomProviderInput, OverviewLoadDto,
-        ProviderAuthMode, ProviderCreationFailurePoint, ReplaceCommandCredentialInput,
-        StartupState, SupportedApi, SupportedInput, Theme, UiSettingsUpdate,
+        ProviderAuthMode, ProviderMutationFailurePoint, StartupState, SupportedApi, SupportedInput,
+        Theme, UiSettingsUpdate,
     },
     omp_environment::{CommandOutput, OmpEnvironment},
     target_configuration::{
@@ -2399,7 +2399,7 @@ fn overview_missing_canonical_files_returns_empty_without_business_snapshot() {
     assert!(service.configuration_snapshot_for_test().is_none());
 }
 
-fn provider_creation_service(target: &Path, app_data: &Path) -> AppService {
+fn provider_mutation_service(target: &Path, app_data: &Path) -> AppService {
     fs::create_dir_all(app_data).unwrap();
     let environment = Arc::new(FakeOmpEnvironment {
         path_omp: Some(PathBuf::from("/bin/temp-omp")),
@@ -2503,7 +2503,7 @@ providers:
 "#;
     fs::write(target.join("models.yml"), original).unwrap();
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = provider_creation_service(&target, app_data.path());
+    let service = provider_mutation_service(&target, app_data.path());
     let opened_models_hash = service
         .get_overview_load()
         .overview
@@ -2568,7 +2568,7 @@ fn provider_edit_keeps_an_existing_direct_api_key() {
     )
     .unwrap();
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = provider_creation_service(&target, app_data.path());
+    let service = provider_mutation_service(&target, app_data.path());
 
     service
         .edit_custom_provider(provider_edit_input(
@@ -2603,7 +2603,7 @@ fn provider_edit_deletes_the_direct_api_key_for_no_authentication() {
     )
     .unwrap();
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = provider_creation_service(&target, app_data.path());
+    let service = provider_mutation_service(&target, app_data.path());
     let mut input = provider_edit_input(opened_models_hash(&service), DirectApiKeyIntent::Delete);
     input.auth_mode = ProviderAuthMode::None;
 
@@ -2646,7 +2646,7 @@ fn provider_edit_rejects_masked_or_command_key_replacements_without_leaking_them
     let original = editable_provider_yaml(Some("fixture-existing-direct-key"));
     fs::write(target.join("models.yml"), &original).unwrap();
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = provider_creation_service(&target, app_data.path());
+    let service = provider_mutation_service(&target, app_data.path());
     for replacement in [
         "••••••",
         "!fixture-command-key-must-not-leak",
@@ -2680,7 +2680,7 @@ fn provider_edit_stops_on_an_external_models_hash_conflict() {
     )
     .unwrap();
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = provider_creation_service(&target, app_data.path());
+    let service = provider_mutation_service(&target, app_data.path());
     let opened_models_hash = opened_models_hash(&service);
     let externally_changed = b"unrecognizedRoot:\n  changed: outside-omp-switch\nproviders: {}\n";
     fs::write(target.join("models.yml"), externally_changed).unwrap();
@@ -2708,57 +2708,57 @@ fn provider_edit_stops_on_an_external_models_hash_conflict() {
 #[test]
 fn provider_edit_failure_injection_keeps_the_original_file_intact() {
     let mut failures = vec![
-        ("before backup", ProviderCreationFailurePoint::BeforeBackup),
+        ("before backup", ProviderMutationFailurePoint::BeforeBackup),
         (
             "backup directory",
-            ProviderCreationFailurePoint::BackupDirectoryCreationFailure,
+            ProviderMutationFailurePoint::BackupDirectoryCreationFailure,
         ),
         (
             "backup file open",
-            ProviderCreationFailurePoint::BackupFileOpenFailure,
+            ProviderMutationFailurePoint::BackupFileOpenFailure,
         ),
         (
             "backup file write",
-            ProviderCreationFailurePoint::BackupFileWriteFailure,
+            ProviderMutationFailurePoint::BackupFileWriteFailure,
         ),
         (
             "backup file sync",
-            ProviderCreationFailurePoint::BackupFileSyncFailure,
+            ProviderMutationFailurePoint::BackupFileSyncFailure,
         ),
         (
             "temporary open",
-            ProviderCreationFailurePoint::TemporaryFileOpenFailure,
+            ProviderMutationFailurePoint::TemporaryFileOpenFailure,
         ),
         (
             "temporary write",
-            ProviderCreationFailurePoint::TemporaryFileWriteFailure,
+            ProviderMutationFailurePoint::TemporaryFileWriteFailure,
         ),
         (
             "temporary sync",
-            ProviderCreationFailurePoint::TemporaryFileSyncFailure,
+            ProviderMutationFailurePoint::TemporaryFileSyncFailure,
         ),
-        ("after backup", ProviderCreationFailurePoint::AfterBackup),
+        ("after backup", ProviderMutationFailurePoint::AfterBackup),
         (
             "before temporary write",
-            ProviderCreationFailurePoint::BeforeTemporaryWrite,
+            ProviderMutationFailurePoint::BeforeTemporaryWrite,
         ),
         (
             "temporary reparse",
-            ProviderCreationFailurePoint::CorruptTemporaryFile,
+            ProviderMutationFailurePoint::CorruptTemporaryFile,
         ),
         (
             "untouched comparison",
-            ProviderCreationFailurePoint::MutateUntouchedValue,
+            ProviderMutationFailurePoint::MutateUntouchedValue,
         ),
         (
             "before replacement",
-            ProviderCreationFailurePoint::BeforeReplacement,
+            ProviderMutationFailurePoint::BeforeReplacement,
         ),
     ];
     #[cfg(unix)]
     failures.push((
         "replacement commit",
-        ProviderCreationFailurePoint::CommitFailure,
+        ProviderMutationFailurePoint::CommitFailure,
     ));
     for (name, failure) in failures {
         let app_data = tempdir().unwrap();
@@ -2767,14 +2767,14 @@ fn provider_edit_failure_injection_keeps_the_original_file_intact() {
         let original = editable_provider_yaml(Some("fixture-failure-direct-key"));
         fs::write(target.join("models.yml"), &original).unwrap();
         fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-        let service = provider_creation_service(&target, app_data.path());
+        let service = provider_mutation_service(&target, app_data.path());
         let input = provider_edit_input(
             opened_models_hash(&service),
             DirectApiKeyIntent::Replace {
                 value: "fixture-replacement-for-injection".to_owned(),
             },
         );
-        service.set_provider_creation_failure_for_test(failure);
+        service.set_provider_mutation_failure_for_test(failure);
 
         let error = service.edit_custom_provider(input).unwrap_err();
 
@@ -2795,7 +2795,7 @@ fn provider_edit_refuses_a_base_url_that_was_redacted_from_the_projection() {
     let original = b"providers:\n  editable:\n    baseUrl: https://fixture-user:fixture-base-url-password@example.com/v1\n    api: openai-responses\n    apiKey: fixture-existing-direct-key\n    models:\n      - id: editable-model\n        name: Editable Model\n        reasoning: false\n        input: [text]\n        contextWindow: 4096\n        maxTokens: 1024\n";
     fs::write(target.join("models.yml"), original).unwrap();
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = provider_creation_service(&target, app_data.path());
+    let service = provider_mutation_service(&target, app_data.path());
     let overview = service.get_overview_load().overview.unwrap();
     let opened_models_hash = overview.files.models.content_hash.clone().unwrap();
     let projected = serde_json::to_string(&overview).unwrap();
@@ -2818,155 +2818,78 @@ fn provider_edit_refuses_a_base_url_that_was_redacted_from_the_projection() {
 }
 
 #[test]
-fn provider_replaces_a_tagged_command_credential_without_returning_it() {
+fn provider_overview_does_not_expose_a_secret_in_a_safe_named_base_url_query() {
     let app_data = tempdir().unwrap();
     let target = app_data.path().join("agent");
     fs::create_dir_all(&target).unwrap();
-    let command_payload = "fixture-command-credential-must-not-leak";
+    let secret = format!("{}{}", "sk-", "fixture-query-secret");
+    let base_url = format!("https://original.example/v1?project={secret}");
     let original = format!(
-        "providers:\n  editable:\n    baseUrl: https://fixture-user:fixture-base-url-password@original.example/v1\n    api: openai-responses\n    apiKey: !command {command_payload}\n    models:\n      - id: editable-model\n        name: Editable Model\n        reasoning: false\n        input: [text]\n        contextWindow: 4096\n        maxTokens: 1024\n"
+        "providers:\n  editable:\n    baseUrl: {base_url}\n    api: openai-responses\n    apiKey: fixture-existing-direct-key\n    models:\n      - id: editable-model\n        name: Editable Model\n        reasoning: false\n        input: [text]\n        contextWindow: 4096\n        maxTokens: 1024\n"
     );
     fs::write(target.join("models.yml"), &original).unwrap();
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = provider_creation_service(&target, app_data.path());
+    let service = provider_mutation_service(&target, app_data.path());
     let overview = service.get_overview_load().overview.unwrap();
-    let opened_models_hash = overview.files.models.content_hash.clone().unwrap();
     let overview_json = serde_json::to_string(&overview).unwrap();
-    let replacement = "fixture-direct-replacement";
 
-    assert_eq!(
-        overview.providers[0].auth_mode,
-        crate::overview::OverviewAuthMode::Unsupported
-    );
-    assert_eq!(
-        overview.providers[0].classification,
-        crate::overview::ProviderClassification::Advanced
-    );
+    assert!(!overview_json.contains(&secret));
     assert!(!overview.providers[0].editable);
-    assert!(overview.providers[0].can_replace_command_credential);
-    assert!(!overview_json.contains(command_payload));
-    assert!(!overview_json.contains("fixture-user"));
-    assert!(!overview_json.contains("fixture-base-url-password"));
-    let result = service
-        .replace_command_credential(ReplaceCommandCredentialInput {
-            opened_models_hash,
-            provider_id: "editable".to_owned(),
-            api_key: DirectApiKeyIntent::Replace {
-                value: replacement.to_owned(),
-            },
-        })
-        .unwrap();
+}
 
-    assert!(
-        !serde_json::to_string(&result)
-            .unwrap()
-            .contains(replacement)
+#[test]
+fn provider_edit_preserves_an_explicit_default_port_in_base_url() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_base_url = "https://original.example:443/v1";
+    let original = editable_provider_yaml(Some("fixture-existing-direct-key")).replacen(
+        "https://original.example/v1",
+        original_base_url,
+        1,
     );
+    fs::write(target.join("models.yml"), &original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+    let mut input = provider_edit_input(
+        overview.files.models.content_hash.clone().unwrap(),
+        DirectApiKeyIntent::Keep,
+    );
+    input.base_url = overview.providers[0].base_url.clone().unwrap();
+
+    assert_eq!(
+        overview.providers[0].base_url.as_deref(),
+        Some(original_base_url)
+    );
+    assert!(overview.providers[0].editable);
+    service.edit_custom_provider(input).unwrap();
+
     let after: serde_yaml::Value =
         serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
-    let provider = &after["providers"]["editable"];
-    let stored = provider["apiKey"].as_str().unwrap();
     assert_eq!(
-        Sha256::digest(stored.as_bytes()),
-        Sha256::digest(replacement.as_bytes())
-    );
-    assert_eq!(
-        provider["baseUrl"].as_str(),
-        Some("https://fixture-user:fixture-base-url-password@original.example/v1")
-    );
-    assert_eq!(provider["api"].as_str(), Some("openai-responses"));
-    let refreshed = serde_json::to_string(&service.get_overview_load().overview.unwrap()).unwrap();
-    assert!(!refreshed.contains(command_payload));
-    assert!(!refreshed.contains(replacement));
-}
-
-#[test]
-fn tagged_command_credential_requires_an_explicit_replacement_intent() {
-    let app_data = tempdir().unwrap();
-    let target = app_data.path().join("agent");
-    fs::create_dir_all(&target).unwrap();
-    let command_payload = "fixture-command-credential-must-not-leak";
-    let original = format!(
-        "providers:\n  editable:\n    baseUrl: https://original.example/v1\n    api: openai-responses\n    apiKey: !command {command_payload}\n    models:\n      - id: editable-model\n        name: Editable Model\n        reasoning: false\n        input: [text]\n        contextWindow: 4096\n        maxTokens: 1024\n"
-    );
-    fs::write(target.join("models.yml"), &original).unwrap();
-    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = provider_creation_service(&target, app_data.path());
-
-    let error = service
-        .replace_command_credential(ReplaceCommandCredentialInput {
-            opened_models_hash: opened_models_hash(&service),
-            provider_id: "editable".to_owned(),
-            api_key: DirectApiKeyIntent::Keep,
-        })
-        .unwrap_err();
-
-    assert_eq!(error.code, "provider-api-key-replacement-required");
-    assert!(
-        !serde_json::to_string(&error)
-            .unwrap()
-            .contains(command_payload)
-    );
-    assert_eq!(
-        Sha256::digest(fs::read(target.join("models.yml")).unwrap()),
-        Sha256::digest(original.as_bytes()),
+        after["providers"]["editable"]["baseUrl"].as_str(),
+        Some(original_base_url)
     );
 }
 
 #[test]
-fn tagged_command_credential_with_advanced_fields_replaces_only_its_key() {
+fn command_credential_has_no_mutation_capability_in_the_overview_dto() {
     let app_data = tempdir().unwrap();
     let target = app_data.path().join("agent");
     fs::create_dir_all(&target).unwrap();
-    let original = b"providers:\n  restricted:\n    baseUrl: https://original.example/v1\n    api: openai-responses\n    apiKey: !command fixture-command-credential-must-not-leak\n    headers:\n      x-provider-mode: custom\n    models:\n      - id: restricted-model\n        name: Restricted Model\n        reasoning: false\n        input: [text]\n        contextWindow: 4096\n        maxTokens: 1024\n";
+    let original = b"providers:\n  restricted:\n    baseUrl: https://original.example/v1\n    api: openai-responses\n    apiKey: !command fixture-command-credential\n    models:\n      - id: restricted-model\n        name: Restricted Model\n        reasoning: false\n        input: [text]\n        contextWindow: 4096\n        maxTokens: 1024\n";
     fs::write(target.join("models.yml"), original).unwrap();
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = provider_creation_service(&target, app_data.path());
+    let service = provider_mutation_service(&target, app_data.path());
     let overview = service.get_overview_load().overview.unwrap();
-    let opened_models_hash = overview.files.models.content_hash.clone().unwrap();
-    let replacement = "fixture-direct-replacement";
+    let overview_json = serde_json::to_value(overview).unwrap();
 
-    assert_eq!(
-        overview.providers[0].classification,
-        crate::overview::ProviderClassification::Advanced
-    );
-    assert!(!overview.providers[0].editable);
-    assert!(overview.providers[0].can_replace_command_credential);
-    let result = service
-        .replace_command_credential(ReplaceCommandCredentialInput {
-            opened_models_hash,
-            provider_id: "restricted".to_owned(),
-            api_key: DirectApiKeyIntent::Replace {
-                value: replacement.to_owned(),
-            },
-        })
-        .unwrap();
-
+    assert!(!overview_json["providers"][0]["editable"].as_bool().unwrap());
     assert!(
-        !serde_json::to_string(&result)
-            .unwrap()
-            .contains(replacement)
-    );
-    let before: serde_yaml::Value = serde_yaml::from_slice(original).unwrap();
-    let after: serde_yaml::Value =
-        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
-    let provider = &after["providers"]["restricted"];
-    assert_eq!(
-        provider["baseUrl"],
-        before["providers"]["restricted"]["baseUrl"]
-    );
-    assert_eq!(provider["api"], before["providers"]["restricted"]["api"]);
-    assert_eq!(
-        provider["headers"],
-        before["providers"]["restricted"]["headers"]
-    );
-    assert_eq!(
-        provider["models"],
-        before["providers"]["restricted"]["models"]
-    );
-    assert_eq!(
-        Sha256::digest(provider["apiKey"].as_str().unwrap().as_bytes()),
-        Sha256::digest(replacement.as_bytes()),
+        overview_json["providers"][0]
+            .get("canReplaceCommandCredential")
+            .is_none()
     );
 }
 
@@ -2993,7 +2916,7 @@ providers:
 "#;
     fs::write(target.join("models.yml"), original).unwrap();
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = provider_creation_service(&target, app_data.path());
+    let service = provider_mutation_service(&target, app_data.path());
     let opened_models_hash = service
         .get_overview_load()
         .overview
@@ -3086,7 +3009,7 @@ fn custom_provider_creation_preserves_api_key_mode_without_direct_key() {
     fs::create_dir_all(&target).unwrap();
     fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = provider_creation_service(&target, app_data.path());
+    let service = provider_mutation_service(&target, app_data.path());
     let opened_models_hash = service
         .get_overview_load()
         .overview
@@ -3121,7 +3044,7 @@ fn custom_provider_creation_accepts_spec_valid_model_suffix_and_limits() {
     fs::create_dir_all(&target).unwrap();
     fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = provider_creation_service(&target, app_data.path());
+    let service = provider_mutation_service(&target, app_data.path());
     let opened_models_hash = service
         .get_overview_load()
         .overview
@@ -3161,7 +3084,7 @@ fn custom_provider_creation_rejects_a_changed_models_hash_before_creating_a_back
     fs::create_dir_all(&target).unwrap();
     fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = provider_creation_service(&target, app_data.path());
+    let service = provider_mutation_service(&target, app_data.path());
     let opened_models_hash = service
         .get_overview_load()
         .overview
@@ -3216,7 +3139,7 @@ fn custom_provider_creation_stops_when_another_writer_holds_the_target_lock() {
         .open(lock_directory.join(format!("{fingerprint}.lock")))
         .unwrap();
     FileExt::lock(&lock).unwrap();
-    let service = provider_creation_service(&target, app_data.path());
+    let service = provider_mutation_service(&target, app_data.path());
     let opened_models_hash = service
         .get_overview_load()
         .overview
@@ -3242,7 +3165,7 @@ fn custom_provider_creation_rejects_invalid_and_colliding_values_without_writing
     let original = b"providers:\n  existing:\n    baseUrl: https://existing.example/v1\n    api: openai-responses\n    models:\n      - id: existing-model\n        name: Existing model\n        reasoning: false\n        input: [text]\n        contextWindow: 4096\n        maxTokens: 1024\n";
     fs::write(target.join("models.yml"), original).unwrap();
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = provider_creation_service(&target, app_data.path());
+    let service = provider_mutation_service(&target, app_data.path());
     let opened_models_hash = service
         .get_overview_load()
         .overview
@@ -3329,57 +3252,57 @@ fn custom_provider_creation_rejects_invalid_and_colliding_values_without_writing
 #[test]
 fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
     let mut failures = vec![
-        ("before backup", ProviderCreationFailurePoint::BeforeBackup),
+        ("before backup", ProviderMutationFailurePoint::BeforeBackup),
         (
             "backup directory creation",
-            ProviderCreationFailurePoint::BackupDirectoryCreationFailure,
+            ProviderMutationFailurePoint::BackupDirectoryCreationFailure,
         ),
         (
             "backup file open",
-            ProviderCreationFailurePoint::BackupFileOpenFailure,
+            ProviderMutationFailurePoint::BackupFileOpenFailure,
         ),
         (
             "backup file write",
-            ProviderCreationFailurePoint::BackupFileWriteFailure,
+            ProviderMutationFailurePoint::BackupFileWriteFailure,
         ),
         (
             "backup file sync",
-            ProviderCreationFailurePoint::BackupFileSyncFailure,
+            ProviderMutationFailurePoint::BackupFileSyncFailure,
         ),
         (
             "temporary file open",
-            ProviderCreationFailurePoint::TemporaryFileOpenFailure,
+            ProviderMutationFailurePoint::TemporaryFileOpenFailure,
         ),
         (
             "temporary file write",
-            ProviderCreationFailurePoint::TemporaryFileWriteFailure,
+            ProviderMutationFailurePoint::TemporaryFileWriteFailure,
         ),
         (
             "temporary file sync",
-            ProviderCreationFailurePoint::TemporaryFileSyncFailure,
+            ProviderMutationFailurePoint::TemporaryFileSyncFailure,
         ),
-        ("after backup", ProviderCreationFailurePoint::AfterBackup),
+        ("after backup", ProviderMutationFailurePoint::AfterBackup),
         (
             "before temporary write",
-            ProviderCreationFailurePoint::BeforeTemporaryWrite,
+            ProviderMutationFailurePoint::BeforeTemporaryWrite,
         ),
         (
             "temporary reparse",
-            ProviderCreationFailurePoint::CorruptTemporaryFile,
+            ProviderMutationFailurePoint::CorruptTemporaryFile,
         ),
         (
             "untouched comparison",
-            ProviderCreationFailurePoint::MutateUntouchedValue,
+            ProviderMutationFailurePoint::MutateUntouchedValue,
         ),
         (
             "before replacement",
-            ProviderCreationFailurePoint::BeforeReplacement,
+            ProviderMutationFailurePoint::BeforeReplacement,
         ),
     ];
     #[cfg(unix)]
     failures.push((
         "replacement commit failure",
-        ProviderCreationFailurePoint::CommitFailure,
+        ProviderMutationFailurePoint::CommitFailure,
     ));
     for (name, failure) in failures {
         let app_data = tempdir().unwrap();
@@ -3388,7 +3311,7 @@ fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
         let original = b"unrecognizedRoot:\n  nested:\n    value: preserve-me\nproviders: {}\n";
         fs::write(target.join("models.yml"), original).unwrap();
         fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-        let service = provider_creation_service(&target, app_data.path());
+        let service = provider_mutation_service(&target, app_data.path());
         let opened_models_hash = service
             .get_overview_load()
             .overview
@@ -3397,7 +3320,7 @@ fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
             .models
             .content_hash
             .unwrap();
-        service.set_provider_creation_failure_for_test(failure);
+        service.set_provider_mutation_failure_for_test(failure);
 
         assert!(
             service
@@ -3421,7 +3344,7 @@ fn custom_provider_creation_does_not_report_failure_after_replacing_models() {
     let original = b"unrecognizedRoot:\n  nested:\n    value: preserve-me\nproviders: {}\n";
     fs::write(target.join("models.yml"), original).unwrap();
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = provider_creation_service(&target, app_data.path());
+    let service = provider_mutation_service(&target, app_data.path());
     let opened_models_hash = service
         .get_overview_load()
         .overview
@@ -3430,8 +3353,8 @@ fn custom_provider_creation_does_not_report_failure_after_replacing_models() {
         .models
         .content_hash
         .unwrap();
-    service.set_provider_creation_failure_for_test(
-        ProviderCreationFailurePoint::AfterAtomicReplacement,
+    service.set_provider_mutation_failure_for_test(
+        ProviderMutationFailurePoint::AfterAtomicReplacement,
     );
 
     let result = service.create_custom_provider(provider_creation_input(opened_models_hash));
@@ -3460,7 +3383,7 @@ fn custom_provider_creation_reports_a_partial_backup_cleanup_failure() {
         let original = b"unrecognizedRoot:\n  nested:\n    value: preserve-me\nproviders: {}\n";
         fs::write(target.join("models.yml"), original).unwrap();
         fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-        let service = provider_creation_service(&target, app_data.path());
+        let service = provider_mutation_service(&target, app_data.path());
         let opened_models_hash = service
             .get_overview_load()
             .overview
@@ -3469,8 +3392,8 @@ fn custom_provider_creation_reports_a_partial_backup_cleanup_failure() {
             .models
             .content_hash
             .unwrap();
-        service.set_provider_creation_failure_for_test(
-            ProviderCreationFailurePoint::BackupFilePermissionAndCleanupFailure,
+        service.set_provider_mutation_failure_for_test(
+            ProviderMutationFailurePoint::BackupFilePermissionAndCleanupFailure,
         );
 
         let error = service

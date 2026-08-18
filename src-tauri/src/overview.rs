@@ -115,7 +115,6 @@ pub struct ProviderSummaryDto {
     pub has_api_key: bool,
     pub model_count: usize,
     pub classification: ProviderClassification,
-    pub can_replace_command_credential: bool,
     pub editable: bool,
     pub read_only_reason: Option<String>,
     pub models: Vec<ModelSummaryDto>,
@@ -478,7 +477,6 @@ fn project_providers(
                 continue;
             }
             provider.classification = ProviderClassification::Advanced;
-            provider.can_replace_command_credential = false;
             provider.editable = false;
             provider.read_only_reason =
                 Some("Provider ID 在全部 providers 中必须按不区分大小写唯一。".to_owned());
@@ -504,18 +502,6 @@ pub(crate) fn is_editable_custom_provider(
             .any(|provider| provider.id == provider_id && provider.editable)
 }
 
-pub(crate) fn can_replace_command_credential(
-    tree: &Value,
-    provider_id: &str,
-    catalog: &BundledCatalog,
-) -> bool {
-    let (providers, provider_ids_are_safe) = project_providers(tree, Some(catalog));
-    provider_ids_are_safe
-        && providers
-            .iter()
-            .any(|provider| provider.id == provider_id && provider.can_replace_command_credential)
-}
-
 fn project_provider(
     provider_id: String,
     value: &Value,
@@ -529,7 +515,6 @@ fn project_provider(
             default_api: None,
             auth_mode: OverviewAuthMode::Unsupported,
             has_api_key: false,
-            can_replace_command_credential: false,
             model_count: 0,
             classification: ProviderClassification::Unsupported,
             editable: false,
@@ -558,16 +543,14 @@ fn project_provider(
     if default_api_is_configured && default_api.is_none() {
         field_reason.get_or_insert_with(|| "Provider 使用了不支持的协议。".to_owned());
     }
-    let (auth_mode, has_api_key, unsupported_credential, command_credential) =
-        credential_projection(provider);
+    let (auth_mode, has_api_key, unsupported_credential) = credential_projection(provider);
     if unsupported_credential {
         field_reason.get_or_insert_with(|| "Provider 使用了不支持的凭据配置。".to_owned());
     }
     let models_value = mapping_get(provider, "models");
     let provider_fields_read_only = catalog.is_none()
         || catalog.is_some_and(|catalog| catalog.contains_provider(&provider_id))
-        || field_reason.is_some()
-        || command_credential;
+        || field_reason.is_some();
     let (entries, models_structure_valid) = models_value
         .map(model_entries)
         .unwrap_or((Vec::new(), false));
@@ -604,8 +587,6 @@ fn project_provider(
                 .iter()
                 .any(|model| catalog.contains_model(&provider_id, &model.id))
     });
-    let can_replace_command_credential =
-        command_credential && catalog.is_some() && !built_in_override;
 
     let classification = if catalog.is_none() {
         ProviderClassification::Unavailable
@@ -619,24 +600,19 @@ fn project_provider(
         ProviderClassification::Custom
     };
     let editable = classification == ProviderClassification::Custom;
-    let read_only_reason = if can_replace_command_credential {
-        Some(
-            "Provider 使用不支持的命令凭据。OMP Switch 不会显示或执行该命令；可以用新的 Direct API Key 替换，其他字段保持只读。".to_owned(),
-        )
-    } else {
-        match classification {
-            ProviderClassification::Custom => None,
-            ProviderClassification::BuiltInOverride => {
-                Some("Provider 或 Model ID 覆盖 OMP bundled catalog，只能查看。".to_owned())
-            }
-            ProviderClassification::Unavailable => Some(
-                "当前 OMP 版本没有匹配的 bundled Provider 清单，Provider 与模型管理暂时只读。"
-                    .to_owned(),
-            ),
-            ProviderClassification::Unsupported => field_reason
-                .or_else(|| Some("Provider 配置不符合可管理的 Custom Provider 结构。".to_owned())),
-            ProviderClassification::Advanced => field_reason
-                .or_else(|| Some("Provider 包含 OMP Switch 不支持的高级配置。".to_owned())),
+    let read_only_reason = match classification {
+        ProviderClassification::Custom => None,
+        ProviderClassification::BuiltInOverride => {
+            Some("Provider 或 Model ID 覆盖 OMP bundled catalog，只能查看。".to_owned())
+        }
+        ProviderClassification::Unavailable => Some(
+            "当前 OMP 版本没有匹配的 bundled Provider 清单，Provider 与模型管理暂时只读。"
+                .to_owned(),
+        ),
+        ProviderClassification::Unsupported => field_reason
+            .or_else(|| Some("Provider 配置不符合可管理的 Custom Provider 结构。".to_owned())),
+        ProviderClassification::Advanced => {
+            field_reason.or_else(|| Some("Provider 包含 OMP Switch 不支持的高级配置。".to_owned()))
         }
     };
     if !editable {
@@ -659,7 +635,6 @@ fn project_provider(
         default_api,
         auth_mode,
         has_api_key,
-        can_replace_command_credential,
         model_count: models.len(),
         classification,
         editable,
@@ -947,14 +922,13 @@ fn is_supported_thinking(value: &str) -> bool {
     )
 }
 
-fn credential_projection(provider: &Mapping) -> (OverviewAuthMode, bool, bool, bool) {
+fn credential_projection(provider: &Mapping) -> (OverviewAuthMode, bool, bool) {
     let value = mapping_get(provider, "apiKey");
     let has_api_key = value.is_some_and(|value| match value {
         Value::Null => false,
         Value::String(value) => !value.is_empty(),
         _ => true,
     });
-    let command_credential = value.is_some_and(is_command_credential);
     let unsupported_credential = value.is_some_and(|value| {
         is_command_credential(value) || !matches!(value, Value::Null | Value::String(_))
     });
@@ -966,15 +940,10 @@ fn credential_projection(provider: &Mapping) -> (OverviewAuthMode, bool, bool, b
     } else {
         OverviewAuthMode::None
     };
-    (
-        auth_mode,
-        has_api_key,
-        unsupported_credential,
-        command_credential,
-    )
+    (auth_mode, has_api_key, unsupported_credential)
 }
 
-pub(crate) fn is_command_credential(value: &Value) -> bool {
+fn is_command_credential(value: &Value) -> bool {
     match value {
         Value::Tagged(tagged) => tagged.tag == "command",
         Value::String(value) => value.starts_with('!'),
@@ -1057,7 +1026,12 @@ fn scalar_string(value: &Value) -> Option<String> {
     }
 }
 fn safe_base_url(value: &str) -> String {
-    redact_projection(value.trim())
+    let value = value.trim();
+    if url_projection_is_lossless(value) {
+        value.to_owned()
+    } else {
+        redact_projection(value)
+    }
 }
 
 fn valid_http_url(value: &str) -> bool {

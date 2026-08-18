@@ -444,7 +444,6 @@ type ProviderView = {
   hasApiKey: boolean
   modelCount: number
   editable: boolean
-  canReplaceCommandCredential: boolean
   readOnlyReason?: string
 }
 ```
@@ -463,14 +462,9 @@ type ProviderView = {
 
 已有 `!command`：
 
-- 不回传或执行。
-- 替换前显示不受支持的凭据状态，并保持高级/受限分类；不得伪装成普通 Custom Provider。
-- 用户可明确替换为直接文本 Key；替换后若没有其他高级配置，则恢复普通 Custom Provider 编辑。
-- Target configuration 可写且当前 `models.yml` Hash 可用时，才启用“替换为文本 API Key”。
-- 该入口只显示新的 Direct API Key；请求不包含 Base URL、默认协议或模型字段，后端只允许 `apiKey` 发生变化，并保留高级字段与其他未触及路径。
-- 未替换时禁用测试。
-
-表单只在用户编辑期间临时持有新值，关闭或成功提交后清空。除该一次替换请求外，响应 DTO、日志、通知和测试输出不得包含 Key。
+- 不回传、执行或编辑。
+- 保持高级/受限分类和只读状态，不得伪装成普通 Custom Provider。
+- 禁用测试。
 
 ### 9.6 高级 Provider
 

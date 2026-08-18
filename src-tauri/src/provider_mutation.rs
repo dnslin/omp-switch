@@ -132,14 +132,6 @@ pub(crate) struct EditCustomProviderInput {
     pub(crate) api_key: DirectApiKeyIntent,
 }
 
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ReplaceCommandCredentialInput {
-    pub(crate) opened_models_hash: String,
-    pub(crate) provider_id: String,
-    pub(crate) api_key: DirectApiKeyIntent,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EditCustomProviderResult {
@@ -147,7 +139,7 @@ pub(crate) struct EditCustomProviderResult {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProviderCreationFailurePoint {
+pub(crate) enum ProviderMutationFailurePoint {
     BeforeBackup,
     AfterBackup,
     BeforeTemporaryWrite,
@@ -189,21 +181,68 @@ struct ValidatedEdit {
     api_key: ValidatedApiKeyIntent,
 }
 
-struct ValidatedCommandCredentialReplacement {
-    provider_id: String,
-    api_key: String,
-}
-
 enum ValidatedApiKeyIntent {
     Keep,
     Replace(String),
     Delete,
 }
 
-enum ProviderMutation {
-    Create(ValidatedCreate),
-    Edit(ValidatedEdit),
-    ReplaceCommandCredential(ValidatedCommandCredentialReplacement),
+trait ProviderMutation {
+    fn verb(&self) -> &'static str;
+    fn serialization_error(&self) -> (&'static str, &'static str, &'static str);
+    fn apply(&self, tree: &mut Value) -> Result<(), AppError>;
+    fn validate(&self, candidate: &Value, original: &Value) -> Result<(), AppError>;
+}
+
+impl ProviderMutation for ValidatedCreate {
+    fn verb(&self) -> &'static str {
+        "创建"
+    }
+
+    fn serialization_error(&self) -> (&'static str, &'static str, &'static str) {
+        (
+            "serialize_created_provider",
+            "无法序列化新的 Provider 配置",
+            "请检查表单后重试；原 models.yml 没有被修改。",
+        )
+    }
+
+    fn apply(&self, tree: &mut Value) -> Result<(), AppError> {
+        insert_provider(tree, &self.provider_id, self.provider_value.clone())
+    }
+
+    fn validate(&self, candidate: &Value, original: &Value) -> Result<(), AppError> {
+        validate_created_provider(candidate, self)?;
+        ensure_untouched_paths_equal(original, candidate, &self.provider_id)
+    }
+}
+
+impl ProviderMutation for ValidatedEdit {
+    fn verb(&self) -> &'static str {
+        "编辑"
+    }
+
+    fn serialization_error(&self) -> (&'static str, &'static str, &'static str) {
+        (
+            "serialize_edited_provider",
+            "无法序列化 Provider 编辑结果",
+            "请检查表单后重试；原 models.yml 没有被修改。",
+        )
+    }
+
+    fn apply(&self, tree: &mut Value) -> Result<(), AppError> {
+        update_provider(tree, self)
+    }
+
+    fn validate(&self, candidate: &Value, original: &Value) -> Result<(), AppError> {
+        validate_edited_provider(candidate, original, self)?;
+        ensure_edited_untouched_paths_equal(
+            original,
+            candidate,
+            &self.provider_id,
+            &["baseUrl", "api", "apiKey"],
+        )
+    }
 }
 
 struct LoadedModels {
@@ -219,7 +258,7 @@ pub(crate) fn create_custom_provider(
     backup_root: &Path,
     catalog: &BundledCatalog,
     input: &CreateCustomProviderInput,
-    failure: Option<ProviderCreationFailurePoint>,
+    failure: Option<ProviderMutationFailurePoint>,
 ) -> Result<CreateCustomProviderResult, AppError> {
     let loaded = load_models_for_write(target, &input.opened_models_hash)?;
     let validated = validate_input(input, &loaded.original_tree, catalog)?;
@@ -227,12 +266,7 @@ pub(crate) fn create_custom_provider(
         provider_id: validated.provider_id.clone(),
         model_id: validated.model_id.clone(),
     };
-    write_provider_mutation(
-        backup_root,
-        &loaded,
-        &ProviderMutation::Create(validated),
-        failure,
-    )?;
+    write_provider_mutation(backup_root, &loaded, &validated, failure)?;
     Ok(result)
 }
 
@@ -241,7 +275,7 @@ pub(crate) fn edit_custom_provider(
     backup_root: &Path,
     catalog: &BundledCatalog,
     input: &EditCustomProviderInput,
-    failure: Option<ProviderCreationFailurePoint>,
+    failure: Option<ProviderMutationFailurePoint>,
 ) -> Result<EditCustomProviderResult, AppError> {
     let loaded = load_models_for_write(target, &input.opened_models_hash)
         .map_err(remap_edit_operation_error)?;
@@ -249,37 +283,8 @@ pub(crate) fn edit_custom_provider(
     let result = EditCustomProviderResult {
         provider_id: validated.provider_id.clone(),
     };
-    write_provider_mutation(
-        backup_root,
-        &loaded,
-        &ProviderMutation::Edit(validated),
-        failure,
-    )
-    .map_err(remap_edit_operation_error)?;
-    Ok(result)
-}
-
-pub(crate) fn replace_command_credential(
-    target: &TargetConfigurationDiscovery,
-    backup_root: &Path,
-    catalog: &BundledCatalog,
-    input: &ReplaceCommandCredentialInput,
-    failure: Option<ProviderCreationFailurePoint>,
-) -> Result<EditCustomProviderResult, AppError> {
-    let loaded = load_models_for_write(target, &input.opened_models_hash)
+    write_provider_mutation(backup_root, &loaded, &validated, failure)
         .map_err(remap_edit_operation_error)?;
-    let validated =
-        validate_command_credential_replacement_input(input, &loaded.original_tree, catalog)?;
-    let result = EditCustomProviderResult {
-        provider_id: validated.provider_id.clone(),
-    };
-    write_provider_mutation(
-        backup_root,
-        &loaded,
-        &ProviderMutation::ReplaceCommandCredential(validated),
-        failure,
-    )
-    .map_err(remap_edit_operation_error)?;
     Ok(result)
 }
 
@@ -316,18 +321,14 @@ fn load_models_for_write(
     })
 }
 
-fn write_provider_mutation(
+fn write_provider_mutation<M: ProviderMutation>(
     backup_root: &Path,
     loaded: &LoadedModels,
-    mutation: &ProviderMutation,
-    failure: Option<ProviderCreationFailurePoint>,
+    mutation: &M,
+    failure: Option<ProviderMutationFailurePoint>,
 ) -> Result<(), AppError> {
-    let verb = match mutation {
-        ProviderMutation::Create(_) => "创建",
-        ProviderMutation::Edit(_) => "编辑",
-        ProviderMutation::ReplaceCommandCredential(_) => "替换 Direct API Key",
-    };
-    if failure == Some(ProviderCreationFailurePoint::BeforeBackup) {
+    let verb = mutation.verb();
+    if failure == Some(ProviderMutationFailurePoint::BeforeBackup) {
         return Err(injected_failure(format!("{verb}当前备份前发生故障。")));
     }
     let _write_lock = acquire_models_write_lock(backup_root, &loaded.expected_target)?;
@@ -337,29 +338,13 @@ fn write_provider_mutation(
         &loaded.original_bytes,
         failure,
     )?;
-    if failure == Some(ProviderCreationFailurePoint::AfterBackup) {
+    if failure == Some(ProviderMutationFailurePoint::AfterBackup) {
         return Err(injected_failure(format!("{verb}当前备份后发生故障。")));
     }
 
     let mut candidate = loaded.original_tree.clone();
-    apply_provider_mutation(&mut candidate, mutation)?;
-    let (serialize_operation, serialize_message, serialize_action) = match mutation {
-        ProviderMutation::Create(_) => (
-            "serialize_created_provider",
-            "无法序列化新的 Provider 配置",
-            "请检查表单后重试；原 models.yml 没有被修改。",
-        ),
-        ProviderMutation::Edit(_) => (
-            "serialize_edited_provider",
-            "无法序列化 Provider 编辑结果",
-            "请检查表单后重试；原 models.yml 没有被修改。",
-        ),
-        ProviderMutation::ReplaceCommandCredential(_) => (
-            "serialize_replaced_command_credential",
-            "无法序列化 Direct API Key 替换结果",
-            "请重新读取配置后重试；原 models.yml 没有被修改。",
-        ),
-    };
+    mutation.apply(&mut candidate)?;
+    let (serialize_operation, serialize_message, serialize_action) = mutation.serialization_error();
     let serialized = serde_yaml::to_string(&candidate).map_err(|error| {
         yaml_error(
             serialize_operation,
@@ -370,13 +355,13 @@ fn write_provider_mutation(
         )
     })?;
 
-    if failure == Some(ProviderCreationFailurePoint::BeforeTemporaryWrite) {
+    if failure == Some(ProviderMutationFailurePoint::BeforeTemporaryWrite) {
         return Err(injected_failure(format!("{verb}临时文件前发生故障。")));
     }
     #[cfg(test)]
     inject_io_failure(
         failure,
-        ProviderCreationFailurePoint::TemporaryFileOpenFailure,
+        ProviderMutationFailurePoint::TemporaryFileOpenFailure,
     )
     .map_err(|error| write_error("open_models_temporary", error))?;
     let mut temporary = AtomicWriteFile::options()
@@ -386,7 +371,7 @@ fn write_provider_mutation(
     #[cfg(test)]
     inject_io_failure(
         failure,
-        ProviderCreationFailurePoint::TemporaryFileWriteFailure,
+        ProviderMutationFailurePoint::TemporaryFileWriteFailure,
     )
     .map_err(|error| write_error("write_models_temporary", error))?;
     temporary
@@ -395,13 +380,13 @@ fn write_provider_mutation(
     #[cfg(test)]
     inject_io_failure(
         failure,
-        ProviderCreationFailurePoint::TemporaryFileSyncFailure,
+        ProviderMutationFailurePoint::TemporaryFileSyncFailure,
     )
     .map_err(|error| write_error("write_models_temporary", error))?;
     temporary
         .sync_all()
         .map_err(|error| write_error("write_models_temporary", error))?;
-    if failure == Some(ProviderCreationFailurePoint::CorruptTemporaryFile) {
+    if failure == Some(ProviderMutationFailurePoint::CorruptTemporaryFile) {
         temporary
             .set_len(0)
             .and_then(|()| temporary.seek(SeekFrom::Start(0)).map(|_| ()))
@@ -425,10 +410,10 @@ fn write_provider_mutation(
             error,
         )
     })?;
-    if failure == Some(ProviderCreationFailurePoint::MutateUntouchedValue) {
+    if failure == Some(ProviderMutationFailurePoint::MutateUntouchedValue) {
         mutate_untouched_value_for_test(&mut reparsed);
     }
-    validate_provider_mutation(&reparsed, &loaded.original_tree, mutation)?;
+    mutation.validate(&reparsed, &loaded.original_tree)?;
 
     ensure_resolved_models_path(&loaded.models_path, &loaded.expected_target)?;
     let latest_bytes =
@@ -436,7 +421,7 @@ fn write_provider_mutation(
     if content_hash(&latest_bytes) != loaded.original_hash {
         return Err(hash_conflict());
     }
-    if failure == Some(ProviderCreationFailurePoint::BeforeReplacement) {
+    if failure == Some(ProviderMutationFailurePoint::BeforeReplacement) {
         return Err(injected_failure(format!("{verb}原子替换前发生故障。")));
     }
     #[cfg(all(test, unix))]
@@ -447,7 +432,7 @@ fn write_provider_mutation(
     restore_models_directory_permissions_for_test(restricted_directory)?;
     #[cfg(test)]
     let commit_result: std::io::Result<()> =
-        if failure == Some(ProviderCreationFailurePoint::AfterAtomicReplacement) {
+        if failure == Some(ProviderMutationFailurePoint::AfterAtomicReplacement) {
             Err(std::io::Error::other(
                 "injected error after the atomic replacement",
             ))
@@ -483,9 +468,9 @@ fn write_provider_mutation(
 #[cfg(all(test, unix))]
 fn restrict_models_directory_for_commit_failure(
     models_path: &Path,
-    failure: Option<ProviderCreationFailurePoint>,
+    failure: Option<ProviderMutationFailurePoint>,
 ) -> Result<Option<(PathBuf, fs::Permissions)>, AppError> {
-    if failure != Some(ProviderCreationFailurePoint::CommitFailure) {
+    if failure != Some(ProviderMutationFailurePoint::CommitFailure) {
         return Ok(None);
     }
     let directory = models_path
@@ -806,48 +791,6 @@ fn validate_edit_input(
     })
 }
 
-fn validate_command_credential_replacement_input(
-    input: &ReplaceCommandCredentialInput,
-    original_tree: &Value,
-    catalog: &BundledCatalog,
-) -> Result<ValidatedCommandCredentialReplacement, AppError> {
-    if input.provider_id.is_empty() || input.provider_id.trim() != input.provider_id.as_str() {
-        return Err(AppError::new(
-            "provider-id-immutable",
-            "已有 Provider ID 是 Stable ID，不能修改。",
-            "请保留当前 Provider ID；如需新 ID，请创建新的 Provider 后处理引用。",
-        ));
-    }
-    let providers = providers_mapping(original_tree)?;
-    validate_existing_provider_ids(providers)?;
-    if !providers.contains_key(Value::String(input.provider_id.clone())) {
-        return Err(AppError::new(
-            "provider-edit-not-found",
-            "要替换凭据的 Provider 已不存在。",
-            "请重新读取配置后选择当前存在的 Provider。",
-        ));
-    }
-    if !crate::overview::can_replace_command_credential(original_tree, &input.provider_id, catalog)
-    {
-        return Err(AppError::new(
-            "provider-command-credential-replacement-unavailable",
-            "当前 Provider 的命令凭据不能替换。",
-            "请重新读取配置；内置覆盖、Provider ID 冲突或没有匹配的 bundled Provider 清单时不能替换。",
-        ));
-    }
-    let DirectApiKeyIntent::Replace { value } = &input.api_key else {
-        return Err(AppError::new(
-            "provider-api-key-replacement-required",
-            "当前 Provider 使用不支持的命令凭据，必须输入新的 Direct API Key 才能替换。",
-            "OMP Switch 不会显示或执行该命令；请输入新的 Direct API Key。",
-        ));
-    };
-    Ok(ValidatedCommandCredentialReplacement {
-        provider_id: input.provider_id.clone(),
-        api_key: validate_direct_api_key_replacement(value)?,
-    })
-}
-
 fn validate_provider_default_api(
     provider: &Mapping,
     default_api: Option<SupportedApi>,
@@ -909,14 +852,6 @@ fn validate_edit_api_key(
 ) -> Result<ValidatedApiKeyIntent, AppError> {
     let existing = provider.get(Value::String("apiKey".to_owned()));
     let has_direct_key_field = matches!(existing, Some(Value::String(_)));
-    let command_credential = existing.is_some_and(crate::overview::is_command_credential);
-    if command_credential && !matches!(intent, DirectApiKeyIntent::Replace { .. }) {
-        return Err(AppError::new(
-            "provider-api-key-replacement-required",
-            "当前 Provider 使用不受支持的命令凭据，必须输入新的 Direct API Key 才能替换。",
-            "OMP Switch 不会显示或执行该命令；请输入新的 Direct API Key。",
-        ));
-    }
     match (auth_mode, intent) {
         (ProviderAuthMode::ApiKey, DirectApiKeyIntent::Keep) if has_direct_key_field => {
             Ok(ValidatedApiKeyIntent::Keep)
@@ -1120,20 +1055,6 @@ fn validate_created_provider(tree: &Value, validated: &ValidatedCreate) -> Resul
     Ok(())
 }
 
-fn apply_provider_mutation(tree: &mut Value, mutation: &ProviderMutation) -> Result<(), AppError> {
-    match mutation {
-        ProviderMutation::Create(validated) => insert_provider(
-            tree,
-            &validated.provider_id,
-            validated.provider_value.clone(),
-        ),
-        ProviderMutation::Edit(validated) => update_provider(tree, validated),
-        ProviderMutation::ReplaceCommandCredential(validated) => {
-            replace_command_credential_in_tree(tree, validated)
-        }
-    }
-}
-
 fn update_provider(tree: &mut Value, validated: &ValidatedEdit) -> Result<(), AppError> {
     let Value::Mapping(root) = tree else {
         return Err(models_structure_error());
@@ -1179,64 +1100,6 @@ fn update_provider(tree: &mut Value, validated: &ValidatedEdit) -> Result<(), Ap
         }
     }
     Ok(())
-}
-
-fn replace_command_credential_in_tree(
-    tree: &mut Value,
-    validated: &ValidatedCommandCredentialReplacement,
-) -> Result<(), AppError> {
-    let Value::Mapping(root) = tree else {
-        return Err(models_structure_error());
-    };
-    let Some(Value::Mapping(providers)) = root.get_mut(Value::String("providers".to_owned()))
-    else {
-        return Err(models_structure_error());
-    };
-    let Some(Value::Mapping(provider)) =
-        providers.get_mut(Value::String(validated.provider_id.clone()))
-    else {
-        return Err(AppError::new(
-            "models-temporary-validation-error",
-            "临时 models.yml 未包含要替换凭据的 Provider。",
-            "请重新读取配置后重试；原文件没有被修改。",
-        ));
-    };
-    provider.insert(
-        Value::String("apiKey".to_owned()),
-        Value::String(validated.api_key.clone()),
-    );
-    Ok(())
-}
-
-fn validate_provider_mutation(
-    candidate: &Value,
-    original: &Value,
-    mutation: &ProviderMutation,
-) -> Result<(), AppError> {
-    match mutation {
-        ProviderMutation::Create(validated) => {
-            validate_created_provider(candidate, validated)?;
-            ensure_untouched_paths_equal(original, candidate, &validated.provider_id)
-        }
-        ProviderMutation::Edit(validated) => {
-            validate_edited_provider(candidate, original, validated)?;
-            ensure_edited_untouched_paths_equal(
-                original,
-                candidate,
-                &validated.provider_id,
-                &["baseUrl", "api", "apiKey"],
-            )
-        }
-        ProviderMutation::ReplaceCommandCredential(validated) => {
-            validate_replaced_command_credential(candidate, validated)?;
-            ensure_edited_untouched_paths_equal(
-                original,
-                candidate,
-                &validated.provider_id,
-                &["apiKey"],
-            )
-        }
-    }
 }
 
 fn validate_edited_provider(
@@ -1303,25 +1166,6 @@ fn validate_edited_provider(
         return Err(AppError::new(
             "models-temporary-validation-error",
             "临时 models.yml 未保留已验证的 Direct API Key 操作。",
-            "请重试；原文件没有被修改。",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_replaced_command_credential(
-    candidate: &Value,
-    validated: &ValidatedCommandCredentialReplacement,
-) -> Result<(), AppError> {
-    let candidate_key = providers_mapping(candidate)?
-        .get(Value::String(validated.provider_id.clone()))
-        .and_then(Value::as_mapping)
-        .and_then(|provider| provider.get(Value::String("apiKey".to_owned())))
-        .and_then(Value::as_str);
-    if candidate_key != Some(validated.api_key.as_str()) {
-        return Err(AppError::new(
-            "models-temporary-validation-error",
-            "临时 models.yml 未保留已验证的 Direct API Key 替换。",
             "请重试；原文件没有被修改。",
         ));
     }
@@ -1453,7 +1297,7 @@ fn create_current_backup(
     backup_root: &Path,
     resolved_target: &Path,
     original_bytes: &[u8],
-    failure: Option<ProviderCreationFailurePoint>,
+    failure: Option<ProviderMutationFailurePoint>,
 ) -> Result<(), AppError> {
     let target_fingerprint = content_hash(resolved_target.to_string_lossy().as_bytes());
     let target_directory = backup_root.join(target_fingerprint);
@@ -1468,11 +1312,11 @@ fn create_current_backup(
         #[cfg(test)]
         inject_io_failure(
             failure,
-            ProviderCreationFailurePoint::BackupFileWriteFailure,
+            ProviderMutationFailurePoint::BackupFileWriteFailure,
         )?;
         backup.write_all(original_bytes)?;
         #[cfg(test)]
-        inject_io_failure(failure, ProviderCreationFailurePoint::BackupFileSyncFailure)?;
+        inject_io_failure(failure, ProviderMutationFailurePoint::BackupFileSyncFailure)?;
         backup.sync_all()?;
         drop(backup);
         if fs::read(&backup_path)? != original_bytes {
@@ -1506,12 +1350,12 @@ fn cleanup_partial_backup(backup_path: &Path) {
 
 fn create_private_backup_directory(
     path: &Path,
-    failure: Option<ProviderCreationFailurePoint>,
+    failure: Option<ProviderMutationFailurePoint>,
 ) -> std::io::Result<()> {
     #[cfg(test)]
     inject_io_failure(
         failure,
-        ProviderCreationFailurePoint::BackupDirectoryCreationFailure,
+        ProviderMutationFailurePoint::BackupDirectoryCreationFailure,
     )?;
     #[cfg(not(test))]
     let _ = failure;
@@ -1523,7 +1367,7 @@ fn create_private_backup_directory(
 
 fn allocate_backup_file(
     directory: &Path,
-    failure: Option<ProviderCreationFailurePoint>,
+    failure: Option<ProviderMutationFailurePoint>,
 ) -> std::io::Result<(PathBuf, fs::File)> {
     for _ in 0..BACKUP_ALLOCATION_ATTEMPTS {
         let backup_path =
@@ -1533,12 +1377,12 @@ fn allocate_backup_file(
         #[cfg(unix)]
         options.mode(0o600);
         #[cfg(test)]
-        inject_io_failure(failure, ProviderCreationFailurePoint::BackupFileOpenFailure)?;
+        inject_io_failure(failure, ProviderMutationFailurePoint::BackupFileOpenFailure)?;
         match options.open(&backup_path) {
             Ok(backup) => {
                 #[cfg(all(test, unix))]
                 let _restore_backup_directory_permissions = if failure
-                    == Some(ProviderCreationFailurePoint::BackupFilePermissionAndCleanupFailure)
+                    == Some(ProviderMutationFailurePoint::BackupFilePermissionAndCleanupFailure)
                 {
                     Some(restrict_backup_directory_until_drop(directory)?)
                 } else {
@@ -1563,10 +1407,10 @@ fn allocate_backup_file(
 
 fn set_private_backup_file_permissions(
     path: &Path,
-    failure: Option<ProviderCreationFailurePoint>,
+    failure: Option<ProviderMutationFailurePoint>,
 ) -> std::io::Result<()> {
     #[cfg(all(test, unix))]
-    if failure == Some(ProviderCreationFailurePoint::BackupFilePermissionAndCleanupFailure) {
+    if failure == Some(ProviderMutationFailurePoint::BackupFilePermissionAndCleanupFailure) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "injected backup permission hardening failure",
@@ -1608,8 +1452,8 @@ fn restrict_backup_directory_until_drop(
 
 #[cfg(test)]
 fn inject_io_failure(
-    failure: Option<ProviderCreationFailurePoint>,
-    point: ProviderCreationFailurePoint,
+    failure: Option<ProviderMutationFailurePoint>,
+    point: ProviderMutationFailurePoint,
 ) -> std::io::Result<()> {
     if failure == Some(point) {
         return Err(std::io::Error::other(

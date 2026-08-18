@@ -202,7 +202,7 @@ pub(crate) fn url_projection_is_lossless(value: &str) -> bool {
     if value.contains('@') && (!value.contains("://") || url.host_str().is_none()) {
         return false;
     }
-    !url_candidate_contains_secret(value)
+    !url_candidate_contains_secret(value) && redact_diagnostic(value) == value
 }
 
 fn url_query_key_is_safe(key: &str) -> bool {

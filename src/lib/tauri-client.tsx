@@ -81,11 +81,6 @@ export type EditCustomProviderInput = {
   apiKey: DirectApiKeyIntent;
 };
 
-export type ReplaceCommandCredentialInput = {
-  openedModelsHash: string;
-  providerId: string;
-  apiKey: { kind: "replace"; value: string };
-};
 
 export type EditCustomProviderResult = { providerId: string };
 export type OverviewApiSource = "provider" | "model";
@@ -122,7 +117,6 @@ export type OverviewProvider = {
   authMode: OverviewAuthMode;
   hasApiKey: boolean;
   modelCount: number;
-  canReplaceCommandCredential: boolean;
   classification: OverviewProviderClassification;
   editable: boolean;
   readOnlyReason: string | null;
@@ -200,7 +194,6 @@ export interface TauriClient {
   getOverviewLoad(): Promise<OverviewLoad>;
   createCustomProvider(input: CreateCustomProviderInput): Promise<CreateCustomProviderResult>;
   editCustomProvider(input: EditCustomProviderInput): Promise<EditCustomProviderResult>;
-  replaceCommandCredential(input: ReplaceCommandCredentialInput): Promise<EditCustomProviderResult>;
   detectOmp(): Promise<StartupState>;
   selectOmpExecutable(): Promise<string | null>;
   validateSelectedOmp(executablePath: string): Promise<StartupState>;
@@ -217,7 +210,6 @@ export const tauriClient: TauriClient = {
   getOverviewLoad: () => invoke<OverviewLoad>("get_overview_load"),
   createCustomProvider: (input) => invoke<CreateCustomProviderResult>("create_custom_provider", { input }),
   editCustomProvider: (input) => invoke<EditCustomProviderResult>("edit_custom_provider", { input }),
-  replaceCommandCredential: (input) => invoke<EditCustomProviderResult>("replace_command_credential", { input }),
   detectOmp: () => invoke<StartupState>("detect_omp"),
   selectOmpExecutable: async () => {
     const selected = await open({ multiple: false, directory: false, title: "选择 OMP 可执行文件" });
