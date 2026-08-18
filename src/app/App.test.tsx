@@ -1537,6 +1537,7 @@ describe("React page seam", () => {
     });
 
     expect(await screen.findByText("Sol")).toBeVisible();
+    expect(screen.getByTitle("模型指定")).toBeVisible();
     await user.type(screen.getByLabelText("搜索 Model ID"), "missing-model");
     expect(screen.getByText("没有匹配的 Model definition")).toBeVisible();
     await user.clear(screen.getByLabelText("搜索 Model ID"));
@@ -1577,8 +1578,14 @@ describe("React page seam", () => {
     });
 
     expect(await screen.findByText("配置不完整")).toBeVisible();
-    expect(screen.getAllByText("只读").length).toBeGreaterThan(0);
-    expect(screen.queryByRole("button", { name: "编辑 locked" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Model 操作 locked" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Model 操作 locked" }));
+    await user.click(screen.getByRole("menuitem", { name: "查看" }));
+    const readOnlySheet = await screen.findByRole("dialog");
+    expect(within(readOnlySheet).getByRole("heading", { name: "查看模型" })).toBeVisible();
+    expect(readOnlySheet).toHaveTextContent(locked.readOnlyReason!);
+    expect(within(readOnlySheet).queryByRole("button", { name: "保存模型" })).not.toBeInTheDocument();
+    await user.click(within(readOnlySheet).getByRole("button", { name: "关闭" }));
     await user.click(screen.getByRole("button", { name: "Model 操作 incomplete" }));
     await user.click(screen.getByRole("menuitem", { name: "编辑" }));
     const repairSheet = await screen.findByRole("dialog");

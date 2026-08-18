@@ -51,7 +51,7 @@ type ModelFormValues = z.infer<typeof modelSchema>;
 type ModelCreateSheetProps = {
   provider: OverviewProvider;
   openedModelsHash: string;
-  mode: "create" | "edit";
+  mode: "create" | "edit" | "view";
   model?: OverviewModel;
   copy?: boolean;
   onDismiss(): void;
@@ -77,8 +77,9 @@ export function ModelCreateSheet({
   const successfulSubmission = useRef(false);
   const feedbackRef = useRef<HTMLElement>(null);
   const source = model;
+  const isViewing = mode === "view" && Boolean(source);
   const isEditing = mode === "edit" && Boolean(source);
-  const defaultModelId = isEditing ? source?.id ?? "" : copy && source ? `${source.id}-copy` : "";
+  const defaultModelId = isEditing || isViewing ? source?.id ?? "" : copy && source ? `${source.id}-copy` : "";
   const repairMode = isEditing && !copy;
   const defaultValues: ModelFormValues = {
     modelId: defaultModelId,
@@ -109,7 +110,7 @@ export function ModelCreateSheet({
     ? buildModelEndpoint(provider.baseUrl ?? "", values.modelId.trim(), protocol)
     : null;
   const endpointText = endpoint?.kind === "available" ? endpoint.value : "填写有效 Model ID 和协议后显示最终地址";
-  const canSave = isDirty && modelSchema.safeParse(values).success && !submitting;
+  const canSave = !isViewing && isDirty && modelSchema.safeParse(values).success && !submitting;
 
   useEffect(() => {
     if (submissionError) feedbackRef.current?.scrollIntoView?.({ block: "nearest" });
@@ -135,7 +136,7 @@ export function ModelCreateSheet({
   }, [isDirty, onDismiss, submitting]);
 
   const submit = async (form: ModelFormValues) => {
-    if (submissionInFlight.current) return;
+    if (isViewing || submissionInFlight.current) return;
     submissionInFlight.current = true;
     successfulSubmission.current = false;
     setSubmitting(true);
@@ -199,7 +200,7 @@ export function ModelCreateSheet({
             requestDismiss();
           }}
           onKeyDown={(event) => {
-            if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") return;
+            if (isViewing || (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s")) return;
             event.preventDefault();
             void handleSubmit(submit)();
           }}
@@ -207,30 +208,31 @@ export function ModelCreateSheet({
           <form className="provider-create-form" noValidate onSubmit={(event) => { event.preventDefault(); void handleSubmit(submit)(); }}>
             <div className="provider-create-form__body">
               <header className="provider-create-heading">
-                <DialogTitle>{isEditing ? "编辑模型" : "新增模型"}</DialogTitle>
+                <DialogTitle>{isViewing ? "查看模型" : isEditing ? "编辑模型" : "新增模型"}</DialogTitle>
                 <DialogDescription id="model-create-sheet-description">
-                  {isEditing ? `编辑 ${provider.id}/${source?.id ?? "Model definition"}。保存后才能进行连接测试。` : `添加到 ${provider.id}。保存后才能进行连接测试。`}
+                  {isViewing ? `查看 ${provider.id}/${source?.id ?? "Model definition"}。该 Model definition 只读。` : isEditing ? `编辑 ${provider.id}/${source?.id ?? "Model definition"}。保存后才能进行连接测试。` : `添加到 ${provider.id}。保存后才能进行连接测试。`}
                 </DialogDescription>
               </header>
               <div className="provider-create-fields">
                 <FormRow label="Model ID" htmlFor="model-sheet-id" error={errors.modelId?.message}>
                   <Input
                     id="model-sheet-id"
-                    readOnly={isEditing}
+                    readOnly={isEditing || isViewing}
+                    disabled={isViewing}
                     aria-invalid={Boolean(errors.modelId)}
                     {...register("modelId")}
                   />
                   {isEditing ? <p className="provider-edit-field-note"><LockKeyhole aria-hidden="true" />Stable ID 创建后不可修改</p> : null}
                 </FormRow>
                 <FormRow label="名称" htmlFor="model-sheet-name" error={errors.name?.message}>
-                  <Input id="model-sheet-name" autoComplete="off" aria-invalid={Boolean(errors.name)} {...register("name")} />
+                  <Input id="model-sheet-name" autoComplete="off" disabled={isViewing} aria-invalid={Boolean(errors.name)} {...register("name")} />
                 </FormRow>
                 <FormRow label="协议" htmlFor="model-sheet-api" error={errors.modelApi?.message}>
                   <Controller
                     control={control}
                     name="modelApi"
                     render={({ field }) => (
-                      <Select value={field.value || "inherit"} onValueChange={(value) => field.onChange(value === "inherit" ? "" : value)}>
+                      <Select disabled={isViewing} value={field.value || "inherit"} onValueChange={(value) => field.onChange(value === "inherit" ? "" : value)}>
                         <SelectTrigger id="model-sheet-api" aria-label="协议" className="provider-create-select">
                           <SelectValue placeholder={provider.defaultApi ? `继承 ${provider.defaultApi}` : "请选择协议"} />
                           {field.value ? <span className="provider-create-select__source" aria-hidden="true">模型指定</span> : null}
@@ -246,24 +248,25 @@ export function ModelCreateSheet({
                 <fieldset className="provider-create-capabilities">
                   <legend>能力</legend>
                   <div>
-                    <label><input type="checkbox" {...register("inputText")} />Text</label>
-                    <label><input type="checkbox" {...register("inputImage")} />Image</label>
-                    <label><input type="checkbox" {...register("reasoning")} />Reasoning</label>
+                    <label><input type="checkbox" disabled={isViewing} {...register("inputText")} />Text</label>
+                    <label><input type="checkbox" disabled={isViewing} {...register("inputImage")} />Image</label>
+                    <label><input type="checkbox" disabled={isViewing} {...register("reasoning")} />Reasoning</label>
                   </div>
                   <p className="provider-create-field-error" aria-live="polite">{errors.inputText?.message ?? errors.inputImage?.message ?? ""}</p>
                 </fieldset>
                 <FormRow label="Context Window" htmlFor="model-sheet-context" error={errors.contextWindow?.message}>
-                  <Input id="model-sheet-context" type="number" min="1" inputMode="numeric" aria-invalid={Boolean(errors.contextWindow)} {...register("contextWindow", { valueAsNumber: true })} />
+                  <Input id="model-sheet-context" type="number" min="1" inputMode="numeric" disabled={isViewing} aria-invalid={Boolean(errors.contextWindow)} {...register("contextWindow", { valueAsNumber: true })} />
                 </FormRow>
                 <FormRow label="Max Tokens" htmlFor="model-sheet-max" error={errors.maxTokens?.message}>
-                  <Input id="model-sheet-max" type="number" min="1" inputMode="numeric" aria-invalid={Boolean(errors.maxTokens)} {...register("maxTokens", { valueAsNumber: true })} />
+                  <Input id="model-sheet-max" type="number" min="1" inputMode="numeric" disabled={isViewing} aria-invalid={Boolean(errors.maxTokens)} {...register("maxTokens", { valueAsNumber: true })} />
                 </FormRow>
                 <FormRow label="最终地址" htmlFor="model-sheet-endpoint">
                   <Input id="model-sheet-endpoint" readOnly value={endpointText} />
                 </FormRow>
               </div>
               <p className="provider-create-model-note"><Info aria-hidden="true" />模型只修改所属 Provider 下的目标路径；未知配置会原样保留。</p>
-              <div className="model-create-sheet-test"><Button type="button" variant="secondary" disabled title="请先保存 Model definition">测试模型</Button><span>仅可测试已保存模型</span></div>
+              {isViewing ? <p className="provider-create-model-readonly-note" role="status"><LockKeyhole aria-hidden="true" />{source?.readOnlyReason ?? "当前 Model definition 只读。"}</p> : null}
+              <div className="model-create-sheet-test"><Button type="button" variant="secondary" disabled title={isViewing ? "只读 Model definition 不能测试" : "请先保存 Model definition"}>测试模型</Button><span>{isViewing ? "只读 Model definition 不可测试" : "仅可测试已保存模型"}</span></div>
               {submissionError ? (
                 <section ref={feedbackRef} className="provider-create-submit-error" role="alert" aria-live="assertive">
                   <div><strong>{submissionError.code === "models-hash-conflict" ? "配置冲突" : "无法保存 Model"}</strong><p>{submissionError.message}</p><p>{submissionError.action}</p></div>
@@ -273,8 +276,8 @@ export function ModelCreateSheet({
             </div>
             <footer className="provider-create-footer">
               <div className="provider-create-footer__actions">
-                <Button type="button" variant="secondary" disabled={submitting} onClick={requestDismiss}>取消</Button>
-                <Button type="submit" disabled={!canSave} aria-busy={submitting}>{submitting ? "保存中…" : "保存模型"}</Button>
+                <Button type="button" variant="secondary" disabled={submitting} onClick={requestDismiss}>{isViewing ? "关闭" : "取消"}</Button>
+                {!isViewing ? <Button type="submit" disabled={!canSave} aria-busy={submitting}>{submitting ? "保存中…" : "保存模型"}</Button> : null}
               </div>
             </footer>
           </form>

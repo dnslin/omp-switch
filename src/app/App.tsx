@@ -370,7 +370,7 @@ function ProviderDetailPage() {
   const { data, error, loading, reload, shellStatus } = useOverviewLoad(providerDetailLoadCopy);
   const [editing, setEditing] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
-  const [modelEditor, setModelEditor] = useState<{ mode: "create" | "edit"; model?: OverviewModel; copy?: boolean } | null>(null);
+  const [modelEditor, setModelEditor] = useState<{ mode: "create" | "edit" | "view"; model?: OverviewModel; copy?: boolean } | null>(null);
   const [deletingModel, setDeletingModel] = useState<OverviewModel | null>(null);
   const [deleteError, setDeleteError] = useState<ReturnType<typeof asAppError> | null>(null);
   const [openModelActions, setOpenModelActions] = useState<string | null>(null);
@@ -479,24 +479,26 @@ function ProviderDetailPage() {
                     <tr><td className="provider-detail-models-empty" colSpan={9}>{provider.models.length === 0 ? "尚未配置 Model definition。" : "没有匹配的 Model definition"}</td></tr>
                   ) : models.map((model) => {
                     const status = modelStatusView(model);
+                    const sourceLabel = model.apiSource === "provider" ? "继承 Provider" : model.apiSource === "model" ? "模型指定" : "未配置";
                     return (
                       <tr key={model.id} className={model.status === "read-only" ? "provider-detail-model-row--readonly" : undefined}>
                         <td><div className="provider-detail-model-cell"><strong>{model.name ?? "未命名模型"}</strong><code>{model.id}</code><span className={`provider-detail-model-status provider-detail-model-status--${status.tone}`}>{status.label}</span></div></td>
                         <td>{model.effectiveApi ?? "未配置"}</td>
-                        <td>{model.apiSource === "provider" ? "继承 Provider" : model.apiSource === "model" ? "模型指定" : "未配置"}</td>
+                        <td title={sourceLabel}>{sourceLabel}</td>
                         <td>{model.input.length ? model.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : "不支持").join(" · ") : "未配置"}</td>
                         <td>{formatNumber(model.contextWindow)}</td><td>{formatNumber(model.maxTokens)}</td><td>{model.referenceCount}</td><td>—</td>
                         <td><div className="provider-detail-model-actions">
-                          {model.editable ? (
-                            <>
-                              <Button type="button" variant="secondary" className="provider-detail-model-action" aria-label={`Model 操作 ${model.id}`} aria-expanded={openModelActions === model.id} title="Model 操作" onClick={() => setOpenModelActions((current) => current === model.id ? null : model.id)}><MoreHorizontal aria-hidden="true" size={18} /></Button>
-                              {openModelActions === model.id ? <div className="provider-detail-model-menu" role="menu">
+                          <Button type="button" variant="secondary" className="provider-detail-model-action" aria-label={`Model 操作 ${model.id}`} aria-expanded={openModelActions === model.id} title="Model 操作" onClick={() => setOpenModelActions((current) => current === model.id ? null : model.id)}><MoreHorizontal aria-hidden="true" size={18} /></Button>
+                          {openModelActions === model.id ? <div className="provider-detail-model-menu" role="menu">
+                            {model.editable ? (
+                              <>
                                 <Button type="button" variant="secondary" role="menuitem" onClick={() => { setOpenModelActions(null); setModelEditor({ mode: "edit", model }); }}><Pencil aria-hidden="true" size={15} />编辑</Button>
                                 {model.status === "normal" ? <Button type="button" variant="secondary" role="menuitem" onClick={() => { setOpenModelActions(null); setModelEditor({ mode: "create", model, copy: true }); }}><Copy aria-hidden="true" size={15} />复制</Button> : null}
                                 <Button type="button" variant="secondary" role="menuitem" className="provider-detail-model-menu__danger" onClick={() => { setOpenModelActions(null); setDeleteError(null); setDeletingModel(model); }}><Trash2 aria-hidden="true" size={15} />删除</Button>
-                              </div> : null}
-                            </>
-                          ) : <span className="provider-detail-model-readonly-label">只读</span>}
+                              </>
+                            ) : <Button type="button" variant="secondary" role="menuitem" onClick={() => { setOpenModelActions(null); setModelEditor({ mode: "view", model }); }}><Info aria-hidden="true" size={15} />查看</Button>}
+                          </div> : null}
+                          {!model.editable ? <span className="provider-detail-model-readonly-label">只读</span> : null}
                         </div></td>
                       </tr>
                     );

@@ -762,11 +762,31 @@ fn project_model(
         read_only_reason
             .get_or_insert_with(|| "Model definition 的 reasoning 字段格式不受支持。".to_owned());
     }
-    let context_window = mapping_get(model, "contextWindow").and_then(scalar_u64);
-    let max_tokens = mapping_get(model, "maxTokens").and_then(scalar_u64);
-    let name = mapping_get(model, "name")
+    let context_window_value = mapping_get(model, "contextWindow");
+    let max_tokens_value = mapping_get(model, "maxTokens");
+    let name_value = mapping_get(model, "name");
+    let context_window = context_window_value.and_then(scalar_u64);
+    let max_tokens = max_tokens_value.and_then(scalar_u64);
+    let name = name_value
         .and_then(scalar_string)
         .filter(|value| !value.trim().is_empty());
+    if name_value.is_some_and(|value| !matches!(value, Value::String(_) | Value::Null)) {
+        read_only_reason
+            .get_or_insert_with(|| "Model definition 的 name 字段格式不受支持。".to_owned());
+    }
+    if context_window_value
+        .is_some_and(|value| !matches!(value, Value::Null) && value.as_u64().is_none())
+    {
+        read_only_reason.get_or_insert_with(|| {
+            "Model definition 的 contextWindow 字段格式不受支持。".to_owned()
+        });
+    }
+    if max_tokens_value
+        .is_some_and(|value| !matches!(value, Value::Null) && value.as_u64().is_none())
+    {
+        read_only_reason
+            .get_or_insert_with(|| "Model definition 的 maxTokens 字段格式不受支持。".to_owned());
+    }
     let complete = name.is_some()
         && !input.is_empty()
         && input
@@ -836,9 +856,9 @@ fn collect_model_reference_paths(
             for (key, child) in map {
                 let Some(key) = key.as_str() else { continue };
                 let child_path = if path.is_empty() {
-                    key.to_owned()
+                    escape_reference_path_component(key)
                 } else {
-                    format!("{path}[\"{key}\"]")
+                    format!("{path}[\"{}\"]", escape_reference_path_component(key))
                 };
                 collect_model_reference_paths(child, &child_path, provider_id, model_id, paths);
             }
@@ -859,6 +879,15 @@ fn collect_model_reference_paths(
         }
         _ => {}
     }
+}
+
+fn escape_reference_path_component(value: &str) -> String {
+    let value = redact_diagnostic(value);
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 fn is_model_selector_reference(value: &str, provider_id: &str, model_id: &str) -> bool {

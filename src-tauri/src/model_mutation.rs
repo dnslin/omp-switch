@@ -10,11 +10,10 @@ use serde_yaml::{Mapping, Value};
 use crate::{
     bundled_catalog::BundledCatalog,
     error::AppError,
+    models_write::{self, LoadedModels, ModelsMutation, ModelsWriteFailurePoint},
     overview,
-    provider_mutation::{
-        self, LoadedModels, ModelsMutation, ProviderMutationFailurePoint, SupportedApi,
-        SupportedInput,
-    },
+    provider_mutation::{self, SupportedApi, SupportedInput},
+    redaction::redact_diagnostic,
     target_configuration::{ConfigurationFileStatus, TargetConfigurationDiscovery},
 };
 
@@ -213,7 +212,7 @@ impl ModelsMutation for ValidatedDelete {
     }
 
     fn validate_before_commit(&self, _loaded: &LoadedModels) -> Result<(), AppError> {
-        provider_mutation::ensure_resolved_file_path(
+        models_write::ensure_resolved_file_path(
             &self.config_path,
             &self.expected_target,
             "config.yml",
@@ -226,7 +225,7 @@ impl ModelsMutation for ValidatedDelete {
                 "请重新读取配置后重试；OMP Switch 不会提交可能破坏引用的删除。",
             )
         })?;
-        if provider_mutation::content_hash(&bytes) != self.expected_config_hash {
+        if models_write::content_hash(&bytes) != self.expected_config_hash {
             return Err(AppError::new(
                 "config-hash-conflict",
                 "config.yml 在删除提交前已被外部修改。",
@@ -253,16 +252,16 @@ pub(crate) fn create_model(
     backup_root: &Path,
     catalog: &BundledCatalog,
     input: &CreateModelInput,
-    failure: Option<ProviderMutationFailurePoint>,
+    failure: Option<ModelsWriteFailurePoint>,
 ) -> Result<ModelMutationResult, AppError> {
-    let loaded = provider_mutation::load_models_for_write(target, &input.opened_models_hash)
+    let loaded = models_write::load_models_for_write(target, &input.opened_models_hash)
         .map_err(|error| remap_model_error(error, ModelOperation::Create))?;
     let validated = validate_create_input(input, &loaded.original_tree, catalog)?;
     let result = ModelMutationResult {
         provider_id: validated.provider_id.clone(),
         model_id: validated.model_id.clone(),
     };
-    provider_mutation::write_models_mutation(backup_root, &loaded, &validated, failure)
+    models_write::write_models_mutation(backup_root, &loaded, &validated, failure)
         .map_err(|error| remap_model_error(error, ModelOperation::Create))?;
     Ok(result)
 }
@@ -272,16 +271,16 @@ pub(crate) fn edit_model(
     backup_root: &Path,
     catalog: &BundledCatalog,
     input: &EditModelInput,
-    failure: Option<ProviderMutationFailurePoint>,
+    failure: Option<ModelsWriteFailurePoint>,
 ) -> Result<ModelMutationResult, AppError> {
-    let loaded = provider_mutation::load_models_for_write(target, &input.opened_models_hash)
+    let loaded = models_write::load_models_for_write(target, &input.opened_models_hash)
         .map_err(|error| remap_model_error(error, ModelOperation::Edit))?;
     let validated = validate_edit_input(input, &loaded.original_tree, catalog)?;
     let result = ModelMutationResult {
         provider_id: validated.provider_id.clone(),
         model_id: validated.model_id.clone(),
     };
-    provider_mutation::write_models_mutation(backup_root, &loaded, &validated, failure)
+    models_write::write_models_mutation(backup_root, &loaded, &validated, failure)
         .map_err(|error| remap_model_error(error, ModelOperation::Edit))?;
     Ok(result)
 }
@@ -291,9 +290,9 @@ pub(crate) fn delete_model(
     backup_root: &Path,
     catalog: &BundledCatalog,
     input: &DeleteModelInput,
-    failure: Option<ProviderMutationFailurePoint>,
+    failure: Option<ModelsWriteFailurePoint>,
 ) -> Result<ModelMutationResult, AppError> {
-    let loaded = provider_mutation::load_models_for_write(target, &input.opened_models_hash)
+    let loaded = models_write::load_models_for_write(target, &input.opened_models_hash)
         .map_err(|error| remap_model_error(error, ModelOperation::Delete))?;
     let config = load_config_for_reference_check(target, &input.opened_config_hash)?;
     let validated = validate_delete_input(input, &loaded.original_tree, &config, catalog)?;
@@ -301,7 +300,7 @@ pub(crate) fn delete_model(
         provider_id: validated.provider_id.clone(),
         model_id: validated.model_id.clone(),
     };
-    provider_mutation::write_models_mutation(backup_root, &loaded, &validated, failure)
+    models_write::write_models_mutation(backup_root, &loaded, &validated, failure)
         .map_err(|error| remap_model_error(error, ModelOperation::Delete))?;
     Ok(result)
 }
@@ -317,7 +316,7 @@ fn load_config_for_reference_check(
     target: &TargetConfigurationDiscovery,
     opened_config_hash: &str,
 ) -> Result<LoadedConfig, AppError> {
-    provider_mutation::validate_writable_target(target)
+    models_write::validate_writable_target(target)
         .map_err(|error| remap_model_error(error, ModelOperation::Delete))?;
     if !matches!(
         target.config.status,
@@ -330,11 +329,11 @@ fn load_config_for_reference_check(
         ));
     }
     let expected_target =
-        provider_mutation::resolved_path(&target.resolved_path, "Target configuration")
+        models_write::resolved_path(&target.resolved_path, "Target configuration")
             .map_err(|error| remap_model_error(error, ModelOperation::Delete))?;
-    let config_path = provider_mutation::resolved_path(&target.config.resolved_path, "config.yml")
+    let config_path = models_write::resolved_path(&target.config.resolved_path, "config.yml")
         .map_err(|error| remap_model_error(error, ModelOperation::Delete))?;
-    provider_mutation::ensure_resolved_file_path(&config_path, &expected_target, "config.yml")
+    models_write::ensure_resolved_file_path(&config_path, &expected_target, "config.yml")
         .map_err(|error| remap_model_error(error, ModelOperation::Delete))?;
     let bytes = fs::read(&config_path).map_err(|error| {
         AppError::new(
@@ -343,26 +342,32 @@ fn load_config_for_reference_check(
             "请修复配置文件权限后重新读取。",
         )
     })?;
-    if provider_mutation::content_hash(&bytes) != opened_config_hash {
+    if models_write::content_hash(&bytes) != opened_config_hash {
         return Err(AppError::new(
             "config-hash-conflict",
             "config.yml 在打开删除确认后已被外部修改。",
             "请重新读取配置；OMP Switch 不会自动合并引用变化。",
         ));
     }
-    let tree = serde_yaml::from_slice(&bytes).map_err(|error| {
-        AppError::new(
-            "model-delete-config-parse-error",
-            format!("config.yml 无法重新解析：{error}"),
-            "请在外部修复 YAML 后重新读取；OMP Switch 不会删除模型。",
-        )
-    })?;
+    let tree = serde_yaml::from_slice(&bytes).map_err(config_parse_error_from_yaml)?;
     Ok(LoadedConfig {
         tree,
         config_path,
         expected_target,
-        original_hash: provider_mutation::content_hash(&bytes),
+        original_hash: models_write::content_hash(&bytes),
     })
+}
+
+fn config_parse_error_from_yaml(error: serde_yaml::Error) -> AppError {
+    config_parse_error(&error.to_string())
+}
+
+fn config_parse_error(diagnostic: &str) -> AppError {
+    AppError::new(
+        "model-delete-config-parse-error",
+        format!("config.yml 无法重新解析：{}", redact_diagnostic(diagnostic)),
+        "请在外部修复 YAML 后重新读取；OMP Switch 不会删除模型。",
+    )
 }
 
 fn validate_create_input(
@@ -1056,26 +1061,35 @@ impl ModelOperation {
             Self::Delete => "model-delete-unavailable",
         }
     }
+
+    fn error_codes(self) -> models_write::ModelsWriteErrorCodes {
+        let failed = match self {
+            Self::Create => "model-create-failed",
+            Self::Edit => "model-edit-failed",
+            Self::Delete => "model-delete-failed",
+        };
+        models_write::ModelsWriteErrorCodes {
+            unavailable: self.unavailable_code(),
+            target_changed: self.unavailable_code(),
+            failed,
+        }
+    }
 }
 
 fn remap_model_error(error: AppError, operation: ModelOperation) -> AppError {
-    let code = match error.code {
-        "provider-create-unavailable" | "provider-create-target-changed" => {
-            Some(operation.unavailable_code())
-        }
-        "provider-create-failed"
-        | "models-serialize-error"
-        | "models-temporary-parse-error"
-        | "models-temporary-validation-error"
-        | "models-untouched-path-changed" => Some(match operation {
-            ModelOperation::Create => "model-create-failed",
-            ModelOperation::Edit => "model-edit-failed",
-            ModelOperation::Delete => "model-delete-failed",
-        }),
-        _ => None,
-    };
-    match code {
-        Some(code) => AppError::new(code, error.message, error.action),
-        None => error,
+    models_write::remap_models_write_error(error, operation.error_codes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_config_parse_diagnostics_are_redacted() {
+        let error = config_parse_error("safe-context,api_key=punctuated-secret");
+
+        assert_eq!(error.code, "model-delete-config-parse-error");
+        assert!(!error.message.contains("punctuated-secret"));
+        assert!(error.message.contains("[诊断信息因可能包含凭据而已脱敏]"));
     }
 }

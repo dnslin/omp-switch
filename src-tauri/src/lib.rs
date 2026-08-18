@@ -3,6 +3,7 @@ mod bundled_catalog;
 mod error;
 mod logging;
 mod model_mutation;
+mod models_write;
 mod omp_environment;
 mod overview;
 mod provider_mutation;

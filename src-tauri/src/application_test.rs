@@ -12,8 +12,8 @@ use crate::{
     application::{
         AppService, AppSettings, CreateCustomProviderInput, CreateModelFields, CreateModelInput,
         CreateProviderFields, DeleteModelInput, DirectApiKeyIntent, EditCustomProviderInput,
-        EditModelInput, ModelDefinitionFields, ModelEditFields, OverviewLoadDto, ProviderAuthMode,
-        ProviderMutationFailurePoint, StartupState, SupportedApi, SupportedInput, Theme,
+        EditModelInput, ModelDefinitionFields, ModelEditFields, ModelsWriteFailurePoint,
+        OverviewLoadDto, ProviderAuthMode, StartupState, SupportedApi, SupportedInput, Theme,
         UiSettingsUpdate,
     },
     omp_environment::{CommandOutput, OmpEnvironment},
@@ -2709,58 +2709,55 @@ fn provider_edit_stops_on_an_external_models_hash_conflict() {
 #[test]
 fn provider_edit_failure_injection_keeps_the_original_file_intact() {
     let mut failures = vec![
-        ("before backup", ProviderMutationFailurePoint::BeforeBackup),
+        ("before backup", ModelsWriteFailurePoint::BeforeBackup),
         (
             "backup directory",
-            ProviderMutationFailurePoint::BackupDirectoryCreationFailure,
+            ModelsWriteFailurePoint::BackupDirectoryCreationFailure,
         ),
         (
             "backup file open",
-            ProviderMutationFailurePoint::BackupFileOpenFailure,
+            ModelsWriteFailurePoint::BackupFileOpenFailure,
         ),
         (
             "backup file write",
-            ProviderMutationFailurePoint::BackupFileWriteFailure,
+            ModelsWriteFailurePoint::BackupFileWriteFailure,
         ),
         (
             "backup file sync",
-            ProviderMutationFailurePoint::BackupFileSyncFailure,
+            ModelsWriteFailurePoint::BackupFileSyncFailure,
         ),
         (
             "temporary open",
-            ProviderMutationFailurePoint::TemporaryFileOpenFailure,
+            ModelsWriteFailurePoint::TemporaryFileOpenFailure,
         ),
         (
             "temporary write",
-            ProviderMutationFailurePoint::TemporaryFileWriteFailure,
+            ModelsWriteFailurePoint::TemporaryFileWriteFailure,
         ),
         (
             "temporary sync",
-            ProviderMutationFailurePoint::TemporaryFileSyncFailure,
+            ModelsWriteFailurePoint::TemporaryFileSyncFailure,
         ),
-        ("after backup", ProviderMutationFailurePoint::AfterBackup),
+        ("after backup", ModelsWriteFailurePoint::AfterBackup),
         (
             "before temporary write",
-            ProviderMutationFailurePoint::BeforeTemporaryWrite,
+            ModelsWriteFailurePoint::BeforeTemporaryWrite,
         ),
         (
             "temporary reparse",
-            ProviderMutationFailurePoint::CorruptTemporaryFile,
+            ModelsWriteFailurePoint::CorruptTemporaryFile,
         ),
         (
             "untouched comparison",
-            ProviderMutationFailurePoint::MutateUntouchedValue,
+            ModelsWriteFailurePoint::MutateUntouchedValue,
         ),
         (
             "before replacement",
-            ProviderMutationFailurePoint::BeforeReplacement,
+            ModelsWriteFailurePoint::BeforeReplacement,
         ),
     ];
     #[cfg(unix)]
-    failures.push((
-        "replacement commit",
-        ProviderMutationFailurePoint::CommitFailure,
-    ));
+    failures.push(("replacement commit", ModelsWriteFailurePoint::CommitFailure));
     for (name, failure) in failures {
         let app_data = tempdir().unwrap();
         let target = app_data.path().join("agent");
@@ -2775,7 +2772,7 @@ fn provider_edit_failure_injection_keeps_the_original_file_intact() {
                 value: "fixture-replacement-for-injection".to_owned(),
             },
         );
-        service.set_provider_mutation_failure_for_test(failure);
+        service.set_models_write_failure_for_test(failure);
 
         let error = service.edit_custom_provider(input).unwrap_err();
 
@@ -3253,57 +3250,57 @@ fn custom_provider_creation_rejects_invalid_and_colliding_values_without_writing
 #[test]
 fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
     let mut failures = vec![
-        ("before backup", ProviderMutationFailurePoint::BeforeBackup),
+        ("before backup", ModelsWriteFailurePoint::BeforeBackup),
         (
             "backup directory creation",
-            ProviderMutationFailurePoint::BackupDirectoryCreationFailure,
+            ModelsWriteFailurePoint::BackupDirectoryCreationFailure,
         ),
         (
             "backup file open",
-            ProviderMutationFailurePoint::BackupFileOpenFailure,
+            ModelsWriteFailurePoint::BackupFileOpenFailure,
         ),
         (
             "backup file write",
-            ProviderMutationFailurePoint::BackupFileWriteFailure,
+            ModelsWriteFailurePoint::BackupFileWriteFailure,
         ),
         (
             "backup file sync",
-            ProviderMutationFailurePoint::BackupFileSyncFailure,
+            ModelsWriteFailurePoint::BackupFileSyncFailure,
         ),
         (
             "temporary file open",
-            ProviderMutationFailurePoint::TemporaryFileOpenFailure,
+            ModelsWriteFailurePoint::TemporaryFileOpenFailure,
         ),
         (
             "temporary file write",
-            ProviderMutationFailurePoint::TemporaryFileWriteFailure,
+            ModelsWriteFailurePoint::TemporaryFileWriteFailure,
         ),
         (
             "temporary file sync",
-            ProviderMutationFailurePoint::TemporaryFileSyncFailure,
+            ModelsWriteFailurePoint::TemporaryFileSyncFailure,
         ),
-        ("after backup", ProviderMutationFailurePoint::AfterBackup),
+        ("after backup", ModelsWriteFailurePoint::AfterBackup),
         (
             "before temporary write",
-            ProviderMutationFailurePoint::BeforeTemporaryWrite,
+            ModelsWriteFailurePoint::BeforeTemporaryWrite,
         ),
         (
             "temporary reparse",
-            ProviderMutationFailurePoint::CorruptTemporaryFile,
+            ModelsWriteFailurePoint::CorruptTemporaryFile,
         ),
         (
             "untouched comparison",
-            ProviderMutationFailurePoint::MutateUntouchedValue,
+            ModelsWriteFailurePoint::MutateUntouchedValue,
         ),
         (
             "before replacement",
-            ProviderMutationFailurePoint::BeforeReplacement,
+            ModelsWriteFailurePoint::BeforeReplacement,
         ),
     ];
     #[cfg(unix)]
     failures.push((
         "replacement commit failure",
-        ProviderMutationFailurePoint::CommitFailure,
+        ModelsWriteFailurePoint::CommitFailure,
     ));
     for (name, failure) in failures {
         let app_data = tempdir().unwrap();
@@ -3321,7 +3318,7 @@ fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
             .models
             .content_hash
             .unwrap();
-        service.set_provider_mutation_failure_for_test(failure);
+        service.set_models_write_failure_for_test(failure);
 
         assert!(
             service
@@ -3354,9 +3351,7 @@ fn custom_provider_creation_does_not_report_failure_after_replacing_models() {
         .models
         .content_hash
         .unwrap();
-    service.set_provider_mutation_failure_for_test(
-        ProviderMutationFailurePoint::AfterAtomicReplacement,
-    );
+    service.set_models_write_failure_for_test(ModelsWriteFailurePoint::AfterAtomicReplacement);
 
     let result = service.create_custom_provider(provider_creation_input(opened_models_hash));
     let written = fs::read(target.join("models.yml")).unwrap();
@@ -3393,8 +3388,8 @@ fn custom_provider_creation_reports_a_partial_backup_cleanup_failure() {
             .models
             .content_hash
             .unwrap();
-        service.set_provider_mutation_failure_for_test(
-            ProviderMutationFailurePoint::BackupFilePermissionAndCleanupFailure,
+        service.set_models_write_failure_for_test(
+            ModelsWriteFailurePoint::BackupFilePermissionAndCleanupFailure,
         );
 
         let error = service
@@ -3692,6 +3687,7 @@ fn overview_classifies_incomplete_and_read_only_models_and_counts_full_config_re
   default: editable/locked
 otherSettings:
   fallback: editable/locked:high
+  "api_key=fixture-reference-secret": editable/locked
 "#,
     )
     .unwrap();
@@ -3715,8 +3711,9 @@ otherSettings:
     assert_eq!(incomplete["editable"], true);
     assert_eq!(locked["status"], "read-only");
     assert_eq!(locked["editable"], false);
-    assert_eq!(locked["referenceCount"], 2);
-    assert_eq!(locked["referencePaths"].as_array().unwrap().len(), 2);
+    assert_eq!(locked["referenceCount"], 3);
+    assert_eq!(locked["referencePaths"].as_array().unwrap().len(), 3);
+    assert!(!dto.to_string().contains("fixture-reference-secret"));
 }
 
 #[test]
@@ -3822,9 +3819,8 @@ fn model_delete_rechecks_config_hash_before_atomic_replacement() {
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
     let service = provider_mutation_service(&target, app_data.path());
     let overview = service.get_overview_load().overview.unwrap();
-    service.set_provider_mutation_failure_for_test(
-        ProviderMutationFailurePoint::MutateConfigBeforeReplacement,
-    );
+    service
+        .set_models_write_failure_for_test(ModelsWriteFailurePoint::MutateConfigBeforeReplacement);
 
     let error = service
         .delete_model(DeleteModelInput {
@@ -3844,4 +3840,57 @@ fn model_delete_rechecks_config_hash_before_atomic_replacement() {
             .unwrap()
             .contains("editable/second")
     );
+}
+#[test]
+fn overview_marks_malformed_model_fields_read_only() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: malformed-name
+        name: 123
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+      - id: malformed-context
+        name: Malformed Context
+        input: [text]
+        contextWindow: nope
+        maxTokens: 1000
+"#,
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+
+    let dto = serde_json::to_value(
+        service_for_target(&target)
+            .get_overview_load()
+            .overview
+            .unwrap(),
+    )
+    .unwrap();
+    for id in ["malformed-name", "malformed-context"] {
+        let model = dto["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == id)
+            .unwrap();
+        assert_eq!(model["status"], "read-only", "{id}");
+        assert_eq!(model["editable"], false, "{id}");
+        assert!(
+            model["readOnlyReason"]
+                .as_str()
+                .unwrap()
+                .contains("字段格式不受支持"),
+            "{id}: {:?}",
+            model["readOnlyReason"]
+        );
+    }
 }

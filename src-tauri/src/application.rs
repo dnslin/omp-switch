@@ -14,9 +14,10 @@ use tauri_plugin_opener::OpenerExt;
 pub(crate) use crate::model_mutation::{
     CreateModelInput, DeleteModelInput, EditModelInput, ModelMutationResult,
 };
+pub(crate) use crate::models_write::ModelsWriteFailurePoint;
 pub(crate) use crate::provider_mutation::{
     CreateCustomProviderInput, CreateCustomProviderResult, EditCustomProviderInput,
-    EditCustomProviderResult, ProviderMutationFailurePoint,
+    EditCustomProviderResult,
 };
 
 #[cfg(test)]
@@ -236,7 +237,7 @@ pub struct AppService {
     detection_lock: Arc<Mutex<()>>,
     overview_load: Arc<OverviewLoadCoordinator>,
     #[cfg(test)]
-    provider_mutation_failure: Arc<Mutex<Option<ProviderMutationFailurePoint>>>,
+    models_write_failure: Arc<Mutex<Option<ModelsWriteFailurePoint>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -379,7 +380,7 @@ impl AppService {
             detection_lock: Arc::new(Mutex::new(())),
             overview_load: Arc::new(OverviewLoadCoordinator::default()),
             #[cfg(test)]
-            provider_mutation_failure: Arc::new(Mutex::new(None)),
+            models_write_failure: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -868,7 +869,7 @@ impl AppService {
             &self.backup_root,
             context.catalog,
             &input,
-            self.take_provider_mutation_failure(),
+            self.take_models_write_failure(),
         );
         if result.is_ok() {
             self.clear_configuration_snapshot();
@@ -887,7 +888,7 @@ impl AppService {
             &self.backup_root,
             context.catalog,
             &input,
-            self.take_provider_mutation_failure(),
+            self.take_models_write_failure(),
         );
         if result.is_ok() {
             self.clear_configuration_snapshot();
@@ -903,7 +904,7 @@ impl AppService {
             &self.backup_root,
             context.catalog,
             &input,
-            self.take_provider_mutation_failure(),
+            self.take_models_write_failure(),
         );
         if result.is_ok() {
             self.clear_configuration_snapshot();
@@ -919,7 +920,7 @@ impl AppService {
             &self.backup_root,
             context.catalog,
             &input,
-            self.take_provider_mutation_failure(),
+            self.take_models_write_failure(),
         );
         if result.is_ok() {
             self.clear_configuration_snapshot();
@@ -935,7 +936,7 @@ impl AppService {
             &self.backup_root,
             context.catalog,
             &input,
-            self.take_provider_mutation_failure(),
+            self.take_models_write_failure(),
         );
         if result.is_ok() {
             self.clear_configuration_snapshot();
@@ -982,10 +983,10 @@ impl AppService {
         Ok(ProviderWriteContext { target, catalog })
     }
 
-    fn take_provider_mutation_failure(&self) -> Option<ProviderMutationFailurePoint> {
+    fn take_models_write_failure(&self) -> Option<ModelsWriteFailurePoint> {
         #[cfg(test)]
         {
-            self.provider_mutation_failure.lock().take()
+            self.models_write_failure.lock().take()
         }
         #[cfg(not(test))]
         {
@@ -994,11 +995,8 @@ impl AppService {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_provider_mutation_failure_for_test(
-        &self,
-        failure: ProviderMutationFailurePoint,
-    ) {
-        *self.provider_mutation_failure.lock() = Some(failure);
+    pub(crate) fn set_models_write_failure_for_test(&self, failure: ModelsWriteFailurePoint) {
+        *self.models_write_failure.lock() = Some(failure);
     }
 
     fn update_settings(
