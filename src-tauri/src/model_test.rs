@@ -203,15 +203,18 @@ impl ModelTestCoordinator {
             } else {
                 false
             };
-        let terminal_binding = state
-            .active
-            .as_ref()
-            .filter(|active| active.id == id)
-            .and_then(|active| active.binding.clone());
+        let active = state.active.as_ref().filter(|active| active.id == id);
+        let invalidated = active.is_some_and(|active| active.invalidated);
+        let terminal_binding = active.and_then(|active| active.binding.clone());
         state.result = None;
         state.result_binding = None;
-        state.terminal = Some(terminal);
-        state.terminal_binding = terminal_binding;
+        if invalidated {
+            state.terminal = None;
+            state.terminal_binding = None;
+        } else {
+            state.terminal = Some(terminal);
+            state.terminal_binding = terminal_binding;
+        }
         if should_release {
             state.active = None;
         }
@@ -321,17 +324,20 @@ impl ModelTestCoordinator {
 
     fn fail(&self, id: u64, terminal: ModelTestTerminal) {
         let mut state = self.state.lock();
-        let terminal_binding = state
-            .active
-            .as_ref()
-            .filter(|active| active.id == id)
-            .and_then(|active| active.binding.clone());
+        let active = state.active.as_ref().filter(|active| active.id == id);
+        let invalidated = active.is_some_and(|active| active.invalidated);
+        let terminal_binding = active.and_then(|active| active.binding.clone());
         if state.active.as_ref().is_some_and(|active| active.id == id) {
             state.active = None;
             state.result = None;
             state.result_binding = None;
-            state.terminal = Some(terminal);
-            state.terminal_binding = terminal_binding;
+            if invalidated {
+                state.terminal = None;
+                state.terminal_binding = None;
+            } else {
+                state.terminal = Some(terminal);
+                state.terminal_binding = terminal_binding;
+            }
         }
     }
 
@@ -1024,6 +1030,29 @@ mod tests {
 
         coordinator.invalidate_if_changed("/tmp/target", Some("models-v2"));
         assert!(coordinator.state().terminal.is_none());
+    }
+
+    #[test]
+    fn invalidation_does_not_recreate_deferred_terminal() {
+        let coordinator = ModelTestCoordinator::default();
+        coordinator.invalidate_if_changed("/tmp/old-target", Some("models-v1"));
+        let guard = coordinator.begin("provider", "model").unwrap();
+
+        coordinator.invalidate_if_changed("/tmp/new-target", Some("models-v2"));
+        coordinator.defer_terminal(
+            guard.id(),
+            ModelTestTerminal {
+                provider_id: "provider".to_owned(),
+                model_id: "model".to_owned(),
+                message: "测试已取消".to_owned(),
+                error_code: "cancelled".to_owned(),
+            },
+        );
+        coordinator.finish_preparation(guard.id());
+
+        assert!(!coordinator.state().running);
+        assert!(coordinator.state().terminal.is_none());
+        drop(guard);
     }
 
     #[test]

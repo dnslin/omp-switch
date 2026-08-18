@@ -17,6 +17,7 @@ export function isModelTestable(provider: OverviewProvider, model: OverviewModel
     && provider.authMode !== "unsupported"
     && model.editable
     && model.complete
+    && model.input.includes("text")
     && model.contextWindow !== null
     && model.maxTokens !== null
     && model.maxTokens <= model.contextWindow

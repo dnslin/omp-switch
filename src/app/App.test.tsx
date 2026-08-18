@@ -3604,6 +3604,31 @@ describe("Model test page seam", () => {
     expect(within(panel).getByRole("button", { name: "测试模型" })).toBeDisabled();
   });
 
+  it("disables saved-model testing for a complete image-only model", async () => {
+    const base = overviewDto();
+    const imageOnlyModel: OverviewModel = {
+      ...base.models[0],
+      input: ["image"] as OverviewModel["input"],
+      complete: true,
+      status: "normal",
+    };
+    const provider = { ...base.providers[0], models: [imageOnlyModel] };
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto({ providers: [provider], models: [imageOnlyModel] }), readyState),
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        modelTestCostNoticeAccepted: true,
+      }),
+    });
+
+    const panel = await screen.findByRole("region", { name: "快速测试" });
+    expect(within(panel).getByRole("button", { name: "测试模型" })).toBeDisabled();
+  });
+
   it("does not expose testing for an unsaved copy sheet", async () => {
     const user = userEvent.setup();
     const testModel = vi.fn(unavailableClient.testModel);

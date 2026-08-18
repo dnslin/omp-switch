@@ -4649,6 +4649,32 @@ async fn model_test_reloads_saved_openai_completions_and_uses_a_minimal_authenti
     );
     assert!(service.get_model_test_state().result.is_none());
 }
+#[tokio::test]
+async fn model_test_rejects_an_image_only_model_for_text_probe() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        "providers:\n  image-provider:\n    baseUrl: http://127.0.0.1:1/v1\n    api: openai-responses\n    models:\n      - id: image-only\n        name: Image Only\n        input: [image]\n        contextWindow: 128000\n        maxTokens: 4096\n",
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = service_for_target(&target);
+    let overview = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    assert_eq!(overview["providers"][0]["models"][0]["complete"], true);
+    service.accept_model_test_cost_notice().unwrap();
+
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "image-provider",
+        "modelId": "image-only"
+    }))
+    .unwrap();
+    let error = service.test_model(input).await.unwrap_err();
+
+    assert_eq!(error.code, "model-test-not-eligible");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn model_test_rejects_a_non_file_models_path_quickly() {

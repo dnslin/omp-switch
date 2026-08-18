@@ -711,6 +711,15 @@ pub(crate) fn read_model_test_configuration(
                 .unwrap_or("当前 Model definition 不完整，不能测试。"),
         ));
     }
+    if !model
+        .input
+        .iter()
+        .any(|value| matches!(value, OverviewInput::Text))
+    {
+        return Err(model_test_not_eligible(
+            "当前固定文本探针不支持仅图片输入的 Model definition。",
+        ));
+    }
     let protocol = model
         .effective_api
         .as_deref()
