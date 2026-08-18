@@ -263,6 +263,7 @@ export function ModelCreateSheet({
                 </FormRow>
               </div>
               <p className="provider-create-model-note"><Info aria-hidden="true" />模型只修改所属 Provider 下的目标路径；未知配置会原样保留。</p>
+              <div className="model-create-sheet-test"><Button type="button" variant="secondary" disabled title="请先保存 Model definition">测试模型</Button><span>仅可测试已保存模型</span></div>
               {submissionError ? (
                 <section ref={feedbackRef} className="provider-create-submit-error" role="alert" aria-live="assertive">
                   <div><strong>{submissionError.code === "models-hash-conflict" ? "配置冲突" : "无法保存 Model"}</strong><p>{submissionError.message}</p><p>{submissionError.action}</p></div>
@@ -271,7 +272,6 @@ export function ModelCreateSheet({
               ) : null}
             </div>
             <footer className="provider-create-footer">
-              <div className="model-create-sheet-test"><Button type="button" variant="secondary" disabled title="请先保存 Model definition">测试模型</Button><span>仅可测试已保存模型</span></div>
               <div className="provider-create-footer__actions">
                 <Button type="button" variant="secondary" disabled={submitting} onClick={requestDismiss}>取消</Button>
                 <Button type="submit" disabled={!canSave} aria-busy={submitting}>{submitting ? "保存中…" : "保存模型"}</Button>
