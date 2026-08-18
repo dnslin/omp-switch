@@ -1,5 +1,5 @@
 import { LayoutGrid, Search, type LucideIcon } from "lucide-react";
-import { type InputHTMLAttributes, type PropsWithChildren, type ReactNode } from "react";
+import { forwardRef, type InputHTMLAttributes, type PropsWithChildren, type ReactNode } from "react";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./ui/dialog";
 import { Input as ShadcnInput } from "./ui/input";
@@ -8,14 +8,14 @@ import { Select as ShadcnSelect, SelectTrigger, SelectValue } from "./ui/select"
 export { Button };
 
 
-export function SearchInput({ className = "", ...props }: InputHTMLAttributes<HTMLInputElement>) {
+export const SearchInput = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function SearchInput({ className = "", ...props }, ref) {
   return (
     <label className={`input-shell ${className}`}>
       <Search aria-hidden="true" size={18} />
-      <ShadcnInput className="border-0 bg-transparent px-0 shadow-none focus-visible:ring-0" {...props} />
+      <ShadcnInput ref={ref} className="border-0 bg-transparent px-0 shadow-none focus-visible:ring-0" {...props} />
     </label>
   );
-}
+});
 
 export function Select({ label = "请选择" }: { label?: string }) {
   return (

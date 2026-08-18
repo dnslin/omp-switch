@@ -589,6 +589,7 @@ advisor
 provider/model
 provider/model:thinking
 ```
+Simple selector 的 Provider/Model ID 必须不含空白、控制字符或逗号，并能按原 ID 无歧义 round-trip；不满足时不提供角色分配入口。
 
 例如：
 
@@ -650,9 +651,12 @@ auto
 - Provider 不存在。
 - 模型不存在。
 - 模型配置不完整。
+- 不支持协议。
 - 高级配置。
 
 不自动清除已有无效角色。用户明确重选、清除或删除后才修改。
+
+实现状态（issue #11）：React 页面与 Rust 应用服务已按上述边界实现；Pencil 节点 i5xFP 导出为 `designs/50-roles-dirty.png`，真实 Tauri 脏状态截图保存在 `.artifacts/issue-11/roles-dirty-tauri-1536x961.png`，对比记录见 `.artifacts/issue-11/visual-comparison.txt`。
 
 ## 12. 删除与引用完整性
 

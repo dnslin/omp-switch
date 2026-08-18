@@ -1,5 +1,5 @@
 import { StrictMode } from "react";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { describe, expect, it, vi } from "vitest";
@@ -43,6 +43,7 @@ const unavailableClient: TauriClient = {
   createModel: async () => ({ providerId: "dnslin", modelId: "new-model" }),
   editModel: async () => ({ providerId: "dnslin", modelId: "gpt-5.6-sol" }),
   deleteModel: async () => ({ providerId: "dnslin", modelId: "gpt-5.6-sol" }),
+  saveModelRoles: async () => ({ changedRoleCount: 0 }),
   detectOmp: async () => ({ kind: "omp-unavailable", message: "仍未找到 OMP" }),
   selectOmpExecutable: async () => null,
   validateSelectedOmp: async () => ({ kind: "invalid-executable", executablePath: "/tmp/not-omp", message: "无法运行", diagnosticCode: "io-not-found" }),
@@ -753,7 +754,7 @@ describe("React page seam", () => {
     const getOverviewLoad = vi.fn()
       .mockResolvedValueOnce(overviewLoad(overviewDto(), readyState))
       .mockResolvedValueOnce({ startupState: readyState, overview: null, error: refreshError })
-      .mockResolvedValueOnce(overviewLoad(overviewDto(), readyState));
+      .mockResolvedValue(overviewLoad(overviewDto(), readyState));
     const createCustomProvider = vi.fn(async () => ({ providerId: "new-provider", modelId: "new-model" }));
     renderRoute("/providers", { ...unavailableClient, getOverviewLoad, createCustomProvider });
 
@@ -772,8 +773,8 @@ describe("React page seam", () => {
     expect(within(dialog).getByRole("button", { name: "创建 Provider" })).toBeDisabled();
     await user.click(within(dialog).getByRole("button", { name: "重新读取" }));
 
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    expect(getOverviewLoad).toHaveBeenCalledTimes(3);
+    await screen.findByRole("heading", { name: "Provider 不存在" });
+    expect(getOverviewLoad).toHaveBeenCalledTimes(4);
   });
 
   it("submits spec-valid model IDs and token limits", async () => {
@@ -1261,9 +1262,9 @@ describe("React page seam", () => {
     expect(await screen.findByRole("link", { name: /OMP 已连接.*v17\.4\.1/ })).toBeVisible();
     await user.click(screen.getByRole("link", { name: "角色" }));
     expect(await screen.findByRole("heading", { name: "角色" })).toBeVisible();
-    expect(await screen.findByRole("link", { name: /OMP 不可用.*配置目录不可用/ })).toBeVisible();
-    expect(getOverviewLoad).toHaveBeenCalledTimes(1);
-    expect(getStartupState).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole("link", { name: /OMP 已连接.*v17\.4\.1/ })).toBeVisible();
+    expect(getOverviewLoad).toHaveBeenCalledTimes(2);
+    expect(getStartupState).not.toHaveBeenCalled();
   });
   it("shows Providers load errors without exposing stale startup context", async () => {
     renderRoute("/providers", {
@@ -1297,16 +1298,18 @@ describe("React page seam", () => {
   it("ignores stale Providers data after navigation", async () => {
     const user = userEvent.setup();
     const first = deferred<OverviewLoad>();
-    const getOverviewLoad = vi.fn(() => first.promise);
+    const getOverviewLoad = vi.fn()
+      .mockReturnValueOnce(first.promise)
+      .mockResolvedValueOnce(overviewLoad(overviewDto(), readyState));
     const getStartupState = vi.fn(async () => ({ kind: "omp-unavailable", message: "最新 OMP 状态不可用" } as const));
     renderRoute("/providers", { ...unavailableClient, getOverviewLoad, getStartupState });
 
     await waitFor(() => expect(getOverviewLoad).toHaveBeenCalledTimes(1));
     await user.click(screen.getByRole("link", { name: "角色" }));
     expect(await screen.findByRole("heading", { name: "角色" })).toBeVisible();
-    expect(await screen.findByRole("link", { name: /最新 OMP 状态不可用/ })).toBeVisible();
+    expect(await screen.findByRole("link", { name: /OMP 已连接.*v17\.4\.1/ })).toBeVisible();
     first.resolve(overviewLoad(overviewDto(), readyState));
-    await waitFor(() => expect(screen.getByRole("link", { name: /最新 OMP 状态不可用/ })).toBeVisible());
+    await waitFor(() => expect(screen.getByRole("link", { name: /OMP 已连接.*v17\.4\.1/ })).toBeVisible());
   });
 
   it("renders navigation and page content as sibling shell regions", () => {
@@ -1620,6 +1623,526 @@ describe("React page seam", () => {
     expect(deleteModel).toHaveBeenCalledTimes(1);
   });
 
+  it("renders the ten built-in roles with the approved page skeleton", async () => {
+    const saveModelRoles = vi.fn().mockResolvedValue({ changedRoleCount: 1 });
+    renderRoute("/roles", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto()),
+      saveModelRoles,
+    } as TauriClient);
+
+    expect(await screen.findByRole("heading", { name: "角色" })).toBeVisible();
+    for (const roleId of ["default", "smol", "slow", "vision", "plan", "designer", "commit", "tiny", "task", "advisor"]) {
+      expect(screen.getByText(roleId, { exact: true })).toBeVisible();
+    }
+    expect(screen.getByRole("textbox", { name: "搜索角色" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "保存修改" })).toBeDisabled();
+    expect(saveModelRoles).not.toHaveBeenCalled();
+  });
+
+  it("sets supported thinking level and clears a built-in role", async () => {
+    const user = userEvent.setup();
+    const saveModelRoles = vi.fn().mockResolvedValue({ changedRoleCount: 1 });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overviewDto()), saveModelRoles } as TauriClient);
+
+    const defaultRow = await screen.findByText("default", { exact: true });
+    const row = defaultRow.closest("tr") as HTMLElement;
+    const thinking = within(row).getByRole("combobox", { name: "Thinking default" });
+    await waitFor(() => expect(thinking).toHaveTextContent("max"));
+    await user.click(thinking);
+    await user.click(await screen.findByRole("option", { name: "high" }));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Thinking default" })).toHaveTextContent("high"));
+
+    await user.click(within(row).getByRole("button", { name: "清除" }));
+    expect(within(row).getByRole("combobox", { name: "Provider default" })).toHaveTextContent("未配置");
+    fireEvent.keyDown(window, { key: "f", metaKey: true });
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "搜索角色" }));
+    fireEvent.keyDown(window, { key: "s", metaKey: true });
+    await waitFor(() => expect(saveModelRoles).toHaveBeenCalledWith({
+      openedConfigHash: "config-hash",
+      changes: expect.arrayContaining([{ kind: "clear", roleId: "default" }]),
+    }));
+  });
+  it("confirms clearing all built-in roles", async () => {
+    const user = userEvent.setup();
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overviewDto()) } as TauriClient);
+    await screen.findByText("default", { exact: true });
+    await user.click(screen.getByRole("button", { name: "更多角色操作" }));
+    const confirmation = await screen.findByRole("heading", { name: "清除全部内置角色？" });
+    await user.click(within(confirmation.closest('[role="dialog"]') as HTMLElement).getByRole("button", { name: "清除" }));
+    const row = screen.getByText("default", { exact: true }).closest("tr") as HTMLElement;
+    expect(within(row).getByRole("combobox", { name: "Provider default" })).toHaveTextContent("未配置");
+    expect(screen.getByRole("button", { name: "保存修改" })).toBeEnabled();
+  });
+
+  it("persists deletion of an existing custom role", async () => {
+    const user = userEvent.setup();
+    const saveModelRoles = vi.fn().mockResolvedValue({ changedRoleCount: 1 });
+    const overview = overviewDto({ roles: [{ id: "researcher", status: "configured", selector: "dnslin/gpt-5.6-sol", providerId: "dnslin", modelId: "gpt-5.6-sol", thinkingLevel: null }] });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview), saveModelRoles } as TauriClient);
+    await screen.findByText("researcher", { exact: true });
+    await user.click(screen.getByRole("button", { name: "角色操作 researcher" }));
+    await user.click(screen.getByRole("menuitem", { name: "删除" }));
+    const confirmation = await screen.findByRole("heading", { name: "删除自定义角色？" });
+    await user.click(within(confirmation.closest('[role="dialog"]') as HTMLElement).getByRole("button", { name: "删除角色" }));
+    expect(screen.getByRole("button", { name: "保存修改" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(saveModelRoles).toHaveBeenCalledWith(expect.objectContaining({ changes: [{ kind: "delete", roleId: "researcher" }] })));
+  });
+
+  it("shows unsupported protocol references without locking the role page", async () => {
+    const base = overviewDto();
+    const model: OverviewModel = { ...base.models[0], status: "read-only", editable: false, readOnlyReason: "Model definition 使用了不支持的协议。" };
+    const normalModel: OverviewModel = { ...base.models[0], id: "gpt-5.6-normal" };
+    const overview = overviewDto({
+      counts: { providerCount: 1, modelCount: 2, roleCount: 1 },
+      models: [model, normalModel],
+      providers: [{ ...base.providers[0], modelCount: 2, models: [model, normalModel] }],
+      roles: [{ id: "default", status: "unsupported", selector: "dnslin/gpt-5.6-sol", providerId: "dnslin", modelId: "gpt-5.6-sol", thinkingLevel: null }],
+    });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) } as TauriClient);
+    await screen.findByText("不支持协议");
+    expect(screen.getByRole("button", { name: "新增自定义角色" })).toBeEnabled();
+    expect(screen.queryByText("以下角色使用当前版本不支持的高级选择器")).not.toBeInTheDocument();
+  });
+
+  it("keeps role clearing and deletion available when assignment catalog is missing", async () => {
+    const user = userEvent.setup();
+    const saveModelRoles = vi.fn().mockResolvedValue({ changedRoleCount: 1 });
+    const overview = overviewDto({ state: "read-only", rolesEditable: true, rolesAssignable: false, rolesReadOnlyReason: null, roles: [{ id: "default", status: "configured", selector: "dnslin/gpt-5.6-sol:max", providerId: "dnslin", modelId: "gpt-5.6-sol", thinkingLevel: "max" }, { id: "researcher", status: "configured", selector: "dnslin/gpt-5.6-sol", providerId: "dnslin", modelId: "gpt-5.6-sol", thinkingLevel: null }] });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview), saveModelRoles } as TauriClient);
+    const defaultRow = (await screen.findByText("default", { exact: true })).closest("tr") as HTMLElement;
+    expect(screen.getByRole("button", { name: "新增自定义角色" })).toBeDisabled();
+    expect(within(defaultRow).getByRole("button", { name: "清除" })).toBeEnabled();
+    await user.click(within(defaultRow).getByRole("button", { name: "清除" }));
+    const customRow = screen.getByText("researcher", { exact: true }).closest("tr") as HTMLElement;
+    await user.click(within(customRow).getByRole("button", { name: "角色操作 researcher" }));
+    await user.click(screen.getByRole("menuitem", { name: "删除" }));
+    const confirmation = await screen.findByRole("heading", { name: "删除自定义角色？" });
+    await user.click(within(confirmation.closest('[role="dialog"]') as HTMLElement).getByRole("button", { name: "删除角色" }));
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(saveModelRoles).toHaveBeenCalledWith(expect.objectContaining({ changes: expect.arrayContaining([{ kind: "clear", roleId: "default" }, { kind: "delete", roleId: "researcher" }]) })));
+  });
+
+  it("confirms before discarding a dirty role editor", async () => {
+    const user = userEvent.setup();
+    const { router } = renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overviewDto()) } as TauriClient);
+    await screen.findByText("default", { exact: true });
+    await user.click(screen.getByRole("button", { name: "新增自定义角色" }));
+    const editor = await screen.findByRole("dialog");
+    const roleInput = within(editor).getByRole("textbox", { name: "角色名称" });
+    await user.type(roleInput, "draft");
+    router.navigate("/providers");
+    const navigationBlock = await screen.findByRole("heading", { name: "有未保存的修改" });
+    await user.click(within(navigationBlock.closest('[role="dialog"]') as HTMLElement).getByRole("button", { name: "取消" }));
+    expect(router.state.location.pathname).toBe("/roles");
+    fireEvent.keyDown(editor, { key: "Escape" });
+    const discard = await screen.findByRole("heading", { name: "有未保存的修改" });
+    await user.click(within(discard.closest('[role="dialog"]') as HTMLElement).getByRole("button", { name: "继续编辑" }));
+    expect(roleInput).toHaveValue("draft");
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "取消" }));
+    const secondDiscard = await screen.findByRole("heading", { name: "有未保存的修改" });
+    await user.click(within(secondDiscard.closest('[role="dialog"]') as HTMLElement).getByRole("button", { name: "放弃修改" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("rejects custom role names with surrounding whitespace", async () => {
+    const user = userEvent.setup();
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overviewDto()) } as TauriClient);
+    await screen.findByText("default", { exact: true });
+    await user.click(screen.getByRole("button", { name: "新增自定义角色" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByRole("textbox", { name: "角色名称" }), " analyst ");
+    await user.click(within(dialog).getByRole("button", { name: "添加" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("角色名称不能为空");
+    expect(screen.queryByText("analyst", { exact: true })).not.toBeInTheDocument();
+  });
+
+  it("creates a custom role only after a complete selector, then supports edit rename and delete", async () => {
+    const user = userEvent.setup();
+    const saveModelRoles = vi.fn().mockResolvedValue({ changedRoleCount: 1 });
+    const overview = overviewDto({ roles: [...overviewDto().roles, { id: "researcher", status: "configured", selector: "dnslin/gpt-5.6-sol", providerId: "dnslin", modelId: "gpt-5.6-sol", thinkingLevel: null }] });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview), saveModelRoles } as TauriClient);
+    await screen.findByText("default", { exact: true });
+
+    await user.click(screen.getByRole("button", { name: "新增自定义角色" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByRole("textbox", { name: "角色名称" }), "analyst");
+    const provider = within(dialog).getByRole("combobox", { name: "Provider" });
+    await user.click(provider);
+    await user.click(await screen.findByRole("option", { name: "dnslin" }));
+    const model = within(dialog).getByRole("combobox", { name: "模型" });
+    await user.click(model);
+    await user.click(await screen.findByRole("option", { name: "gpt-5.6-sol" }));
+    await user.click(within(dialog).getByRole("button", { name: "添加" }));
+    const analyst = await screen.findByText("analyst", { exact: true });
+    expect(analyst).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "角色操作 analyst" }));
+    await user.click(screen.getByRole("menuitem", { name: "编辑" }));
+    const editDialog = await screen.findByRole("dialog");
+    expect(within(editDialog).getByRole("textbox", { name: "角色名称" })).toHaveValue("analyst");
+    await user.click(within(editDialog).getByRole("button", { name: "保存" }));
+
+    await user.click(screen.getByRole("button", { name: "角色操作 analyst" }));
+    await user.click(screen.getByRole("menuitem", { name: "改名" }));
+    const renameDialog = await screen.findByRole("dialog");
+    const renameInput = within(renameDialog).getByRole("textbox", { name: "角色名称" });
+    await user.clear(renameInput);
+    await user.type(renameInput, "reviewer");
+    await user.click(within(renameDialog).getByRole("button", { name: "保存" }));
+    expect(await screen.findByText("reviewer", { exact: true })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "新增自定义角色" }));
+    const duplicateDialog = await screen.findByRole("dialog");
+    await user.type(within(duplicateDialog).getByRole("textbox", { name: "角色名称" }), "researcher");
+    await user.click(within(duplicateDialog).getByRole("combobox", { name: "Provider" }));
+    await user.click(await screen.findByRole("option", { name: "dnslin" }));
+    await user.click(within(duplicateDialog).getByRole("combobox", { name: "模型" }));
+    await user.click(await screen.findByRole("option", { name: "gpt-5.6-sol" }));
+    await user.click(within(duplicateDialog).getByRole("button", { name: "添加" }));
+    expect(await within(duplicateDialog).findByRole("alert")).toHaveTextContent("角色名称已存在");
+    await user.click(within(duplicateDialog).getByRole("button", { name: "取消" }));
+    const duplicateDiscard = await screen.findByRole("heading", { name: "有未保存的修改" });
+    await user.click(within(duplicateDiscard.closest('[role="dialog"]') as HTMLElement).getByRole("button", { name: "放弃修改" }));
+
+    await user.click(screen.getByRole("button", { name: "角色操作 reviewer" }));
+    await user.click(screen.getByRole("menuitem", { name: "删除" }));
+    const confirmation = await screen.findByRole("heading", { name: "删除自定义角色？" });
+    await user.click(within(confirmation.closest('[role="dialog"]') as HTMLElement).getByRole("button", { name: "删除角色" }));
+    expect(screen.queryByText("reviewer", { exact: true })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存修改" })).toBeDisabled();
+  });
+  it("persists creating a custom role through the global save", async () => {
+    const user = userEvent.setup();
+    const saveModelRoles = vi.fn().mockResolvedValue({ changedRoleCount: 1 });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overviewDto()), saveModelRoles } as TauriClient);
+    await screen.findByText("default", { exact: true });
+
+    await user.click(screen.getByRole("button", { name: "新增自定义角色" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByRole("textbox", { name: "角色名称" }), "analyst");
+    await user.click(within(dialog).getByRole("combobox", { name: "Provider" }));
+    await user.click(await screen.findByRole("option", { name: "dnslin" }));
+    await user.click(within(dialog).getByRole("combobox", { name: "模型" }));
+    await user.click(await screen.findByRole("option", { name: "gpt-5.6-sol" }));
+    await user.click(within(dialog).getByRole("button", { name: "添加" }));
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(saveModelRoles).toHaveBeenCalledWith({
+      openedConfigHash: "config-hash",
+      changes: [{ kind: "create", roleId: "analyst", providerId: "dnslin", modelId: "gpt-5.6-sol" }],
+    }));
+  });
+
+  it("persists editing a custom role selector through the global save", async () => {
+    const user = userEvent.setup();
+    const saveModelRoles = vi.fn().mockResolvedValue({ changedRoleCount: 1 });
+    const overview = overviewDto({ roles: [{ id: "researcher", status: "configured", selector: "dnslin/gpt-5.6-sol", providerId: "dnslin", modelId: "gpt-5.6-sol", thinkingLevel: null }] });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview), saveModelRoles } as TauriClient);
+    await screen.findByText("researcher", { exact: true });
+
+    await user.click(screen.getByRole("button", { name: "角色操作 researcher" }));
+    await user.click(screen.getByRole("menuitem", { name: "编辑" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("combobox", { name: "Thinking" }));
+    await user.click(await screen.findByRole("option", { name: "high" }));
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(saveModelRoles).toHaveBeenCalledWith({
+      openedConfigHash: "config-hash",
+      changes: [{ kind: "set", roleId: "researcher", providerId: "dnslin", modelId: "gpt-5.6-sol", thinkingLevel: "high" }],
+    }));
+  });
+
+  it("persists renaming a custom role through the global save", async () => {
+    const user = userEvent.setup();
+    const saveModelRoles = vi.fn().mockResolvedValue({ changedRoleCount: 1 });
+    const overview = overviewDto({ roles: [{ id: "researcher", status: "configured", selector: "dnslin/gpt-5.6-sol", providerId: "dnslin", modelId: "gpt-5.6-sol", thinkingLevel: null }] });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview), saveModelRoles } as TauriClient);
+    await screen.findByText("researcher", { exact: true });
+
+    await user.click(screen.getByRole("button", { name: "角色操作 researcher" }));
+    await user.click(screen.getByRole("menuitem", { name: "改名" }));
+    const dialog = await screen.findByRole("dialog");
+    const roleInput = within(dialog).getByRole("textbox", { name: "角色名称" });
+    await user.clear(roleInput);
+    await user.type(roleInput, "reviewer");
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(saveModelRoles).toHaveBeenCalledWith({
+      openedConfigHash: "config-hash",
+      changes: [{ kind: "rename", roleId: "researcher", newRoleId: "reviewer", providerId: "dnslin", modelId: "gpt-5.6-sol" }],
+    }));
+  });
+
+  it("rejects empty custom role values and locks the whole page for advanced roles", async () => {
+    const user = userEvent.setup();
+    const openTargetConfigurationDirectory = vi.fn(async () => undefined);
+    const advanced = overviewDto({ roles: [{ id: "default", status: "advanced", selector: null, providerId: null, modelId: null, thinkingLevel: null }] });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(advanced), openTargetConfigurationDirectory } as TauriClient);
+    await screen.findByText("default", { exact: true });
+    expect(screen.getByText("角色配置为只读")).toBeVisible();
+    expect(screen.getByRole("button", { name: "新增自定义角色" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Provider default" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "打开配置目录" }));
+    expect(openTargetConfigurationDirectory).toHaveBeenCalledWith("/usr/local/bin/omp");
+
+    cleanup();
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overviewDto()) } as TauriClient);
+    await screen.findByText("default", { exact: true });
+    await user.click(screen.getByRole("button", { name: "新增自定义角色" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByRole("textbox", { name: "角色名称" }), "empty");
+    await user.click(within(dialog).getByRole("button", { name: "添加" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("请选择普通");
+    expect(screen.queryByText("empty", { exact: true })).not.toBeInTheDocument();
+  });
+
+  it("locks role editing when the overview marks configuration read-only", async () => {
+    const overview = overviewDto({ state: "read-only", rolesEditable: false, rolesAssignable: false, rolesReadOnlyReason: "当前配置业务结构无法识别，只能查看；OMP Switch 不会修改未知结构。", readOnlyReason: "当前配置业务结构无法识别，只能查看；OMP Switch 不会修改未知结构。" });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) } as TauriClient);
+    await screen.findByText("default", { exact: true });
+    expect(screen.getByText("当前配置业务结构无法识别，只能查看；OMP Switch 不会修改未知结构。")).toBeVisible();
+    expect(screen.getByRole("button", { name: "新增自定义角色" })).toBeDisabled();
+  });
+
+  it("shows invalid simple role references without locking repair controls", async () => {
+    const user = userEvent.setup();
+    const overview = overviewDto({
+      roles: [
+        { id: "default", status: "provider-missing", selector: "missing/gpt", providerId: "missing", modelId: "gpt", thinkingLevel: null },
+        { id: "smol", status: "model-missing", selector: "dnslin/old", providerId: "dnslin", modelId: "old", thinkingLevel: null },
+        { id: "slow", status: "incomplete", selector: "dnslin/gpt-5.6-sol", providerId: "dnslin", modelId: "gpt-5.6-sol", thinkingLevel: null },
+        { id: "researcher", status: "incomplete", selector: "dnslin/old", providerId: "dnslin", modelId: "old", thinkingLevel: null },
+      ],
+    });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) } as TauriClient);
+    expect(await screen.findByText("Provider 不存在")).toBeVisible();
+    expect(screen.getByText("模型不存在")).toBeVisible();
+    expect(screen.getAllByText("模型配置不完整")).toHaveLength(2);
+    expect(screen.getByRole("combobox", { name: "Provider default" })).toBeEnabled();
+    expect(screen.getByRole("combobox", { name: "Thinking default" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Thinking researcher" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "角色操作 researcher" }));
+    await user.click(screen.getByRole("menuitem", { name: "编辑" }));
+    const editDialog = await screen.findByRole("dialog");
+    await user.click(within(editDialog).getByRole("button", { name: "保存" }));
+    expect(await within(editDialog).findByRole("alert")).toHaveTextContent("请选择普通");
+    await user.click(within(editDialog).getByRole("button", { name: "取消" }));
+  });
+  it("assigns a model whose ID matches the empty option sentinel", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const specialModel: OverviewModel = { ...base.models[0], id: "__none__" };
+    const specialProvider: OverviewProvider = { ...base.providers[0], modelCount: 1, models: [specialModel] };
+    const overview = overviewDto({
+      counts: { providerCount: 1, modelCount: 1, roleCount: 1 },
+      providers: [specialProvider],
+      models: [specialModel],
+      roles: [{ id: "default", status: "unconfigured", selector: null, providerId: null, modelId: null, thinkingLevel: null }],
+    });
+    const saveModelRoles = vi.fn().mockResolvedValue({ changedRoleCount: 1 });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview), saveModelRoles } as TauriClient);
+    const row = (await screen.findByText("default", { exact: true })).closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("combobox", { name: "Provider default" }));
+    await user.click(await screen.findByRole("option", { name: "dnslin" }));
+    await user.click(within(row).getByRole("combobox", { name: "模型 default" }));
+    await user.click(await screen.findByRole("option", { name: "__none__" }));
+    expect(within(row).getByRole("combobox", { name: "模型 default" })).toHaveTextContent("__none__");
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(saveModelRoles).toHaveBeenCalledWith(expect.objectContaining({ changes: [expect.objectContaining({ modelId: "__none__" })] })));
+  });
+  it("does not offer selector-unsafe model definitions", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const unsafeModel: OverviewModel = { ...base.models[0], id: "gpt,5" };
+    const unsafeProvider: OverviewProvider = { ...base.providers[0], models: [unsafeModel] };
+    const overview = overviewDto({
+      providers: [unsafeProvider],
+      models: [unsafeModel],
+      roles: [{ id: "default", status: "unconfigured", selector: null, providerId: null, modelId: null, thinkingLevel: null }],
+      rolesAssignable: true,
+    });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) } as TauriClient);
+    const row = (await screen.findByText("default", { exact: true })).closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("combobox", { name: "Provider default" }));
+    expect(screen.queryByRole("option", { name: "dnslin" })).not.toBeInTheDocument();
+  });
+  it("keeps Rust-accepted format characters available in model selectors", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const formatModel: OverviewModel = { ...base.models[0], id: "gpt\u200d5" };
+    const formatProvider: OverviewProvider = { ...base.providers[0], models: [formatModel] };
+    const overview = overviewDto({
+      providers: [formatProvider],
+      models: [formatModel],
+      roles: [{ id: "default", status: "unconfigured", selector: null, providerId: null, modelId: null, thinkingLevel: null }],
+      rolesAssignable: true,
+    });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) } as TauriClient);
+    const row = (await screen.findByText("default", { exact: true })).closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("combobox", { name: "Provider default" }));
+    expect(screen.getByRole("option", { name: "dnslin" })).toBeVisible();
+  });
+  it("does not offer models whose ID is only a Thinking suffix", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const emptyBaseModel: OverviewModel = { ...base.models[0], id: ":high" };
+    const emptyBaseProvider: OverviewProvider = { ...base.providers[0], models: [emptyBaseModel] };
+    const overview = overviewDto({
+      providers: [emptyBaseProvider],
+      models: [emptyBaseModel],
+      roles: [{ id: "default", status: "unconfigured", selector: null, providerId: null, modelId: null, thinkingLevel: null }],
+      rolesAssignable: true,
+    });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) } as TauriClient);
+    const row = (await screen.findByText("default", { exact: true })).closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("combobox", { name: "Provider default" }));
+    expect(screen.queryByRole("option", { name: "dnslin" })).not.toBeInTheDocument();
+  });
+
+
+
+  it("renders mixed-case role references in controlled selects", async () => {
+    const base = overviewDto();
+    const mixedModel: OverviewModel = { ...base.models[0], providerId: "Dnslin", id: "GPT-5.6-Luna" };
+    const mixedProvider: OverviewProvider = { ...base.providers[0], id: "Dnslin", modelCount: 1, models: [mixedModel] };
+    const overview = overviewDto({
+      counts: { providerCount: 1, modelCount: 1, roleCount: 1 },
+      providers: [mixedProvider],
+      models: [mixedModel],
+      roles: [{ id: "default", status: "configured", selector: "dnslin/gpt-5.6-luna", providerId: "Dnslin", modelId: "GPT-5.6-Luna", thinkingLevel: null }],
+    });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) } as TauriClient);
+    const row = (await screen.findByText("default", { exact: true })).closest("tr") as HTMLElement;
+    expect(within(row).getByRole("combobox", { name: "Provider default" })).toHaveTextContent("Dnslin");
+    expect(within(row).getByRole("combobox", { name: "模型 default" })).toHaveTextContent("GPT-5.6-Luna");
+  });
+  it("allows a renamed custom role to return to its original name", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const overview = overviewDto({ roles: [...base.roles, { id: "researcher", status: "configured", selector: "dnslin/gpt-5.6-sol", providerId: "dnslin", modelId: "gpt-5.6-sol", thinkingLevel: null }] });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) } as TauriClient);
+    await screen.findByText("researcher", { exact: true });
+    await user.click(screen.getByRole("button", { name: "角色操作 researcher" }));
+    await user.click(screen.getByRole("menuitem", { name: "改名" }));
+    const firstDialog = await screen.findByRole("dialog");
+    const firstInput = within(firstDialog).getByRole("textbox", { name: "角色名称" });
+    await user.clear(firstInput);
+    await user.type(firstInput, "reviewer");
+    await user.click(within(firstDialog).getByRole("button", { name: "保存" }));
+    await user.click(screen.getByRole("button", { name: "角色操作 reviewer" }));
+    await user.click(screen.getByRole("menuitem", { name: "改名" }));
+    const secondDialog = await screen.findByRole("dialog");
+    const secondInput = within(secondDialog).getByRole("textbox", { name: "角色名称" });
+    await user.clear(secondInput);
+    await user.type(secondInput, "researcher");
+    await user.click(within(secondDialog).getByRole("button", { name: "保存" }));
+    expect(await screen.findByText("researcher", { exact: true })).toBeVisible();
+  });
+
+  it("keeps distinct Unicode model IDs distinct in role selectors", async () => {
+    const base = overviewDto();
+    const upperModel: OverviewModel = { ...base.models[0], id: "Ä" };
+    const lowerModel: OverviewModel = { ...base.models[0], id: "ä" };
+    const provider: OverviewProvider = { ...base.providers[0], modelCount: 2, models: [upperModel, lowerModel] };
+    const overview = overviewDto({
+      counts: { providerCount: 1, modelCount: 2, roleCount: 1 },
+      providers: [provider],
+      models: [upperModel, lowerModel],
+      roles: [{ id: "default", status: "configured", selector: "dnslin/ä", providerId: "dnslin", modelId: "ä", thinkingLevel: null }],
+    });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) } as TauriClient);
+    const row = (await screen.findByText("default", { exact: true })).closest("tr") as HTMLElement;
+    expect(within(row).getByRole("combobox", { name: "模型 default" })).toHaveTextContent("ä");
+  });
+  it("initializes configured roles from structured fields when selectors are redacted", async () => {
+    const base = overviewDto();
+    const model: OverviewModel = { ...base.models[0], providerId: "sk-local", id: "gpt-5.6-sol" };
+    const provider: OverviewProvider = { ...base.providers[0], id: "sk-local", models: [model] };
+    const overview = overviewDto({
+      providers: [provider],
+      models: [model],
+      roles: [{ id: "default", status: "configured", selector: "[已脱敏]", providerId: "sk-local", modelId: "gpt-5.6-sol", thinkingLevel: "high" }],
+    });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview) } as TauriClient);
+    const row = (await screen.findByText("default", { exact: true })).closest("tr") as HTMLElement;
+    expect(within(row).getByRole("combobox", { name: "Provider default" })).toHaveTextContent("sk-local");
+    expect(within(row).getByRole("combobox", { name: "模型 default" })).toHaveTextContent("gpt-5.6-sol");
+    expect(within(row).getByRole("combobox", { name: "Thinking default" })).toHaveTextContent("high");
+    expect(screen.getByRole("button", { name: "保存修改" })).toBeDisabled();
+  });
+
+
+
+
+
+  it("protects partial role assignments as dirty drafts", async () => {
+    const user = userEvent.setup();
+    const { router } = renderRoute("/roles", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto({ roles: [{ id: "default", status: "unconfigured", selector: null, providerId: null, modelId: null, thinkingLevel: null }, { id: "task", status: "configured", selector: "dnslin/gpt-5.6-sol", providerId: "dnslin", modelId: "gpt-5.6-sol", thinkingLevel: null }] })),
+    } as TauriClient);
+    const row = (await screen.findByText("default", { exact: true })).closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("combobox", { name: "Provider default" }));
+    await user.click(await screen.findByRole("option", { name: "dnslin" }));
+    expect(screen.getByText("有未保存的修改")).toBeVisible();
+
+    void router.navigate("/overview");
+    const discardHeading = await screen.findByRole("heading", { name: "有未保存的修改" });
+    await user.click(within(discardHeading.closest('[role="dialog"]') as HTMLElement).getByRole("button", { name: "取消" }));
+    expect(router.state.location.pathname).toBe("/roles");
+  });
+
+  it("does not serialize a partial provider reassignment as clear", async () => {
+    const user = userEvent.setup();
+    const saveModelRoles = vi.fn(async () => ({ changedRoleCount: 0 }));
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overviewSelectionDto()), saveModelRoles } as TauriClient);
+    const row = (await screen.findByText("default", { exact: true })).closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("combobox", { name: "Provider default" }));
+    await user.click(await screen.findByRole("option", { name: "anthropic" }));
+
+    expect(screen.getByText("有未保存的修改")).toBeVisible();
+    expect(screen.getByRole("button", { name: "保存修改" })).toBeDisabled();
+    expect(screen.getByText("待保存")).toBeVisible();
+    expect(saveModelRoles).not.toHaveBeenCalled();
+  });
+
+  it("keeps dirty role edits after a save conflict until reload is confirmed", async () => {
+    const user = userEvent.setup();
+    const getOverviewLoad = vi.fn(async () => overviewLoad(overviewDto()));
+    const saveModelRoles = vi.fn().mockRejectedValue({ code: "config-hash-conflict", message: "config.yml 已被外部修改。", action: "请重新读取配置。" });
+    renderRoute("/roles", { ...unavailableClient, getOverviewLoad, saveModelRoles } as TauriClient);
+    const row = (await screen.findByText("default", { exact: true })).closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("combobox", { name: "Thinking default" }));
+    await user.click(await screen.findByRole("option", { name: "high" }));
+    expect(screen.getByText("待保存")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("配置冲突");
+    expect(screen.getByText("有未保存的修改")).toBeVisible();
+    expect(saveModelRoles).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "重新读取" }));
+    const reloadDialog = screen.getByRole("dialog");
+    expect(reloadDialog).toHaveTextContent("重新读取会丢弃当前未保存的角色修改。");
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    expect(saveModelRoles).toHaveBeenCalledTimes(1);
+    await user.click(within(reloadDialog).getByRole("button", { name: "取消" }));
+    expect(screen.getByText("有未保存的修改")).toBeVisible();
+    expect(getOverviewLoad).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "重新读取" }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "重新读取" }));
+    await waitFor(() => expect(getOverviewLoad).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(screen.queryByText("待保存")).not.toBeInTheDocument();
+      expect(screen.queryByText("有未保存的修改")).not.toBeInTheDocument();
+    });
+  });
+
+
 });
 
 function overviewDto(overrides: Partial<OverviewDto> = {}): OverviewDto {
@@ -1635,6 +2158,7 @@ function overviewDto(overrides: Partial<OverviewDto> = {}): OverviewDto {
     contextWindow: 356000,
     maxTokens: 32768,
     complete: true,
+    unsupportedProtocol: false,
     status: "normal",
     editable: true,
     referenceCount: 0,
@@ -1652,7 +2176,10 @@ function overviewDto(overrides: Partial<OverviewDto> = {}): OverviewDto {
     counts: { providerCount: 1, modelCount: 1, roleCount: 2 },
     providers: [{ id: "dnslin", name: "Local", baseUrl: "https://example.com", defaultApi: "openai-responses", authMode: "api-key", hasApiKey: true, modelCount: 1, classification: "custom", editable: true, readOnlyReason: null, models: [model] }],
     models: [model],
-    roles: [{ id: "default", status: "configured", selector: "dnslin/gpt-5.6-sol:max" }, { id: "task", status: "configured", selector: "dnslin/gpt-5.6-sol" }],
+    roles: [{ id: "default", status: "configured", selector: "dnslin/gpt-5.6-sol:max", providerId: "dnslin", modelId: "gpt-5.6-sol", thinkingLevel: "max" }, { id: "task", status: "configured", selector: "dnslin/gpt-5.6-sol", providerId: "dnslin", modelId: "gpt-5.6-sol", thinkingLevel: null }],
+    rolesEditable: true,
+    rolesAssignable: true,
+    rolesReadOnlyReason: null,
     emptyReason: null,
     nextAction: null,
     readOnlyReason: null,

@@ -217,6 +217,16 @@ fn service_for_target(target: &Path) -> AppService {
     });
     service_with(environment, None)
 }
+fn service_for_target_with_app_data(target: &Path, app_data: &Path) -> AppService {
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.to_path_buf()),
+        inspect_real_target: true,
+        transaction_root: target.parent().unwrap().join(".app-transactions"),
+        ..FakeOmpEnvironment::default()
+    });
+    AppService::new_with_environment(app_data.join("settings.json"), environment).unwrap()
+}
 
 fn service_with(environment: Arc<FakeOmpEnvironment>, saved: Option<&str>) -> AppService {
     let app_data = tempdir().unwrap().keep();
@@ -1718,6 +1728,7 @@ unrecognizedRoot:
   missingModel: dnslin/does-not-exist
   missingProvider: absent/model
   incompleteRole: dnslin/incomplete
+  catalogOnly: aiand/deepseek-ai/deepseek-v4-flash
 otherSettings:
   nested:
     value: untouched
@@ -1732,7 +1743,7 @@ otherSettings:
     assert_eq!(dto["state"], "read-only");
     assert_eq!(dto["counts"]["providerCount"], 0);
     assert_eq!(dto["counts"]["modelCount"], 6);
-    assert_eq!(dto["counts"]["roleCount"], 10);
+    assert_eq!(dto["counts"]["roleCount"], 11);
     assert_eq!(dto["providers"][0]["hasApiKey"], true);
     assert_eq!(dto["providers"][0]["baseUrl"], "https://example.com/v1");
     assert_eq!(dto["providers"][0]["classification"], "advanced");
@@ -1818,6 +1829,7 @@ otherSettings:
         "ultra",
         "extraSlash",
         "turboModel",
+        "catalogOnly",
     ] {
         assert_eq!(role(id)["status"], "configured");
         assert!(role(id)["selector"].is_string());
@@ -1832,6 +1844,16 @@ otherSettings:
     assert_eq!(
         role("extraSlash")["selector"],
         "dnslin/gpt-5.6-sol/high/extra"
+    );
+    assert_eq!(role("catalogOnly")["status"], "configured");
+    assert_eq!(role("catalogOnly")["providerId"], "aiand");
+    assert_eq!(
+        role("catalogOnly")["modelId"],
+        "deepseek-ai/deepseek-v4-flash"
+    );
+    assert_eq!(
+        role("catalogOnly")["thinkingLevel"],
+        serde_json::Value::Null
     );
 
     let snapshot = service.configuration_snapshot_for_test().unwrap();
@@ -1854,6 +1876,119 @@ otherSettings:
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     );
+}
+
+#[test]
+fn overview_locks_malformed_and_unknown_role_selectors() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  standard:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: valid
+        name: Valid
+        api: openai-responses
+        reasoning: true
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+      - id: ambiguous:high
+        name: Ambiguous
+        api: openai-responses
+        reasoning: true
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  empty: \"\"\n  emptyThinking: standard/:high\n  padded: \" standard/valid\"\n  leadingSlash: /valid\n  trailingSlash: standard/\n  missingUnknown: standard/missing:ultra\n  missingMultiSlash: standard/missing/extra\n  ambiguous: standard/ambiguous:high\n",
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    let roles = dto["roles"].as_array().unwrap();
+    let role = |id: &str| roles.iter().find(|role| role["id"] == id).unwrap();
+
+    assert_eq!(dto["rolesEditable"], false);
+    for id in ["padded", "leadingSlash", "trailingSlash", "missingUnknown"] {
+        assert_eq!(role(id)["status"], "advanced", "role {id}");
+        assert_eq!(role(id)["selector"], serde_json::Value::Null, "role {id}");
+    }
+    assert_eq!(role("empty")["status"], "unconfigured");
+    assert_eq!(role("missingMultiSlash")["status"], "model-missing");
+    assert_eq!(
+        role("missingMultiSlash")["selector"],
+        "standard/missing/extra"
+    );
+    assert_eq!(role("missingMultiSlash")["providerId"], "standard");
+    assert_eq!(role("missingMultiSlash")["modelId"], "missing/extra");
+    assert_eq!(
+        role("missingMultiSlash")["thinkingLevel"],
+        serde_json::Value::Null
+    );
+    assert_eq!(role("ambiguous")["status"], "model-missing");
+    assert_eq!(role("ambiguous")["selector"], "standard/ambiguous:high");
+    assert_eq!(role("ambiguous")["providerId"], "standard");
+    assert_eq!(role("ambiguous")["modelId"], "ambiguous");
+    assert_eq!(role("ambiguous")["thinkingLevel"], "high");
+    assert_eq!(role("emptyThinking")["status"], "advanced");
+    assert_eq!(role("emptyThinking")["selector"], serde_json::Value::Null);
+}
+#[test]
+fn overview_locks_role_keys_with_invalid_spacing() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        "providers:\n  standard:\n    baseUrl: https://example.com/v1\n    api: openai-responses\n    models:\n      - id: valid\n        name: Valid\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n",
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  \" padded\": standard/valid\n",
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    assert_eq!(dto["rolesEditable"], false);
+    assert_eq!(
+        dto["rolesReadOnlyReason"],
+        "config.yml 的 modelRoles 结构无法安全编辑。请在外部修复后重新读取。"
+    );
+}
+#[test]
+fn overview_role_structured_fields_do_not_leak_missing_selector_credentials() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  providerSecret: sk-live-secret/foo\n  modelSecret: standard/sk-live-secret\n  pathModelSecret: standard/foo/sk-live-secret\n",
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = service.get_overview_load().overview.unwrap();
+    let serialized = serde_json::to_string(&dto).unwrap();
+    assert!(!serialized.contains("sk-live-secret"));
+    for id in ["providerSecret", "modelSecret", "pathModelSecret"] {
+        let role = dto.roles.iter().find(|role| role.id == id).unwrap();
+        assert_eq!(role.provider_id, None);
+        assert_eq!(role.model_id, None);
+        assert_eq!(role.thinking_level, None);
+    }
 }
 
 #[test]
@@ -3893,4 +4028,341 @@ fn overview_marks_malformed_model_fields_read_only() {
             model["readOnlyReason"]
         );
     }
+}
+
+#[test]
+fn overview_marks_role_with_unsupported_protocol() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        "providers:\n  custom:\n    baseUrl: https://example.com\n    api: openai-responses\n    models:\n      - id: unsupported\n        name: Unsupported\n        api: unsupported-protocol\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n",
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: custom/unsupported\n",
+    )
+    .unwrap();
+
+    let dto = serde_json::to_value(
+        service_for_target(&target)
+            .get_overview_load()
+            .overview
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(dto["roles"][0]["status"], "unsupported");
+    assert_eq!(dto["roles"][0]["selector"], "custom/unsupported");
+    assert_eq!(dto["rolesEditable"], true);
+    assert_eq!(dto["rolesAssignable"], false);
+}
+#[test]
+fn overview_locks_unknown_thinking_suffix_on_unsupported_model() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        "providers:\n  custom:\n    baseUrl: https://example.com\n    api: openai-responses\n    models:\n      - id: unsupported\n        name: Unsupported\n        api: unsupported-protocol\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n",
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: custom/unsupported:ultra\n",
+    )
+    .unwrap();
+
+    let dto = serde_json::to_value(
+        service_for_target(&target)
+            .get_overview_load()
+            .overview
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(dto["roles"][0]["status"], "advanced");
+    assert!(dto["roles"][0]["selector"].is_null());
+    assert_eq!(dto["rolesEditable"], false);
+}
+
+#[test]
+fn model_roles_save_sets_and_clears_one_key_without_touching_unknown_config() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        "providers:\n  dnslin:\n    baseUrl: https://example.com\n    api: openai-responses\n    models:\n      - id: gpt-5.6-luna\n        name: Luna\n        reasoning: true\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n",
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: dnslin/gpt-5.6-luna\n  untouched: keep/provider\nsettings:\n  keep: true\n",
+    )
+    .unwrap();
+    let service = service_for_target_with_app_data(&target, &app_data);
+    let overview = service.get_overview_load().overview.unwrap();
+    let input =
+        serde_json::from_value::<crate::application::SaveModelRolesInput>(serde_json::json!({
+            "openedConfigHash": overview.files.config.content_hash.unwrap(),
+            "changes": [{
+                "kind": "set",
+                "roleId": "default",
+                "providerId": "dnslin",
+                "modelId": "gpt-5.6-luna",
+                "thinkingLevel": "max"
+            }]
+        }))
+        .unwrap();
+    service.save_model_roles(input).unwrap();
+    let backup_directory = app_data
+        .join("target-configuration-backups")
+        .join(crate::models_write::content_hash(
+            target.canonicalize().unwrap().to_string_lossy().as_bytes(),
+        ))
+        .join("config.yml");
+    assert_eq!(fs::read_dir(backup_directory).unwrap().count(), 1);
+    let changed = fs::read_to_string(target.join("config.yml")).unwrap();
+    assert!(changed.contains("default: dnslin/gpt-5.6-luna:max"));
+    assert!(changed.contains("untouched: keep/provider"));
+    assert!(changed.contains("keep: true"));
+    let refreshed = service.get_overview_load().overview.unwrap();
+    let clear =
+        serde_json::from_value::<crate::application::SaveModelRolesInput>(serde_json::json!({
+            "openedConfigHash": refreshed.files.config.content_hash.unwrap(),
+            "changes": [{"kind": "clear", "roleId": "default"}]
+        }))
+        .unwrap();
+    service.save_model_roles(clear).unwrap();
+    let cleared = fs::read_to_string(target.join("config.yml")).unwrap();
+    assert!(!cleared.contains("default:"));
+    assert!(cleared.contains("untouched: keep/provider"));
+    assert!(cleared.contains("keep: true"));
+}
+
+#[test]
+fn model_roles_revalidate_models_before_commit() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        "providers:\n  dnslin:\n    baseUrl: https://example.com\n    api: openai-responses\n    models:\n      - id: gpt-5.6-luna\n        name: Luna\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n",
+    )
+    .unwrap();
+    let original_config = "modelRoles:\n  default: dnslin/gpt-5.6-luna\n";
+    fs::write(target.join("config.yml"), original_config).unwrap();
+    let service = service_for_target(&target);
+    let overview = service.get_overview_load().overview.unwrap();
+    let input =
+        serde_json::from_value::<crate::application::SaveModelRolesInput>(serde_json::json!({
+            "openedConfigHash": overview.files.config.content_hash.unwrap(),
+            "changes": [{
+                "kind": "set",
+                "roleId": "default",
+                "providerId": "dnslin",
+                "modelId": "gpt-5.6-luna",
+                "thinkingLevel": "high"
+            }]
+        }))
+        .unwrap();
+    service
+        .set_models_write_failure_for_test(ModelsWriteFailurePoint::MutateConfigBeforeReplacement);
+
+    let error = service.save_model_roles(input).unwrap_err();
+    assert_eq!(error.code, "role-model-hash-conflict");
+    assert_eq!(
+        fs::read_to_string(target.join("config.yml")).unwrap(),
+        original_config
+    );
+}
+
+#[test]
+fn model_roles_accept_case_insensitive_provider_and_model_ids() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        "providers:\n  Dnslin:\n    baseUrl: https://example.com\n    api: openai-responses\n    models:\n      - id: GPT-5.6-Luna\n        name: Luna\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n",
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: Dnslin/GPT-5.6-Luna\nsettings:\n  keep: true\n",
+    )
+    .unwrap();
+    let service = service_for_target(&target);
+    let overview = service.get_overview_load().overview.unwrap();
+    let input =
+        serde_json::from_value::<crate::application::SaveModelRolesInput>(serde_json::json!({
+            "openedConfigHash": overview.files.config.content_hash.unwrap(),
+            "changes": [{
+                "kind": "set",
+                "roleId": "default",
+                "providerId": "dnslin",
+                "modelId": "gpt-5.6-luna",
+                "thinkingLevel": "high"
+            }]
+        }))
+        .unwrap();
+    service.save_model_roles(input).unwrap();
+    let saved = fs::read_to_string(target.join("config.yml")).unwrap();
+    assert!(saved.contains("default: dnslin/gpt-5.6-luna:high"));
+    assert!(saved.contains("keep: true"));
+}
+#[test]
+fn model_roles_reject_model_ids_with_selector_delimiters() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        "providers:\n  dnslin:\n    baseUrl: https://example.com\n    api: openai-responses\n    models:\n      - id: gpt,5\n        name: Comma\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n",
+    )
+    .unwrap();
+    let original_config = "modelRoles: {}\nsettings:\n  keep: true\n";
+    fs::write(target.join("config.yml"), original_config).unwrap();
+    let service = service_for_target(&target);
+    let overview = service.get_overview_load().overview.unwrap();
+    let overview_json = serde_json::to_value(&overview).unwrap();
+    assert_eq!(overview_json["rolesAssignable"], false);
+    let input =
+        serde_json::from_value::<crate::application::SaveModelRolesInput>(serde_json::json!({
+            "openedConfigHash": overview.files.config.content_hash.unwrap(),
+            "changes": [{
+                "kind": "create",
+                "roleId": "researcher",
+                "providerId": "dnslin",
+                "modelId": "gpt,5"
+            }]
+        }))
+        .unwrap();
+    let error = service.save_model_roles(input).unwrap_err();
+    assert_eq!(error.code, "role-selector-invalid");
+    assert_eq!(
+        fs::read_to_string(target.join("config.yml")).unwrap(),
+        original_config
+    );
+}
+
+#[test]
+fn advanced_model_role_configuration_blocks_all_role_writes() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        "providers:\n  dnslin:\n    baseUrl: https://example.com\n    api: openai-responses\n    models:\n      - id: gpt-5.6-luna\n        name: Luna\n        reasoning: true\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n",
+    )
+    .unwrap();
+    let original = "modelRoles:\n  advanced:\n    - dnslin/gpt-5.6-luna\n  default: dnslin/gpt-5.6-luna\nsettings:\n  keep: true\n";
+    fs::write(target.join("config.yml"), original).unwrap();
+    let service = service_for_target(&target);
+    let overview = service.get_overview_load().overview.unwrap();
+    let input =
+        serde_json::from_value::<crate::application::SaveModelRolesInput>(serde_json::json!({
+            "openedConfigHash": overview.files.config.content_hash.unwrap(),
+            "changes": [{
+                "kind": "set",
+                "roleId": "default",
+                "providerId": "dnslin",
+                "modelId": "gpt-5.6-luna",
+                "thinkingLevel": "max"
+            }]
+        }))
+        .unwrap();
+    let error = service.save_model_roles(input).unwrap_err();
+    assert_eq!(error.code, "role-advanced-read-only");
+    assert_eq!(
+        fs::read_to_string(target.join("config.yml")).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn custom_model_roles_support_create_rename_edit_and_delete_without_empty_values() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        "providers:\n  dnslin:\n    baseUrl: https://example.com\n    api: openai-responses\n    models:\n      - id: gpt-5.6-luna\n        name: Luna\n        reasoning: true\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n",
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles: {}\nsettings:\n  keep: true\n",
+    )
+    .unwrap();
+    let service = service_for_target(&target);
+    let invalid_overview = service.get_overview_load().overview.unwrap();
+    let invalid =
+        serde_json::from_value::<crate::application::SaveModelRolesInput>(serde_json::json!({
+            "openedConfigHash": invalid_overview.files.config.content_hash.unwrap(),
+            "changes": [{
+                "kind": "create",
+                "roleId": " analyst ",
+                "providerId": "dnslin",
+                "modelId": "gpt-5.6-luna"
+            }]
+        }))
+        .unwrap();
+    let invalid_error = service.save_model_roles(invalid).unwrap_err();
+    assert_eq!(invalid_error.code, "role-id-invalid");
+    assert_eq!(
+        fs::read_to_string(target.join("config.yml")).unwrap(),
+        "modelRoles: {}\nsettings:\n  keep: true\n"
+    );
+
+    let overview = service.get_overview_load().overview.unwrap();
+    let create =
+        serde_json::from_value::<crate::application::SaveModelRolesInput>(serde_json::json!({
+            "openedConfigHash": overview.files.config.content_hash.unwrap(),
+            "changes": [{
+                "kind": "create",
+                "roleId": "researcher",
+                "providerId": "dnslin",
+                "modelId": "gpt-5.6-luna",
+                "thinkingLevel": "high"
+            }]
+        }))
+        .unwrap();
+    service.save_model_roles(create).unwrap();
+    let created = fs::read_to_string(target.join("config.yml")).unwrap();
+    assert!(created.contains("researcher: dnslin/gpt-5.6-luna:high"));
+    assert!(created.contains("keep: true"));
+
+    let overview = service.get_overview_load().overview.unwrap();
+    let rename =
+        serde_json::from_value::<crate::application::SaveModelRolesInput>(serde_json::json!({
+            "openedConfigHash": overview.files.config.content_hash.unwrap(),
+            "changes": [{
+                "kind": "rename",
+                "roleId": "researcher",
+                "newRoleId": "researcher-v2",
+                "providerId": "dnslin",
+                "modelId": "gpt-5.6-luna",
+                "thinkingLevel": "auto"
+            }]
+        }))
+        .unwrap();
+    service.save_model_roles(rename).unwrap();
+    let renamed = fs::read_to_string(target.join("config.yml")).unwrap();
+    assert!(!renamed.contains("researcher:"));
+    assert!(renamed.contains("researcher-v2: dnslin/gpt-5.6-luna:auto"));
+
+    let overview = service.get_overview_load().overview.unwrap();
+    let delete =
+        serde_json::from_value::<crate::application::SaveModelRolesInput>(serde_json::json!({
+            "openedConfigHash": overview.files.config.content_hash.unwrap(),
+            "changes": [{"kind": "delete", "roleId": "researcher-v2"}]
+        }))
+        .unwrap();
+    service.save_model_roles(delete).unwrap();
+    let deleted = fs::read_to_string(target.join("config.yml")).unwrap();
+    assert!(!deleted.contains("researcher-v2:"));
+    assert!(deleted.contains("modelRoles: {}"));
+    assert!(deleted.contains("keep: true"));
 }

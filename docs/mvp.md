@@ -480,7 +480,7 @@ MVP 同时支持自定义角色的创建、改名、模型选择、Thinking Leve
 
 角色名：
 
-- 去除首尾空白。
+- 首尾空白直接拒绝，不自动去除。
 - 非空。
 - 不含空白、`/`、`,` 或控制字符。
 - 在 `modelRoles` 中精确唯一。
@@ -495,6 +495,7 @@ MVP 同时支持自定义角色的创建、改名、模型选择、Thinking Leve
 provider/model
 provider/model:thinking
 ```
+Simple role selector 的 Provider/Model 组成不得含空白、控制字符或逗号，且必须能按原 Provider/Model ID 无歧义还原。
 
 例如：
 
@@ -532,6 +533,8 @@ auto
 - 未知 Thinking 后缀。
 
 高级角色值原样保留，不自动降级或覆盖。
+
+实现状态（issue #11）：角色页已通过 Rust AppService intent seam 与 React routed page seam 完整实现。十个内置角色支持设置/清除；自定义角色支持创建、改名、编辑、删除；只写入 `modelRoles` 中用户明确操作的键，并复用 Hash、备份、临时重解析、未触及路径比较和原子替换。无效简单引用与不支持协议引用可见且可修复；任一高级角色配置冻结整页并保留原值。Pencil 节点 i5xFP 导出为 `designs/50-roles-dirty.png`，真实 Tauri 脏状态截图保存在 `.artifacts/issue-11/roles-dirty-tauri-1536x961.png`，对比记录见 `.artifacts/issue-11/visual-comparison.txt`。
 
 ## 10. 引用、ID 和删除
 

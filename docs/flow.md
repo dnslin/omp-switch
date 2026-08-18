@@ -863,6 +863,8 @@ Provider：dnslin
 [取消] [清除]
 ```
 
+实现状态（issue #11）：上述正常、无效简单引用、不支持协议、高级只读、清除全部和自定义 CRUD 流程已接入真实角色页；脏行显示“待保存”，Hash 冲突或手动重新读取会先确认并保留草稿；Pencil 节点 i5xFP 导出为 `designs/50-roles-dirty.png`，真实 Tauri 脏状态截图为 `.artifacts/issue-11/roles-dirty-tauri-1536x961.png`，对比记录见 `.artifacts/issue-11/visual-comparison.txt`。
+
 ## 14. 设置页面
 
 区域：
