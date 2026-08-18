@@ -4695,6 +4695,9 @@ fn start_model_test_server(
 }
 
 fn read_model_test_request(stream: &mut TcpStream) -> CapturedModelTestRequest {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
     let mut request = Vec::new();
     let mut buffer = [0_u8; 4096];
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -5271,14 +5274,29 @@ async fn model_test_cancels_and_times_out_a_hanging_omp_preflight() {
     let cancelled = first.await.unwrap().unwrap_err();
     assert_eq!(cancelled.code, "model-test-cancelled");
     assert!(started.elapsed() < Duration::from_secs(1));
-    assert!(!service.get_model_test_state().running);
-
+    let cancelled_state = service.get_model_test_state();
+    assert!(!cancelled_state.running);
+    assert_eq!(
+        cancelled_state
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.error_code.as_str()),
+        Some("cancelled")
+    );
     service.set_model_test_timeout_for_test(Duration::from_millis(50));
     let started = Instant::now();
     let timed_out = service.test_model(input).await.unwrap_err();
     assert_eq!(timed_out.code, "model-test-timeout");
     assert!(started.elapsed() < Duration::from_secs(1));
-    assert!(!service.get_model_test_state().running);
+    let timed_out_state = service.get_model_test_state();
+    assert!(!timed_out_state.running);
+    assert_eq!(
+        timed_out_state
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.error_code.as_str()),
+        Some("timeout")
+    );
 }
 
 #[tokio::test]

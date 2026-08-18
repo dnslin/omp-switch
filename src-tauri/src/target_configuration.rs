@@ -448,7 +448,21 @@ fn read_file_with_control(
     control: Option<&DiscoveryControl<'_>>,
 ) -> io::Result<Vec<u8>> {
     check_control(control)?;
-    let mut file = fs::File::open(path)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path)?;
+    check_control(control)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "configuration path is not a regular file",
+        ));
+    }
     let mut contents = Vec::new();
     let mut chunk = [0_u8; 8192];
     loop {

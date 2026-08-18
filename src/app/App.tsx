@@ -374,7 +374,12 @@ function ProviderDetailPage() {
   const provider = data?.providers.find((item) => item.id === providerId);
   const authSummary = provider ? providerAuthSummary(provider) : "不支持的认证";
   const latestResult = provider && modelTest.result?.providerId === provider.id ? modelTest.result : null;
-  const latestModel = latestResult ? provider?.models.find((model) => model.id === latestResult.modelId) ?? null : null;
+  const latestTerminal = provider && modelTest.terminal?.providerId === provider.id ? modelTest.terminal : null;
+  const latestModel = latestResult
+    ? provider?.models.find((model) => model.id === latestResult.modelId) ?? null
+    : latestTerminal
+      ? provider?.models.find((model) => model.id === latestTerminal.modelId) ?? null
+      : null;
   const activeProvider = data?.providers.find((item) => item.id === modelTest.activeProviderId) ?? null;
   const activeModel = activeProvider && modelTest.activeModelId ? activeProvider.models.find((model) => model.id === modelTest.activeModelId) ?? null : null;
   const latestEndpoint = latestResult && latestModel && !latestModel.hasBaseUrlOverride
@@ -540,6 +545,15 @@ function ProviderDetailPage() {
                   <span>{activeModel?.effectiveApi ?? "—"}</span>
                   <span>请求进行中</span>
                   <Button type="button" variant="secondary" className="provider-detail-latest-test__cancel" aria-label={`取消测试 ${modelTest.activeProviderId ?? "模型"}/${modelTest.activeModelId ?? ""}`} onClick={() => modelTest.cancel()}>取消测试</Button>
+                </>
+              ) : latestTerminal ? (
+                <>
+                  <StatusIndicator tone={latestTerminal.errorCode === "cancelled" ? "warning" : "danger"}>{latestTerminal.message}</StatusIndicator>
+                  <span>{latestTerminal.providerId}/{latestTerminal.modelId}</span>
+                  <span>{latestModel?.effectiveApi ?? "—"}</span>
+                  <span>—</span>
+                  <span>—</span>
+                  <span>—</span>
                 </>
               ) : latestResult ? (
                 <>

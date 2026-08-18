@@ -47,7 +47,7 @@ const unavailableClient: TauriClient = {
   saveModelRoles: async () => ({ changedRoleCount: 0 }),
   testModel: async () => ({ success: true, providerId: "dnslin", modelId: "gpt-5.6-sol", protocol: "openai-responses" as const, latencyMs: 12, status: 200, message: "模型连接成功" }),
   cancelModelTest: async () => true,
-  getModelTestState: async () => ({ running: false, providerId: null, modelId: null, result: null }),
+  getModelTestState: async () => ({ running: false, providerId: null, modelId: null, result: null, terminal: null }),
   detectOmp: async () => ({ kind: "omp-unavailable", message: "仍未找到 OMP" }),
   selectOmpExecutable: async () => null,
   validateSelectedOmp: async () => ({ kind: "invalid-executable", executablePath: "/tmp/not-omp", message: "无法运行", diagnosticCode: "io-not-found" }),
@@ -2981,7 +2981,7 @@ describe("Model test page seam", () => {
       }),
       acceptModelTestCostNotice,
       testModel,
-      getModelTestState: async () => ({ running: false, providerId: null, modelId: null, result: latestResult }),
+      getModelTestState: async () => ({ running: false, providerId: null, modelId: null, result: latestResult, terminal: null }),
     });
 
     await screen.findByRole("region", { name: "快速测试" });
@@ -3005,7 +3005,7 @@ describe("Model test page seam", () => {
       if (loadCount > 1) await refreshGate.promise;
       return overviewLoad(overviewDto(), readyState);
     });
-    const getModelTestState = vi.fn(async () => ({ running: false, providerId: null, modelId: null, result: null }));
+    const getModelTestState = vi.fn(async () => ({ running: false, providerId: null, modelId: null, result: null, terminal: null }));
     const testModel = vi.fn(async () => ({
       success: true,
       providerId: "dnslin",
@@ -3125,7 +3125,7 @@ describe("Model test page seam", () => {
         selectedModelId: "gpt-5.6-sol",
         modelTestCostNoticeAccepted: true,
       }),
-      getModelTestState: async () => ({ running: false, providerId: null, modelId: null, result: latestResult }),
+      getModelTestState: async () => ({ running: false, providerId: null, modelId: null, result: latestResult, terminal: null }),
       testModel: () => pending.promise,
       cancelModelTest,
     });
@@ -3136,6 +3136,34 @@ describe("Model test page seam", () => {
     await user.click(within(panel).getByRole("button", { name: "取消测试" }));
     await waitFor(() => expect(cancelModelTest).toHaveBeenCalledTimes(1));
     expect(await screen.findByText("测试已取消")).toBeVisible();
+  });
+  it("keeps a visible terminal state when preflight cancellation rejects the request", async () => {
+    const user = userEvent.setup();
+    const testModel = vi.fn(async () => {
+      throw {
+        code: "model-test-cancelled",
+        message: "模型测试已取消。",
+        action: "无需继续操作。",
+      };
+    });
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        modelTestCostNoticeAccepted: true,
+      }),
+      testModel,
+    });
+
+    const panel = await screen.findByRole("region", { name: "快速测试" });
+    await user.click(within(panel).getByRole("button", { name: "测试模型" }));
+    expect(await screen.findByText("测试已取消")).toBeVisible();
+    expect(screen.getByRole("region", { name: "测试结果" })).not.toHaveTextContent("模型连接成功");
+    expect(testModel).toHaveBeenCalledTimes(1);
   });
 
   it("refreshes after a backend busy conflict completes before remote running renders", async () => {
@@ -3151,8 +3179,8 @@ describe("Model test page seam", () => {
     };
     const getModelTestState = vi.fn(async () => {
       const callCount = getModelTestState.mock.calls.length;
-      if (callCount <= 2) return { running: false, providerId: null, modelId: null, result: null };
-      return { running: false, providerId: null, modelId: null, result: remoteResult };
+      if (callCount <= 2) return { running: false, providerId: null, modelId: null, result: null, terminal: null };
+      return { running: false, providerId: null, modelId: null, result: remoteResult, terminal: null };
     });
     const testModel = vi.fn(async () => {
       throw { code: "model-test-busy", message: "已有模型测试正在进行。", action: "请等待当前测试完成。" };
@@ -3200,7 +3228,7 @@ describe("Model test page seam", () => {
     renderRoute("/overview", {
       ...unavailableClient,
       getOverviewLoad: async () => overviewLoad(overviewSelectionDto(), readyState),
-      getModelTestState: async () => ({ running: false, providerId: null, modelId: null, result: latestResult }),
+      getModelTestState: async () => ({ running: false, providerId: null, modelId: null, result: latestResult, terminal: null }),
       getUiSettings: async () => ({
         ompExecutablePath: "/usr/local/bin/omp",
         theme: "dark",
@@ -3399,7 +3427,7 @@ describe("Model test page seam", () => {
       if (getModelTestState.mock.calls.length <= 2) {
         throw { code: "state-read-failed", message: "暂时无法读取模型测试状态。", action: "请稍后重试。" };
       }
-      return { running: false, providerId: null, modelId: null, result: restoredResult };
+      return { running: false, providerId: null, modelId: null, result: restoredResult, terminal: null };
     });
     renderRoute("/overview", {
       ...unavailableClient,
@@ -3432,9 +3460,9 @@ describe("Model test page seam", () => {
     const completedResult = { ...runningResult, latencyMs: 19, message: "模型连接成功" };
     const getModelTestState = vi.fn(async () => {
       if (getModelTestState.mock.calls.length < 4) {
-        return { running: true, providerId: "dnslin", modelId: "gpt-5.6-sol", result: structuredClone(runningResult) };
+        return { running: true, providerId: "dnslin", modelId: "gpt-5.6-sol", result: structuredClone(runningResult), terminal: null };
       }
-      return { running: false, providerId: null, modelId: null, result: structuredClone(completedResult) };
+      return { running: false, providerId: null, modelId: null, result: structuredClone(completedResult), terminal: null };
     });
     const getOverviewLoad = vi.fn(async () => overviewLoad(structuredClone(overviewDto()), readyState));
     renderRoute(route, {
@@ -3475,7 +3503,7 @@ describe("Model test page seam", () => {
       if (loadCount++ === 0) return initialLoad.promise;
       return overviewLoad(structuredClone(overview), readyState);
     });
-    const getModelTestState = vi.fn(async () => ({ running: false, providerId: null, modelId: null, result: restoredResult }));
+    const getModelTestState = vi.fn(async () => ({ running: false, providerId: null, modelId: null, result: restoredResult, terminal: null }));
     renderRoute("/overview", {
       ...unavailableClient,
       getOverviewLoad,
@@ -3618,7 +3646,7 @@ describe("Model test page seam", () => {
         modelTestCostNoticeAccepted: true,
       }),
       testModel: () => pending.promise,
-      getModelTestState: async () => ({ running: false, providerId: null, modelId: null, result: latestResult }),
+      getModelTestState: async () => ({ running: false, providerId: null, modelId: null, result: latestResult, terminal: null }),
       cancelModelTest,
     });
 
@@ -3665,7 +3693,7 @@ describe("Model test page seam", () => {
         modelTestCostNoticeAccepted: true,
       }),
       testModel,
-      getModelTestState: async () => ({ running: false, providerId: null, modelId: null, result: latestResult }),
+      getModelTestState: async () => ({ running: false, providerId: null, modelId: null, result: latestResult, terminal: null }),
     });
 
     const panel = await screen.findByRole("region", { name: "快速测试" });

@@ -5,7 +5,7 @@ import { toast } from "sonner";
 
 import { Button, StatusIndicator } from "../components/ui";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
-import { asAppError, useTauriClient, type AppError, type ModelTestResult, type OverviewDto, type OverviewModel, type OverviewProvider, type TauriClient, type UiSettingsUpdate } from "../lib/tauri-client";
+import { asAppError, useTauriClient, type AppError, type ModelTestResult, type ModelTestTerminal, type OverviewDto, type OverviewModel, type OverviewProvider, type TauriClient, type UiSettingsUpdate } from "../lib/tauri-client";
 import { modelSelectionFields, useUiSettings, type ModelSelection } from "../store/ui-settings";
 import { MainShell } from "./MainShell";
 import { fileStatusView } from "./omp-presentation";
@@ -245,7 +245,7 @@ function OverviewContentBody({ data, modelTest }: { data: OverviewDto; modelTest
       {data.state === "empty" || data.state === "read-only" ? <OverviewStateBanner data={data} /> : null}
       <div className="overview-test-area">
         <QuickTestPanel providers={data.providers} provider={selectedProvider} model={selectedModel} targetWritable={data.targetConfiguration.status === "writable" && data.targetConfiguration.writable} onProviderChange={handleProviderChange} onModelChange={handleModelChange} modelTest={modelTest} />
-        <TestResultPanel providers={data.providers} result={modelTest.result} running={modelTest.running} providerId={modelTest.activeProviderId} modelId={modelTest.activeModelId} onCancel={modelTest.cancel} />
+        <TestResultPanel providers={data.providers} result={modelTest.result} terminal={modelTest.terminal} running={modelTest.running} providerId={modelTest.activeProviderId} modelId={modelTest.activeModelId} onCancel={modelTest.cancel} />
       </div>
       {modelTest.costNoticeDialog}
     </>
@@ -451,18 +451,24 @@ function OverviewField({ label, value, mono = false }: { label: string; value: s
   );
 }
 
-function TestResultPanel({ providers, result, running, providerId, modelId, onCancel }: { providers: readonly OverviewProvider[]; result: ModelTestResult | null; running: boolean; providerId: string | null; modelId: string | null; onCancel(): void }) {
-  const contextProviderId = running ? providerId : result?.providerId ?? null;
-  const contextModelId = running ? modelId : result?.modelId ?? null;
+function TestResultPanel({ providers, result, terminal, running, providerId, modelId, onCancel }: { providers: readonly OverviewProvider[]; result: ModelTestResult | null; terminal: ModelTestTerminal | null; running: boolean; providerId: string | null; modelId: string | null; onCancel(): void }) {
+  const contextProviderId = running ? providerId : result?.providerId ?? terminal?.providerId ?? null;
+  const contextModelId = running ? modelId : result?.modelId ?? terminal?.modelId ?? null;
   const contextProvider = contextProviderId ? providers.find((item) => item.id === contextProviderId) : undefined;
   const contextModel = contextProvider && contextModelId ? contextProvider.models.find((item) => item.id === contextModelId) : undefined;
   const protocol = running ? contextModel?.effectiveApi ?? "—" : result?.protocol ?? "—";
-  const endpointResult = contextProvider && contextModel && !contextModel.hasBaseUrlOverride
+  const endpointResult = contextProvider && contextModel && !contextModel.hasBaseUrlOverride && (running || result)
     ? buildModelEndpoint(contextProvider.baseUrl, contextModel.id, running ? contextModel.effectiveApi : result?.protocol)
     : { kind: "not-configured" as const };
   const endpoint = endpointResult.kind === "available" ? endpointResult.value : "—";
-  const statusLabel = running ? "测试中…" : result?.message ?? "尚未测试";
-  const tone = running ? "warning" : result === null ? "neutral" : result.success ? "success" : result.errorCode === "cancelled" ? "warning" : "danger";
+  const statusLabel = running ? "测试中…" : result?.message ?? terminal?.message ?? "尚未测试";
+  const tone = running
+    ? "warning"
+    : result
+      ? result.success ? "success" : result.errorCode === "cancelled" ? "warning" : "danger"
+      : terminal
+        ? terminal.errorCode === "cancelled" ? "warning" : "danger"
+        : "neutral";
   const displayModel = contextProviderId && contextModelId ? `${contextProviderId}/${contextModelId}` : "—";
   return (
     <section className="overview-panel overview-result" aria-label="测试结果" aria-live="polite">
@@ -474,9 +480,9 @@ function TestResultPanel({ providers, result, running, providerId, modelId, onCa
       <OverviewResultRow label="模型" value={displayModel} />
       <OverviewResultRow label="有效协议" value={protocol} />
       <OverviewResultRow label="最终地址" value={endpoint} mono />
-      <OverviewResultRow label="耗时" value={running ? "—" : result ? `${result.latencyMs} ms` : "—"} />
-      <OverviewResultRow label="状态码" value={running ? "—" : result?.status ? String(result.status) : "—"} />
-      <OverviewResultRow label="时间" value={running ? "请求进行中" : result ? "刚刚" : "—"} />
+      <OverviewResultRow label="耗时" value={running || !result ? "—" : `${result.latencyMs} ms`} />
+      <OverviewResultRow label="状态码" value={running || !result ? "—" : result.status ? String(result.status) : "—"} />
+      <OverviewResultRow label="时间" value={running ? "请求进行中" : result || terminal ? "刚刚" : "—"} />
     </section>
   );
 }

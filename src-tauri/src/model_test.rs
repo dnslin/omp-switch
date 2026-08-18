@@ -48,6 +48,15 @@ pub(crate) struct ModelTestResult {
     pub(crate) error_code: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ModelTestTerminal {
+    pub(crate) provider_id: String,
+    pub(crate) model_id: String,
+    pub(crate) message: String,
+    pub(crate) error_code: String,
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ModelTestState {
@@ -55,6 +64,7 @@ pub(crate) struct ModelTestState {
     pub(crate) provider_id: Option<String>,
     pub(crate) model_id: Option<String>,
     pub(crate) result: Option<ModelTestResult>,
+    pub(crate) terminal: Option<ModelTestTerminal>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +84,7 @@ struct CoordinatorState {
     active: Option<ActiveModelTest>,
     result: Option<ModelTestResult>,
     result_binding: Option<ModelTestBinding>,
+    terminal: Option<ModelTestTerminal>,
 }
 
 struct ActiveModelTest {
@@ -124,6 +135,7 @@ impl ModelTestCoordinator {
             binding: None,
             invalidated: false,
         });
+        state.terminal = None;
         Ok(ModelTestGuard {
             coordinator: self.clone(),
             id,
@@ -161,6 +173,7 @@ impl ModelTestCoordinator {
         }
         state.result = None;
         state.result_binding = None;
+        state.terminal = None;
     }
 
     pub(crate) fn invalidate_if_changed(&self, target_path: &str, models_hash: Option<&str>) {
@@ -185,6 +198,7 @@ impl ModelTestCoordinator {
             }
             state.result = None;
             state.result_binding = None;
+            state.terminal = None;
         }
     }
 
@@ -198,6 +212,7 @@ impl ModelTestCoordinator {
                 .map(|active| active.provider_id.clone()),
             model_id: state.active.as_ref().map(|active| active.model_id.clone()),
             result: state.result.clone(),
+            terminal: state.terminal.clone(),
         }
     }
 
@@ -212,7 +227,18 @@ impl ModelTestCoordinator {
             if !invalidated {
                 state.result = Some(result);
                 state.result_binding = binding;
+                state.terminal = None;
             }
+        }
+    }
+
+    fn fail(&self, id: u64, terminal: ModelTestTerminal) {
+        let mut state = self.state.lock();
+        if state.active.as_ref().is_some_and(|active| active.id == id) {
+            state.active = None;
+            state.result = None;
+            state.result_binding = None;
+            state.terminal = Some(terminal);
         }
     }
 
@@ -235,6 +261,9 @@ impl ModelTestGuard {
 
     pub(crate) fn complete(self, result: ModelTestResult, binding: Option<ModelTestBinding>) {
         self.coordinator.complete(self.id, result, binding);
+    }
+    pub(crate) fn fail(self, terminal: ModelTestTerminal) {
+        self.coordinator.fail(self.id, terminal);
     }
 }
 

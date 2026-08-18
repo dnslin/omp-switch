@@ -137,6 +137,7 @@ export function useModelTestRunner() {
   const activeProviderId = useModelTestStore((state) => state.providerId);
   const activeModelId = useModelTestStore((state) => state.modelId);
   const result = useModelTestStore((state) => state.result);
+  const terminal = useModelTestStore((state) => state.terminal);
   const [pendingTest, setPendingTest] = useState<PendingTest | null>(null);
 
   const execute = useCallback(async (test: PendingTest) => {
@@ -156,8 +157,16 @@ export function useModelTestRunner() {
         syncRemoteModelTestState(client, generation);
         return;
       }
-      if (error.code === "model-test-cancelled") {
-        useModelTestStore.getState().fail();
+      if (error.code === "model-test-cancelled" || error.code === "model-test-timeout") {
+        useModelTestStore.getState().fail({
+          providerId: test.providerId,
+          modelId: test.modelId,
+          message: error.code === "model-test-cancelled" ? "测试已取消" : "模型测试准备超时",
+          errorCode: error.code === "model-test-cancelled" ? "cancelled" : "timeout",
+        });
+        if (error.code === "model-test-timeout") {
+          toast.error(error.message, { description: error.action });
+        }
         return;
       }
       useModelTestStore.getState().fail();
@@ -216,6 +225,7 @@ export function useModelTestRunner() {
     running,
     activeProviderId,
     activeModelId,
+    terminal,
     result,
     start,
     settingsReady: hydrationState === "ready",

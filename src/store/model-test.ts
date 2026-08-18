@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ModelTestResult, ModelTestState } from "../lib/tauri-client";
+import type { ModelTestResult, ModelTestState, ModelTestTerminal } from "../lib/tauri-client";
 
 type ModelTestStore = ModelTestState & {
   generation: number;
@@ -8,7 +8,7 @@ type ModelTestStore = ModelTestState & {
   prepareHydration(): void;
   begin(providerId: string, modelId: string): boolean;
   finish(result: ModelTestResult): void;
-  fail(): void;
+  fail(terminal?: ModelTestTerminal): void;
   hydrate(state: ModelTestState, generation: number): void;
   recoverRemote(): number;
   reconcile(state: ModelTestState, generation: number): void;
@@ -30,21 +30,22 @@ export const useModelTestStore = create<ModelTestStore>((set, get) => ({
   providerId: null,
   modelId: null,
   result: null,
+  terminal: null,
   generation: 0,
   needsOverviewRefresh: false,
   source: "remote",
   prepareHydration: () => {
     const current = get();
     if (current.running && current.source === "local") return;
-    set((state) => ({ generation: state.generation + 1, needsOverviewRefresh: false, source: "remote", result: null }));
+    set((state) => ({ generation: state.generation + 1, needsOverviewRefresh: false, source: "remote", result: null, terminal: null }));
   },
   begin: (providerId, modelId) => {
     if (get().running) return false;
-    set((state) => ({ generation: state.generation + 1, source: "local", running: true, providerId, modelId }));
+    set((state) => ({ generation: state.generation + 1, source: "local", running: true, providerId, modelId, terminal: null }));
     return true;
   },
-  finish: (result) => set((state) => ({ generation: state.generation + 1, needsOverviewRefresh: true, source: "local", running: false, providerId: null, modelId: null, result })),
-  fail: () => set((state) => ({ generation: state.generation + 1, needsOverviewRefresh: false, source: "remote", running: false, providerId: null, modelId: null, result: null })),
+  finish: (result) => set((state) => ({ generation: state.generation + 1, needsOverviewRefresh: true, source: "local", running: false, providerId: null, modelId: null, result, terminal: null })),
+  fail: (terminal) => set((state) => ({ generation: state.generation + 1, needsOverviewRefresh: false, source: "remote", running: false, providerId: null, modelId: null, result: null, terminal: terminal ?? null })),
   hydrate: (state, generation) => {
     const current = get();
     if (current.generation !== generation || current.source === "local") return;

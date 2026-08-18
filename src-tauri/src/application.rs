@@ -1168,7 +1168,27 @@ impl AppService {
         {
             Ok(configuration) => configuration,
             Err(error) => {
-                self.model_tests.invalidate();
+                let terminal = match error.code {
+                    "model-test-cancelled" => Some(model_test::ModelTestTerminal {
+                        provider_id: input.provider_id.clone(),
+                        model_id: input.model_id.clone(),
+                        message: "测试已取消".to_owned(),
+                        error_code: "cancelled".to_owned(),
+                    }),
+                    "model-test-timeout" => Some(model_test::ModelTestTerminal {
+                        provider_id: input.provider_id.clone(),
+                        model_id: input.model_id.clone(),
+                        message: "模型测试准备超时".to_owned(),
+                        error_code: "timeout".to_owned(),
+                    }),
+                    _ => None,
+                };
+                if let Some(terminal) = terminal {
+                    guard.fail(terminal);
+                } else {
+                    self.model_tests.invalidate();
+                    drop(guard);
+                }
                 return Err(error);
             }
         };
@@ -1293,24 +1313,30 @@ impl AppService {
                 deadline,
             )
         });
-        let preparation = match preparation.await {
-            Ok(result) => result,
-            Err(_) => Err(AppError::internal("模型测试准备任务失败")),
+        let mut preparation = preparation;
+        let preparation = tokio::select! {
+            result = &mut preparation => match result {
+                Ok(result) => result,
+                Err(_) => Err(AppError::internal("模型测试准备任务失败")),
+            },
+            _ = cancellation.cancelled() => {
+                preparation.abort();
+                Err(AppError::new(
+                    "model-test-cancelled",
+                    "模型测试已取消。",
+                    "无需继续操作。",
+                ))
+            },
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                preparation.abort();
+                Err(AppError::new(
+                    "model-test-timeout",
+                    "模型测试准备超时。",
+                    "请检查 OMP 可执行文件和配置目录后重试。",
+                ))
+            },
         };
-        if cancellation.is_cancelled() {
-            return Err(AppError::new(
-                "model-test-cancelled",
-                "模型测试已取消。",
-                "无需继续操作。",
-            ));
-        }
-        if Instant::now() >= deadline {
-            return Err(AppError::new(
-                "model-test-timeout",
-                "模型测试准备超时。",
-                "请检查 OMP 可执行文件和配置目录后重试。",
-            ));
-        }
+        Self::ensure_model_test_window(&cancellation, deadline)?;
         preparation
     }
 

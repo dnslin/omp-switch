@@ -130,11 +130,18 @@ export type ModelTestResult = {
   message: string;
   errorCode?: string;
 };
+export type ModelTestTerminal = {
+  providerId: string;
+  modelId: string;
+  message: string;
+  errorCode: string;
+};
 export type ModelTestState = {
   running: boolean;
   providerId: string | null;
   modelId: string | null;
   result: ModelTestResult | null;
+  terminal: ModelTestTerminal | null;
 };
 export type OverviewModel = {
   providerId: string;
