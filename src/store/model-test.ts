@@ -44,7 +44,7 @@ export const useModelTestStore = create<ModelTestStore>((set, get) => ({
     return true;
   },
   finish: (result) => set((state) => ({ generation: state.generation + 1, needsOverviewRefresh: true, source: "local", running: false, providerId: null, modelId: null, result })),
-  fail: () => set((state) => ({ generation: state.generation + 1, source: "local", running: false, providerId: null, modelId: null })),
+  fail: () => set((state) => ({ generation: state.generation + 1, needsOverviewRefresh: false, source: "remote", running: false, providerId: null, modelId: null, result: null })),
   hydrate: (state, generation) => {
     const current = get();
     if (current.generation !== generation || current.source === "local") return;
@@ -58,6 +58,7 @@ export const useModelTestStore = create<ModelTestStore>((set, get) => ({
   reconcile: (state, generation) => {
     const current = get();
     if (current.generation !== generation || (current.running && current.source === "local")) return;
-    set((currentState) => ({ ...state, generation: currentState.generation + 1, needsOverviewRefresh: false, source: "remote" }));
+    const preserveRemotePolling = current.source === "remote" && state.running;
+    set((currentState) => ({ ...state, generation: preserveRemotePolling ? currentState.generation : currentState.generation + 1, needsOverviewRefresh: false, source: "remote" }));
   },
 }));

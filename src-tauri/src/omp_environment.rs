@@ -30,7 +30,8 @@ use windows_sys::Win32::{
 
 use crate::target_configuration::{
     TargetConfigurationDiscovery, TargetInitializationError, TargetInitializationExpectation,
-    discover_target_configuration_with_store, initialize_target_configuration_with_store,
+    discover_target_configuration_until, discover_target_configuration_with_store,
+    initialize_target_configuration_with_store,
 };
 
 pub struct CommandOutput {
@@ -191,6 +192,33 @@ pub trait OmpEnvironment: Send + Sync {
     ) -> Result<CommandOutput, CommandRunError>;
     fn inspect_target(&self, target: &Path) -> io::Result<TargetConfigurationDiscovery> {
         discover_target_configuration_with_store(target, self.transaction_root())
+    }
+
+    fn inspect_target_with_deadline(
+        &self,
+        target: &Path,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<TargetConfigurationDiscovery, CommandRunError> {
+        if cancellation.is_cancelled() {
+            return Err(CommandRunError::Cancelled);
+        }
+        let discovery = self.inspect_target(target).map_err(|error| {
+            if cancellation.is_cancelled() {
+                CommandRunError::Cancelled
+            } else if Instant::now() >= deadline || error.kind() == io::ErrorKind::TimedOut {
+                CommandRunError::TimedOut
+            } else {
+                CommandRunError::Io(error)
+            }
+        })?;
+        if cancellation.is_cancelled() {
+            return Err(CommandRunError::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(CommandRunError::TimedOut);
+        }
+        Ok(discovery)
     }
     fn initialize_target(
         &self,
@@ -356,6 +384,33 @@ impl OmpEnvironment for SystemOmpEnvironment {
             stdout: String::from_utf8_lossy(&stdout).into_owned(),
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
         })
+    }
+    fn inspect_target_with_deadline(
+        &self,
+        target: &Path,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<TargetConfigurationDiscovery, CommandRunError> {
+        if cancellation.is_cancelled() {
+            return Err(CommandRunError::Cancelled);
+        }
+        let discovery = discover_target_configuration_until(target, cancellation, deadline)
+            .map_err(|error| {
+                if cancellation.is_cancelled() {
+                    CommandRunError::Cancelled
+                } else if Instant::now() >= deadline || error.kind() == io::ErrorKind::TimedOut {
+                    CommandRunError::TimedOut
+                } else {
+                    CommandRunError::Io(error)
+                }
+            })?;
+        if cancellation.is_cancelled() {
+            return Err(CommandRunError::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(CommandRunError::TimedOut);
+        }
+        Ok(discovery)
     }
 }
 

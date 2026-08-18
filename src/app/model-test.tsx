@@ -44,17 +44,35 @@ export function useRefreshAfterModelTest({
 
   useEffect(() => {
     if (!ready || loading || revision === 0 || reconciledRevision.current === revision) return;
-    const generation = useModelTestStore.getState().generation;
-    reconciledRevision.current = revision;
     let active = true;
-    void client.getModelTestState().then((state) => {
-      if (active) reconcileModelTest(state, generation);
-    }).catch((cause: unknown) => {
-      if (!active) return;
-      const error = asAppError(cause, "无法同步模型测试状态");
-      toast.error(error.message, { description: error.action });
-    });
-    return () => { active = false; };
+    let retryTimer: number | undefined;
+    let failureNotified = false;
+    const reconcile = async () => {
+      const generation = useModelTestStore.getState().generation;
+      try {
+        const state = await client.getModelTestState();
+        if (!active) return;
+        reconcileModelTest(state, generation);
+        reconciledRevision.current = revision;
+        failureNotified = false;
+      } catch (cause: unknown) {
+        if (!active) return;
+        if (!failureNotified) {
+          const error = asAppError(cause, "无法同步模型测试状态");
+          toast.error(error.message, { description: error.action });
+          failureNotified = true;
+        }
+        retryTimer = window.setTimeout(() => {
+          retryTimer = undefined;
+          void reconcile();
+        }, REMOTE_MODEL_TEST_STATE_POLL_MS);
+      }
+    };
+    void reconcile();
+    return () => {
+      active = false;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
   }, [client, loading, ready, reconcileModelTest, revision]);
 
   useEffect(() => {
@@ -136,6 +154,10 @@ export function useModelTestRunner() {
         const generation = useModelTestStore.getState().recoverRemote();
         toast.info("已有模型测试正在进行。");
         syncRemoteModelTestState(client, generation);
+        return;
+      }
+      if (error.code === "model-test-cancelled") {
+        useModelTestStore.getState().fail();
         return;
       }
       useModelTestStore.getState().fail();

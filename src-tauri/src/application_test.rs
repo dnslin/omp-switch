@@ -4578,13 +4578,13 @@ async fn model_test_reloads_saved_openai_completions_and_uses_a_minimal_authenti
     let blocked = service.test_model(input.clone()).await.unwrap_err();
     assert_eq!(blocked.code, "model-test-cost-notice-required");
     service.accept_model_test_cost_notice().unwrap();
-    let result = service.test_model(input).await.unwrap();
+    let result = service.test_model(input.clone()).await.unwrap();
 
     server.join().unwrap();
     assert!(result.success);
     assert_eq!(result.provider_id, "test-provider");
     assert_eq!(result.model_id, "test-model");
-    assert_eq!(result.protocol, "openai-completions");
+    assert_eq!(result.protocol.as_str(), "openai-completions");
     assert_eq!(result.status, Some(200));
     assert!(
         !serde_json::to_string(&result)
@@ -4605,6 +4605,10 @@ async fn model_test_reloads_saved_openai_completions_and_uses_a_minimal_authenti
         .unwrap();
     service.save_model_roles(save_roles).unwrap();
     assert!(service.get_model_test_state().result.is_some());
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    let rejected = service.test_model(input.clone()).await.unwrap_err();
+    assert_eq!(rejected.code, "model-test-not-eligible");
+    assert!(service.get_model_test_state().result.is_none());
     fs::write(target.join("models.yml"), "providers: [\n").unwrap();
     let failed_reload = service.get_overview_load();
     assert_eq!(
@@ -5256,7 +5260,7 @@ async fn model_test_cancels_and_times_out_a_hanging_omp_preflight() {
     let first_service = service.clone();
     let first_input = input.clone();
     let started = Instant::now();
-    let first = tokio::spawn(async move { first_service.test_model(first_input).await.unwrap() });
+    let first = tokio::spawn(async move { first_service.test_model(first_input).await });
     for _ in 0..100 {
         if service.get_model_test_state().running {
             break;
@@ -5264,15 +5268,15 @@ async fn model_test_cancels_and_times_out_a_hanging_omp_preflight() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert!(service.cancel_model_test());
-    let cancelled = first.await.unwrap();
-    assert_eq!(cancelled.error_code.as_deref(), Some("cancelled"));
+    let cancelled = first.await.unwrap().unwrap_err();
+    assert_eq!(cancelled.code, "model-test-cancelled");
     assert!(started.elapsed() < Duration::from_secs(1));
     assert!(!service.get_model_test_state().running);
 
     service.set_model_test_timeout_for_test(Duration::from_millis(50));
     let started = Instant::now();
-    let timed_out = service.test_model(input).await.unwrap();
-    assert_eq!(timed_out.error_code.as_deref(), Some("timeout"));
+    let timed_out = service.test_model(input).await.unwrap_err();
+    assert_eq!(timed_out.code, "model-test-timeout");
     assert!(started.elapsed() < Duration::from_secs(1));
     assert!(!service.get_model_test_state().running);
 }
@@ -5308,7 +5312,7 @@ async fn model_test_times_out_while_waiting_for_a_stuck_omp_detection_lock() {
     service.accept_model_test_cost_notice().unwrap();
     service.set_model_test_timeout_for_test(Duration::from_millis(50));
     let started = Instant::now();
-    let result = service
+    let error = service
         .test_model(
             serde_json::from_value(serde_json::json!({
                 "providerId": "blocked-provider",
@@ -5317,8 +5321,8 @@ async fn model_test_times_out_while_waiting_for_a_stuck_omp_detection_lock() {
             .unwrap(),
         )
         .await
-        .unwrap();
-    assert_eq!(result.error_code.as_deref(), Some("timeout"));
+        .unwrap_err();
+    assert_eq!(error.code, "model-test-timeout");
     assert!(started.elapsed() < Duration::from_secs(1));
     release_detection.wait();
     detection.join().unwrap();

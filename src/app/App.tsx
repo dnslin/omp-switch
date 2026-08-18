@@ -377,7 +377,7 @@ function ProviderDetailPage() {
   const latestModel = latestResult ? provider?.models.find((model) => model.id === latestResult.modelId) ?? null : null;
   const activeProvider = data?.providers.find((item) => item.id === modelTest.activeProviderId) ?? null;
   const activeModel = activeProvider && modelTest.activeModelId ? activeProvider.models.find((model) => model.id === modelTest.activeModelId) ?? null : null;
-  const latestEndpoint = latestResult && latestModel && latestResult.protocol !== "unknown" && !latestModel.hasBaseUrlOverride
+  const latestEndpoint = latestResult && latestModel && !latestModel.hasBaseUrlOverride
     ? buildModelEndpoint(provider?.baseUrl, latestModel.id, latestResult.protocol)
     : { kind: "not-configured" as const };
   const openedModelsHash = data?.files.models.contentHash ?? null;

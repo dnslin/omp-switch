@@ -39,7 +39,7 @@ pub(crate) struct ModelTestResult {
     pub(crate) success: bool,
     pub(crate) provider_id: String,
     pub(crate) model_id: String,
-    pub(crate) protocol: String,
+    pub(crate) protocol: SupportedApi,
     pub(crate) latency_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) status: Option<u16>,
@@ -571,7 +571,7 @@ fn result_from_response(
         success: true,
         provider_id: configuration.provider_id.clone(),
         model_id: configuration.model_id.clone(),
-        protocol: protocol.as_str().to_owned(),
+        protocol,
         latency_ms,
         status: Some(status),
         message: "模型连接成功".to_owned(),
@@ -683,24 +683,6 @@ fn cancelled_result(configuration: &ModelTestConfiguration, latency_ms: u64) -> 
         "测试已取消",
     )
 }
-pub(crate) fn preparation_failure_result(
-    provider_id: &str,
-    model_id: &str,
-    error_code: &str,
-    message: &str,
-    latency_ms: u64,
-) -> ModelTestResult {
-    ModelTestResult {
-        success: false,
-        provider_id: provider_id.to_owned(),
-        model_id: model_id.to_owned(),
-        protocol: "unknown".to_owned(),
-        latency_ms,
-        status: None,
-        message: message.to_owned(),
-        error_code: Some(error_code.to_owned()),
-    }
-}
 
 fn timeout_result(configuration: &ModelTestConfiguration, latency_ms: u64) -> ModelTestResult {
     failure_result(
@@ -725,7 +707,7 @@ fn failure_result(
         success: false,
         provider_id: configuration.provider_id.clone(),
         model_id: configuration.model_id.clone(),
-        protocol: protocol.as_str().to_owned(),
+        protocol,
         latency_ms,
         status,
         message: message.to_owned(),
@@ -790,7 +772,7 @@ mod tests {
                 success: true,
                 provider_id: "provider".to_owned(),
                 model_id: "model".to_owned(),
-                protocol: "openai-responses".to_owned(),
+                protocol: SupportedApi::OpenAiResponses,
                 latency_ms: 12,
                 status: Some(200),
                 message: "模型连接成功".to_owned(),
@@ -819,7 +801,7 @@ mod tests {
                 success: true,
                 provider_id: "provider".to_owned(),
                 model_id: "model".to_owned(),
-                protocol: "openai-responses".to_owned(),
+                protocol: SupportedApi::OpenAiResponses,
                 latency_ms: 12,
                 status: Some(200),
                 message: "模型连接成功".to_owned(),
@@ -843,7 +825,7 @@ mod tests {
                 success: false,
                 provider_id: "provider".to_owned(),
                 model_id: "model".to_owned(),
-                protocol: "unknown".to_owned(),
+                protocol: SupportedApi::OpenAiResponses,
                 latency_ms: 12,
                 status: None,
                 message: "测试已取消".to_owned(),

@@ -457,9 +457,8 @@ function TestResultPanel({ providers, result, running, providerId, modelId, onCa
   const contextProvider = contextProviderId ? providers.find((item) => item.id === contextProviderId) : undefined;
   const contextModel = contextProvider && contextModelId ? contextProvider.models.find((item) => item.id === contextModelId) : undefined;
   const protocol = running ? contextModel?.effectiveApi ?? "—" : result?.protocol ?? "—";
-  const resultProtocol = result?.protocol === "unknown" ? undefined : result?.protocol;
   const endpointResult = contextProvider && contextModel && !contextModel.hasBaseUrlOverride
-    ? buildModelEndpoint(contextProvider.baseUrl, contextModel.id, running ? contextModel.effectiveApi : resultProtocol)
+    ? buildModelEndpoint(contextProvider.baseUrl, contextModel.id, running ? contextModel.effectiveApi : result?.protocol)
     : { kind: "not-configured" as const };
   const endpoint = endpointResult.kind === "available" ? endpointResult.value : "—";
   const statusLabel = running ? "测试中…" : result?.message ?? "尚未测试";

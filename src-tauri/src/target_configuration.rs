@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -19,6 +19,7 @@ use std::os::windows::{
     io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle},
 };
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 static PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static INITIALIZATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -161,6 +162,28 @@ struct InitializationManifest {
     directory_creation_in_progress: Option<usize>,
     entries: Vec<InitializationEntry>,
 }
+pub(crate) struct DiscoveryControl<'a> {
+    cancellation: &'a CancellationToken,
+    deadline: std::time::Instant,
+}
+
+impl DiscoveryControl<'_> {
+    fn check(&self) -> io::Result<()> {
+        if self.cancellation.is_cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "model test cancelled",
+            ));
+        }
+        if std::time::Instant::now() >= self.deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "model test timed out",
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 pub fn discover_target_configuration(target: &Path) -> io::Result<TargetConfigurationDiscovery> {
@@ -176,17 +199,46 @@ pub fn discover_target_configuration_with_store(
     discovery.recovery_notice = recovery_notice;
     Ok(discovery)
 }
+pub fn discover_target_configuration_until(
+    target: &Path,
+    cancellation: &CancellationToken,
+    deadline: std::time::Instant,
+) -> io::Result<TargetConfigurationDiscovery> {
+    let control = DiscoveryControl {
+        cancellation,
+        deadline,
+    };
+    control.check()?;
+    let discovery = discover_target_configuration_internal_with_control(target, Some(&control))?;
+    control.check()?;
+    Ok(discovery)
+}
+
+fn check_control(control: Option<&DiscoveryControl<'_>>) -> io::Result<()> {
+    control.map_or(Ok(()), DiscoveryControl::check)
+}
 
 fn discover_target_configuration_internal(
     target: &Path,
 ) -> io::Result<TargetConfigurationDiscovery> {
+    discover_target_configuration_internal_with_control(target, None)
+}
+
+fn discover_target_configuration_internal_with_control(
+    target: &Path,
+    control: Option<&DiscoveryControl<'_>>,
+) -> io::Result<TargetConfigurationDiscovery> {
+    check_control(control)?;
     let target_metadata = match fs::symlink_metadata(target) {
         Ok(metadata) => Some(metadata),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
     };
+    check_control(control)?;
     let target_exists = target_metadata.is_some();
     let mut resolved_path = if target_exists {
+        check_control(control)?;
+
         match target.canonicalize() {
             Ok(path) => Some(path.to_string_lossy().into_owned()),
             Err(error) if target_metadata.as_ref().is_some_and(is_link_or_reparse) => {
@@ -200,27 +252,32 @@ fn discover_target_configuration_internal(
     } else {
         None
     };
+    check_control(control)?;
+    if target_exists {
+        check_control(control)?;
+    }
     if target_exists && !fs::metadata(target)?.is_dir() {
         return Ok(unsafe_discovery(
             target,
             "Target configuration 路径不是目录。".to_owned(),
         ));
     }
-    let (models, models_issue) = discover_file(target, "models", &["models.json"])?;
+    let (models, models_issue) = discover_file(target, "models", &["models.json"], control)?;
     let (config, config_issue) =
-        discover_file(target, "config", &["settings.json", "config.json"])?;
-    let ancestor = ExistingAncestorWalk::new(target)?;
+        discover_file(target, "config", &["settings.json", "config.json"], control)?;
+    let ancestor = ExistingAncestorWalk::new_with_control(target, control)?;
     if resolved_path.is_none() {
         resolved_path = Some(ancestor.expected_target.to_string_lossy().into_owned());
     }
-    let directory_writable = probe_directory_write(&ancestor.existing_path)?;
+    check_control(control)?;
+    let directory_writable = probe_directory_write_with_control(&ancestor.existing_path, control)?;
     let status = combined_status(&models.status, &config.status, directory_writable);
     let writable = status == TargetConfigurationStatus::Writable;
     let create_paths = creation_paths(&ancestor, &models.status, &config.status);
     let mut warnings = Vec::new();
     for name in ["models", "config"] {
-        if path_entry_exists(&target.join(format!("{name}.yml")))?
-            && path_entry_exists(&target.join(format!("{name}.yaml")))?
+        if path_entry_exists_with_control(&target.join(format!("{name}.yml")), control)?
+            && path_entry_exists_with_control(&target.join(format!("{name}.yaml")), control)?
         {
             warnings.push(format!(
                 "检测到 {name}.yaml；OMP Switch 使用 {name}.yml，且 {name}.yaml 不会被修改。"
@@ -255,25 +312,26 @@ fn discover_file(
     target: &Path,
     stem: &str,
     legacy_names: &[&str],
+    control: Option<&DiscoveryControl<'_>>,
 ) -> io::Result<(ConfigurationFileDiscovery, Option<ConfigurationIssue>)> {
     let canonical_path = target.join(format!("{stem}.yml"));
     let alternate_path = target.join(format!("{stem}.yaml"));
     let mut legacy_path = None;
     for name in legacy_names {
         let path = target.join(name);
-        if path_entry_exists(&path)? {
+        if path_entry_exists_with_control(&path, control)? {
             legacy_path = Some(path);
             break;
         }
     }
-    let (mut status, selected_path) = if path_entry_exists(&canonical_path)? {
-        let status = if path_entry_exists(&alternate_path)? {
+    let (mut status, selected_path) = if path_entry_exists_with_control(&canonical_path, control)? {
+        let status = if path_entry_exists_with_control(&alternate_path, control)? {
             ConfigurationFileStatus::CanonicalWithAlternate
         } else {
             ConfigurationFileStatus::Normal
         };
         (status, Some(canonical_path.as_path()))
-    } else if path_entry_exists(&alternate_path)? {
+    } else if path_entry_exists_with_control(&alternate_path, control)? {
         (
             ConfigurationFileStatus::AlternateOnly,
             Some(alternate_path.as_path()),
@@ -321,7 +379,7 @@ fn discover_file(
     let parse_issue = if resolution_issue.is_none() && status != ConfigurationFileStatus::LegacyJson
     {
         if let Some(path) = selected_path {
-            match fs::read(path) {
+            match read_file_with_control(path, control) {
                 Ok(contents) => match serde_yaml::from_slice::<serde_yaml::Value>(&contents) {
                     Ok(_) => None,
                     Err(error) => {
@@ -353,7 +411,7 @@ fn discover_file(
             ConfigurationFileStatus::Normal | ConfigurationFileStatus::CanonicalWithAlternate
         )
         && let Some(path) = selected_path
-        && !file_is_writable(path)?
+        && !file_is_writable_with_control(path, control)?
     {
         status = ConfigurationFileStatus::ReadOnly;
     }
@@ -375,6 +433,33 @@ fn path_entry_exists(path: &Path) -> io::Result<bool> {
         Err(error) => Err(error),
     }
 }
+fn path_entry_exists_with_control(
+    path: &Path,
+    control: Option<&DiscoveryControl<'_>>,
+) -> io::Result<bool> {
+    check_control(control)?;
+    let exists = path_entry_exists(path)?;
+    check_control(control)?;
+    Ok(exists)
+}
+
+fn read_file_with_control(
+    path: &Path,
+    control: Option<&DiscoveryControl<'_>>,
+) -> io::Result<Vec<u8>> {
+    check_control(control)?;
+    let mut file = fs::File::open(path)?;
+    let mut contents = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        check_control(control)?;
+        match file.read(&mut chunk) {
+            Ok(0) => return Ok(contents),
+            Ok(read) => contents.extend_from_slice(&chunk[..read]),
+            Err(error) => return Err(error),
+        }
+    }
+}
 
 fn file_is_writable(path: &Path) -> io::Result<bool> {
     match OpenOptions::new().read(true).write(true).open(path) {
@@ -382,6 +467,15 @@ fn file_is_writable(path: &Path) -> io::Result<bool> {
         Err(error) if is_read_only_error(&error) => Ok(false),
         Err(error) => Err(error),
     }
+}
+fn file_is_writable_with_control(
+    path: &Path,
+    control: Option<&DiscoveryControl<'_>>,
+) -> io::Result<bool> {
+    check_control(control)?;
+    let writable = file_is_writable(path)?;
+    check_control(control)?;
+    Ok(writable)
 }
 
 fn is_read_only_error(error: &io::Error) -> bool {
@@ -407,6 +501,15 @@ fn probe_directory_write(directory: &Path) -> io::Result<bool> {
         Err(error) => Err(error),
     }
 }
+fn probe_directory_write_with_control(
+    directory: &Path,
+    control: Option<&DiscoveryControl<'_>>,
+) -> io::Result<bool> {
+    check_control(control)?;
+    let writable = probe_directory_write(directory)?;
+    check_control(control)?;
+    Ok(writable)
+}
 
 struct ExistingAncestorWalk {
     existing_path: PathBuf,
@@ -418,12 +521,19 @@ struct ExistingAncestorWalk {
 
 impl ExistingAncestorWalk {
     fn new(target: &Path) -> io::Result<Self> {
+        Self::new_with_control(target, None)
+    }
+
+    fn new_with_control(target: &Path, control: Option<&DiscoveryControl<'_>>) -> io::Result<Self> {
         let mut missing_directories = Vec::new();
         let mut candidate = target;
         loop {
+            check_control(control)?;
             match fs::symlink_metadata(candidate) {
                 Ok(metadata) => {
+                    check_control(control)?;
                     let resolved_existing_path = candidate.canonicalize()?;
+                    check_control(control)?;
                     if !fs::metadata(&resolved_existing_path)?.is_dir() {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,

@@ -730,6 +730,11 @@ impl AppService {
                     .run(executable, arguments)
                     .map_err(CommandRunError::Io)
             },
+            |target| {
+                self.environment
+                    .inspect_target(target)
+                    .map_err(CommandRunError::Io)
+            },
         ) {
             Ok(state) => state,
             Err(CommandRunError::Cancelled | CommandRunError::TimedOut) => {
@@ -753,10 +758,19 @@ impl AppService {
         cancellation: &CancellationToken,
         deadline: Instant,
     ) -> Result<StartupState, AppError> {
-        self.validate_omp_with_runner(executable, false, None, |executable, arguments| {
-            self.environment
-                .run_with_deadline(executable, arguments, cancellation, deadline)
-        })
+        self.validate_omp_with_runner(
+            executable,
+            false,
+            None,
+            |executable, arguments| {
+                self.environment
+                    .run_with_deadline(executable, arguments, cancellation, deadline)
+            },
+            |target| {
+                self.environment
+                    .inspect_target_with_deadline(target, cancellation, deadline)
+            },
+        )
         .map_err(|error| match error {
             CommandRunError::Cancelled => {
                 AppError::new("model-test-cancelled", "模型测试已取消。", "无需继续操作。")
@@ -776,6 +790,7 @@ impl AppService {
         requires_confirmation: bool,
         previous_target_configuration: Option<String>,
         mut run: impl FnMut(&Path, &[&str]) -> Result<CommandOutput, CommandRunError>,
+        mut inspect: impl FnMut(&Path) -> Result<TargetConfigurationDiscovery, CommandRunError>,
     ) -> Result<StartupState, CommandRunError> {
         let executable_path = executable.to_string_lossy().into_owned();
         let version_output = match run(&executable, &["--version"]) {
@@ -835,9 +850,11 @@ impl AppService {
             });
         }
         let target = target.unwrap();
-        let mut target_configuration = match self.environment.inspect_target(&target) {
+        let mut target_configuration = match inspect(&target) {
             Ok(discovery) => discovery,
-            Err(error) => {
+            Err(CommandRunError::Cancelled) => return Err(CommandRunError::Cancelled),
+            Err(CommandRunError::TimedOut) => return Err(CommandRunError::TimedOut),
+            Err(CommandRunError::Io(error)) => {
                 return Ok(StartupState::ConfigPathFailed {
                     executable_path,
                     version,
@@ -1150,29 +1167,10 @@ impl AppService {
             .await
         {
             Ok(configuration) => configuration,
-            Err(error) if error.code == "model-test-cancelled" => {
-                let result = model_test::preparation_failure_result(
-                    &input.provider_id,
-                    &input.model_id,
-                    "cancelled",
-                    "测试已取消",
-                    started_at.elapsed().as_millis() as u64,
-                );
-                guard.complete(result.clone(), None);
-                return Ok(result);
+            Err(error) => {
+                self.model_tests.invalidate();
+                return Err(error);
             }
-            Err(error) if error.code == "model-test-timeout" => {
-                let result = model_test::preparation_failure_result(
-                    &input.provider_id,
-                    &input.model_id,
-                    "timeout",
-                    "模型测试准备超时。",
-                    started_at.elapsed().as_millis() as u64,
-                );
-                guard.complete(result.clone(), None);
-                return Ok(result);
-            }
-            Err(error) => return Err(error),
         };
         let binding = ModelTestBinding {
             target_path: configuration.target_path.clone(),
@@ -1186,6 +1184,7 @@ impl AppService {
                 Ok(result)
             }
             Err(error) => {
+                self.model_tests.invalidate();
                 drop(guard);
                 Err(error)
             }
