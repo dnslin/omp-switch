@@ -203,6 +203,15 @@ pub(crate) struct OverviewReadResult {
     pub(crate) snapshot: Option<ConfigurationSnapshot>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ModelTestConfiguration {
+    pub(crate) provider_id: String,
+    pub(crate) model_id: String,
+    pub(crate) base_url: String,
+    pub(crate) protocol: String,
+    pub(crate) auth_mode: OverviewAuthMode,
+    pub(crate) api_key: Option<String>,
+}
 pub(crate) fn read_overview(
     executable_path: &str,
     version: &str,
@@ -488,6 +497,95 @@ fn read_document(path: &str, label: &str) -> Result<ParsedConfiguration, AppErro
         )
     })?;
     Ok(ParsedConfiguration { raw_hash, tree })
+}
+
+pub(crate) fn read_model_test_configuration(
+    target: &TargetConfigurationDiscovery,
+    catalog: &BundledCatalog,
+    provider_id: &str,
+    model_id: &str,
+) -> Result<ModelTestConfiguration, AppError> {
+    let path = target
+        .models
+        .resolved_path
+        .as_deref()
+        .unwrap_or(&target.models.canonical_path);
+    let document = read_document(path, "models.yml")?;
+    let (providers, provider_ids_are_safe) = project_providers(&document.tree, Some(catalog));
+    let provider = providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+        .ok_or_else(|| {
+            AppError::new(
+                "model-test-not-eligible",
+                "找不到要测试的 Provider。",
+                "请重新读取配置并选择仍然存在的普通 Provider。",
+            )
+        })?;
+    if !provider_ids_are_safe || !provider.editable {
+        return Err(model_test_not_eligible(
+            provider
+                .read_only_reason
+                .as_deref()
+                .unwrap_or("高级或只读 Provider 不能测试。"),
+        ));
+    }
+    let model = provider
+        .models
+        .iter()
+        .find(|model| model.id == model_id)
+        .ok_or_else(|| {
+            AppError::new(
+                "model-test-not-eligible",
+                "找不到要测试的 Model definition。",
+                "请重新读取配置并选择仍然存在的已保存模型。",
+            )
+        })?;
+    if !model.editable || model.status != ModelStatus::Normal || !model.complete {
+        return Err(model_test_not_eligible(
+            model
+                .read_only_reason
+                .as_deref()
+                .unwrap_or("当前 Model definition 不完整，不能测试。"),
+        ));
+    }
+    let protocol = model.effective_api.clone().ok_or_else(|| {
+        model_test_not_eligible("当前 Model definition 没有有效的 Supported protocol。")
+    })?;
+    let root = mapping(&document.tree)
+        .ok_or_else(|| model_test_not_eligible("models.yml 结构无法识别。"))?;
+    let providers_value = mapping_get(root, "providers")
+        .ok_or_else(|| model_test_not_eligible("models.yml 缺少 providers。"))?;
+    let providers_map = mapping(providers_value)
+        .ok_or_else(|| model_test_not_eligible("models.yml 的 providers 结构无法识别。"))?;
+    let provider_value = mapping_get(providers_map, provider_id)
+        .ok_or_else(|| model_test_not_eligible("Provider 配置已变化，请重新读取。"))?;
+    let provider_map = mapping(provider_value)
+        .ok_or_else(|| model_test_not_eligible("Provider 配置结构无法识别。"))?;
+    let base_url = mapping_get(provider_map, "baseUrl")
+        .and_then(scalar_string)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| model_test_not_eligible("Provider 没有有效的 Base URL。"))?;
+    let api_key = mapping_get(provider_map, "apiKey").and_then(|value| match value {
+        Value::String(value) if !value.is_empty() => Some(value.clone()),
+        _ => None,
+    });
+    Ok(ModelTestConfiguration {
+        provider_id: provider_id.to_owned(),
+        model_id: model_id.to_owned(),
+        base_url,
+        protocol,
+        auth_mode: provider.auth_mode,
+        api_key,
+    })
+}
+
+fn model_test_not_eligible(reason: &str) -> AppError {
+    AppError::new(
+        "model-test-not-eligible",
+        "当前 Model definition 不满足测试条件。",
+        reason,
+    )
 }
 
 fn content_hash(bytes: &[u8]) -> String {

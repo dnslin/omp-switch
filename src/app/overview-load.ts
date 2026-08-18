@@ -24,11 +24,13 @@ export function useOverviewLoad(copy: OverviewLoadCopy) {
   const [loading, setLoading] = useState(true);
   const requestId = useRef(0);
 
-  const reload = useCallback(async (): Promise<AppError | null> => {
+  const load = useCallback(async (clearBeforeLoad: boolean): Promise<AppError | null> => {
     const currentRequest = ++requestId.current;
-    setLoading(true);
-    setData(null);
-    setError(null);
+    if (clearBeforeLoad) {
+      setLoading(true);
+      setData(null);
+      setError(null);
+    }
     try {
       const result = await client.getOverviewLoad();
       if (currentRequest !== requestId.current) {
@@ -44,15 +46,17 @@ export function useOverviewLoad(copy: OverviewLoadCopy) {
         return null;
       }
       if (result.error) {
-        setError(result.error);
+        if (clearBeforeLoad) setError(result.error);
         return result.error;
       }
       if (result.overview) {
+        setError(null);
         setData(result.overview);
         return null;
       }
-      setError(copy.missingOverview);
-      return copy.missingOverview;
+      const missingOverview = copy.missingOverview;
+      if (clearBeforeLoad) setError(missingOverview);
+      return missingOverview;
     } catch (cause: unknown) {
       const error = asAppError(cause, copy.requestFailure);
       if (currentRequest !== requestId.current) {
@@ -62,13 +66,18 @@ export function useOverviewLoad(copy: OverviewLoadCopy) {
           action: "请重新读取。",
         };
       }
-      setStartupState(null);
-      setError(error);
+      if (clearBeforeLoad) {
+        setStartupState(null);
+        setError(error);
+      }
       return error;
     } finally {
-      if (currentRequest === requestId.current) setLoading(false);
+      if (clearBeforeLoad && currentRequest === requestId.current) setLoading(false);
     }
   }, [client, copy, navigate]);
+
+  const reload = useCallback(() => load(true), [load]);
+  const refresh = useCallback(() => load(false), [load]);
 
   useEffect(() => {
     void reload();
@@ -83,5 +92,5 @@ export function useOverviewLoad(copy: OverviewLoadCopy) {
         ? { title: "OMP 状态不可用", path: "配置目录不可用", status: "请重新读取 OMP", tone: "warning" }
         : { title: "正在检测 OMP", path: "配置目录检测中", status: "请稍候", tone: "warning" };
 
-  return { data, startupState, error, loading, reload, shellStatus };
+  return { data, startupState, error, loading, reload, refresh, shellStatus };
 }

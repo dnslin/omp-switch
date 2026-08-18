@@ -322,7 +322,7 @@ Provider   [dnslin ▾]
 - Model ID 只在所属 Provider 内稳定；恢复和切换始终通过当前 `provider.models` 验证完整 pair。
 - 已保存 Provider 存在而 Model 为空时保留空选择；Provider 失效时清空 pair，Model 失效时保留 Provider 并清空 Model。
 - 所有安全投影 Provider/Model 均可选择查看，包括只读或不完整条目；这不启用模型测试。
-- 快速连续选择通过单一队列保存完整 UI settings，保留主题和费用提示状态；settings 读取失败时不写盘。
+- 快速连续选择通过单一队列保存主题和模型选择；费用说明确认使用独立的 `accept_model_test_cost_notice` 原子 IPC，不会被选择队列覆盖。settings 读取失败时不写盘。
 - Provider/Model option 的稳定 ID 支持超长文本收缩和省略，不扩大已批准的 Select 与面板宽度。
 
 ### 7.3 空状态
@@ -718,13 +718,11 @@ Sonner：
 ```text
 连接失败
 
-无法连接到 https://example.com/v1/responses。
-请检查 Base URL、网络或服务状态。
-
+Provider 返回了脱敏的错误分类。
 错误类型：连接失败
 ```
 
-Sonner 只显示“模型测试失败”。
+Sonner 只显示“模型测试失败”；UI 不显示完整响应、认证值或可能含敏感信息的请求细节。
 
 ### 12.5 取消
 
@@ -742,6 +740,8 @@ Sonner 只显示“模型测试失败”。
 - 应用重启后不恢复。
 - 不写入 OMP 配置。
 - 不保存完整请求或响应。
+
+实现状态（issue #12）：概览、Provider 详情和已保存 Model 编辑 Sheet 均只测试已保存的普通 Model definition；Rust application service 重新读取配置，按四种 Supported protocol 生成固定最小 POST 请求。测试在应用内单并发、可取消并受固定超时约束；认证、响应体和错误只以脱敏结果返回。首次测试的费用说明通过 `modelTestCostNoticeAccepted` 原子偏好确认并持久化，模型测试请求和响应不写入配置或应用设置。
 
 ## 13. 角色页面
 
@@ -1260,6 +1260,6 @@ Provider 详情
 - [ ] Thinking 不出现 `ultra`。
 - [ ] 高级角色配置使整个角色页只读。
 - [ ] 删除显示引用检查和事务行为。
-- [ ] 模型测试为手动单并发，不泄露敏感内容。
+- [x] Issue #12：模型测试为手动单并发，不泄露敏感内容，并覆盖取消与固定超时。
 - [ ] Loading、Empty、Error、Normal、Read-only 状态完整。
 - [ ] `designs/omp-switch.pen` 的 Foundations、Components 和全部适用页面/Sheet 状态已在 1536×1024 基准视口 1:1 还原，并完成逐页截图对比。

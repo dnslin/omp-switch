@@ -20,6 +20,7 @@ import {
   useTauriClient,
 } from "../lib/tauri-client";
 import { buildModelEndpoint, isHttpUrl } from "./model-endpoint";
+import { isModelTestable, useModelTestRunner } from "./model-test";
 
 const protocols = [
   "openai-completions",
@@ -70,6 +71,7 @@ export function ModelCreateSheet({
   onSaved,
 }: ModelCreateSheetProps) {
   const client = useTauriClient();
+  const modelTest = useModelTestRunner();
   const [submitting, setSubmitting] = useState(false);
   const [submissionError, setSubmissionError] = useState<AppError | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -111,6 +113,10 @@ export function ModelCreateSheet({
     : null;
   const endpointText = endpoint?.kind === "available" ? endpoint.value : "填写有效 Model ID 和协议后显示最终地址";
   const canSave = !isViewing && isDirty && modelSchema.safeParse(values).success && !submitting;
+  const canTest = Boolean(source && isEditing && isModelTestable(provider, source));
+  const activeTest = Boolean(source && modelTest.isActive(provider.id, source.id));
+  const testDisabled = activeTest ? false : !canTest || modelTest.isBusy(provider.id, source?.id ?? "");
+  const testLabel = activeTest ? "取消测试" : "测试模型";
 
   useEffect(() => {
     if (submissionError) feedbackRef.current?.scrollIntoView?.({ block: "nearest" });
@@ -266,7 +272,10 @@ export function ModelCreateSheet({
               </div>
               <p className="provider-create-model-note"><Info aria-hidden="true" />模型只修改所属 Provider 下的目标路径；未知配置会原样保留。</p>
               {isViewing ? <p className="provider-create-model-readonly-note" role="status"><LockKeyhole aria-hidden="true" />{source?.readOnlyReason ?? "当前 Model definition 只读。"}</p> : null}
-              <div className="model-create-sheet-test"><Button type="button" variant="secondary" disabled title={isViewing ? "只读 Model definition 不能测试" : "请先保存 Model definition"}>测试模型</Button><span>{isViewing ? "只读 Model definition 不可测试" : "仅可测试已保存模型"}</span></div>
+              <div className="model-create-sheet-test">
+                <Button type="button" variant="secondary" disabled={testDisabled} title={activeTest ? undefined : !canTest ? (isViewing ? "只读 Model definition 不能测试" : "请先保存 Model definition") : modelTest.running ? "已有模型测试正在进行" : undefined} onClick={() => { if (!source) return; if (activeTest) modelTest.cancel(); else modelTest.start(provider.id, source.id); }}>{testLabel}</Button>
+                <span>{isViewing ? "只读 Model definition 不可测试" : activeTest ? "正在测试已保存的 Model definition" : "仅可测试已保存模型"}</span>
+              </div>
               {submissionError ? (
                 <section ref={feedbackRef} className="provider-create-submit-error" role="alert" aria-live="assertive">
                   <div><strong>{submissionError.code === "models-hash-conflict" ? "配置冲突" : "无法保存 Model"}</strong><p>{submissionError.message}</p><p>{submissionError.action}</p></div>
@@ -303,6 +312,7 @@ export function ModelCreateSheet({
           离开后，这些修改将会丢失。
         </ConfirmDialog>
       ) : null}
+      {modelTest.costNoticeDialog}
     </>
   );
 }

@@ -31,8 +31,10 @@ export function buildModelEndpoint(
         return { kind: "available", value: appendEndpointPath(endpoint, "chat/completions").toString() };
       case "openai-responses":
         return { kind: "available", value: appendEndpointPath(endpoint, "responses").toString() };
-      case "anthropic-messages":
-        return { kind: "available", value: appendEndpointPath(endpoint, "v1/messages").toString() };
+      case "anthropic-messages": {
+        const anthropicEndpoint = normalizeAnthropicBase(endpoint);
+        return { kind: "available", value: appendEndpointPath(anthropicEndpoint, "v1/messages").toString() };
+      }
       case "google-generative-ai": {
         const googleEndpoint = appendEndpointPath(endpoint, `models/${encodeURIComponent(modelId)}:streamGenerateContent`);
         googleEndpoint.searchParams.set("alt", "sse");
@@ -48,5 +50,11 @@ export function buildModelEndpoint(
 function appendEndpointPath(endpoint: URL, suffix: string): URL {
   const basePath = endpoint.pathname.replace(/\/+$/, "");
   endpoint.pathname = `${basePath}/${suffix}`;
+  return endpoint;
+}
+
+function normalizeAnthropicBase(endpoint: URL): URL {
+  const basePath = endpoint.pathname.replace(/\/+$/, "");
+  endpoint.pathname = basePath.endsWith("/v1") ? basePath.slice(0, -3) || "/" : basePath || "/";
   return endpoint;
 }

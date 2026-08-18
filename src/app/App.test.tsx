@@ -44,6 +44,9 @@ const unavailableClient: TauriClient = {
   editModel: async () => ({ providerId: "dnslin", modelId: "gpt-5.6-sol" }),
   deleteModel: async () => ({ providerId: "dnslin", modelId: "gpt-5.6-sol" }),
   saveModelRoles: async () => ({ changedRoleCount: 0 }),
+  testModel: async () => ({ success: true, providerId: "dnslin", modelId: "gpt-5.6-sol", protocol: "openai-responses" as const, latencyMs: 12, status: 200, message: "模型连接成功" }),
+  cancelModelTest: async () => true,
+  getModelTestState: async () => ({ running: false, providerId: null, modelId: null, result: null }),
   detectOmp: async () => ({ kind: "omp-unavailable", message: "仍未找到 OMP" }),
   selectOmpExecutable: async () => null,
   validateSelectedOmp: async () => ({ kind: "invalid-executable", executablePath: "/tmp/not-omp", message: "无法运行", diagnosticCode: "io-not-found" }),
@@ -55,9 +58,10 @@ const unavailableClient: TauriClient = {
     theme: "system",
     selectedProviderId: null,
     selectedModelId: null,
-    costNoticeAccepted: false,
+    modelTestCostNoticeAccepted: false,
   }),
-  saveUiSettings: async (settings) => ({ ompExecutablePath: null, ...settings }),
+  saveUiSettings: async (settings) => ({ ompExecutablePath: null, modelTestCostNoticeAccepted: false, ...settings }),
+  acceptModelTestCostNotice: async () => ({ ompExecutablePath: null, theme: "system", selectedProviderId: null, selectedModelId: null, modelTestCostNoticeAccepted: true }),
 };
 const readyState: StartupState = {
   kind: "omp-ready",
@@ -2230,7 +2234,7 @@ describe("Overview page seam", () => {
     expect(screen.getByLabelText(/OMP 已连接.*v17\.4\.1/)).toBeVisible();
     expect(screen.getAllByText("/Users/username/.omp/agent")[0]).toBeVisible();
     expect(screen.queryByText("super-secret-api-key")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "测试模型（尚未启用）" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "测试模型" })).toBeEnabled();
     expect(screen.getByRole("region", { name: "快速测试" })).toHaveTextContent(/Text\s+·\s+Image\s+·\s+Reasoning/);
     expect(screen.getByRole("region", { name: "测试结果" })).toBeVisible();
     expect(screen.getByText("尚未测试")).toBeVisible();
@@ -2330,7 +2334,7 @@ describe("Overview page seam", () => {
         theme: "dark",
         selectedProviderId: "dnslin",
         selectedModelId: "gpt-5.6-sol",
-        costNoticeAccepted: true,
+        modelTestCostNoticeAccepted: true,
       }),
       saveUiSettings,
     });
@@ -2348,7 +2352,6 @@ describe("Overview page seam", () => {
       theme: "dark",
       selectedProviderId: "anthropic",
       selectedModelId: null,
-      costNoticeAccepted: true,
     });
 
     await user.click(model);
@@ -2362,7 +2365,6 @@ describe("Overview page seam", () => {
       theme: "dark",
       selectedProviderId: "anthropic",
       selectedModelId: "claude-sonnet-4",
-      costNoticeAccepted: true,
     });
   });
   it("clears the Model when switching Provider even if the new Provider reuses the Model ID", async () => {
@@ -2383,7 +2385,7 @@ describe("Overview page seam", () => {
         theme: "dark",
         selectedProviderId: "dnslin",
         selectedModelId: overview.models[0].id,
-        costNoticeAccepted: true,
+        modelTestCostNoticeAccepted: true,
       }),
       saveUiSettings,
     });
@@ -2397,7 +2399,6 @@ describe("Overview page seam", () => {
       theme: "dark",
       selectedProviderId: "anthropic",
       selectedModelId: null,
-      costNoticeAccepted: true,
     }));
   });
   it("serializes rapid Provider and Model saves", async () => {
@@ -2415,7 +2416,7 @@ describe("Overview page seam", () => {
         theme: "dark",
         selectedProviderId: "dnslin",
         selectedModelId: "gpt-5.6-sol",
-        costNoticeAccepted: true,
+        modelTestCostNoticeAccepted: true,
       }),
       saveUiSettings,
     });
@@ -2442,14 +2443,13 @@ describe("Overview page seam", () => {
       theme: "dark",
       selectedProviderId: "anthropic",
       selectedModelId: "claude-sonnet-4",
-      costNoticeAccepted: true,
     });
     secondSave.resolve({
       ompExecutablePath: null,
       theme: "dark",
       selectedProviderId: "anthropic",
       selectedModelId: "claude-sonnet-4",
-      costNoticeAccepted: true,
+      modelTestCostNoticeAccepted: true,
     });
   });
   it("serializes selection saves across Overview remounts", async () => {
@@ -2469,7 +2469,7 @@ describe("Overview page seam", () => {
         theme: "dark",
         selectedProviderId: "dnslin",
         selectedModelId: "gpt-5.6-sol",
-        costNoticeAccepted: true,
+        modelTestCostNoticeAccepted: true,
       }),
       saveUiSettings,
     });
@@ -2492,23 +2492,21 @@ describe("Overview page seam", () => {
     await user.click(await screen.findByRole("option", { name: "dnslin" }));
     expect(saveUiSettings).toHaveBeenCalledTimes(1);
 
-    firstSave.resolve({ ompExecutablePath: null, theme: "dark", selectedProviderId: "anthropic", selectedModelId: null, costNoticeAccepted: true });
+    firstSave.resolve({ ompExecutablePath: null, theme: "dark", selectedProviderId: "anthropic", selectedModelId: null, modelTestCostNoticeAccepted: true });
     await waitFor(() => expect(saveUiSettings).toHaveBeenCalledTimes(2));
     expect(saveUiSettings).toHaveBeenNthCalledWith(2, {
       theme: "dark",
       selectedProviderId: "anthropic",
       selectedModelId: "claude-sonnet-4",
-      costNoticeAccepted: true,
     });
-    secondSave.resolve({ ompExecutablePath: null, theme: "dark", selectedProviderId: "anthropic", selectedModelId: "claude-sonnet-4", costNoticeAccepted: true });
+    secondSave.resolve({ ompExecutablePath: null, theme: "dark", selectedProviderId: "anthropic", selectedModelId: "claude-sonnet-4", modelTestCostNoticeAccepted: true });
     await waitFor(() => expect(saveUiSettings).toHaveBeenCalledTimes(3));
     expect(saveUiSettings).toHaveBeenNthCalledWith(3, {
       theme: "dark",
       selectedProviderId: "dnslin",
       selectedModelId: null,
-      costNoticeAccepted: true,
     });
-    thirdSave.resolve({ ompExecutablePath: null, theme: "dark", selectedProviderId: "dnslin", selectedModelId: null, costNoticeAccepted: true });
+    thirdSave.resolve({ ompExecutablePath: null, theme: "dark", selectedProviderId: "dnslin", selectedModelId: null, modelTestCostNoticeAccepted: true });
   });
   it("waits for UI settings hydration before showing overview content", async () => {
     const settings = deferred<Awaited<ReturnType<TauriClient["getUiSettings"]>>>();
@@ -2531,7 +2529,7 @@ describe("Overview page seam", () => {
       theme: "system",
       selectedProviderId: null,
       selectedModelId: null,
-      costNoticeAccepted: false,
+      modelTestCostNoticeAccepted: false,
     });
 
     expect(await screen.findByRole("region", { name: "快速测试" })).toBeVisible();
@@ -2548,7 +2546,7 @@ describe("Overview page seam", () => {
         theme: "dark",
         selectedProviderId: "anthropic",
         selectedModelId: "claude-sonnet-4",
-        costNoticeAccepted: true,
+        modelTestCostNoticeAccepted: true,
       }),
       saveUiSettings,
     });
@@ -2573,7 +2571,7 @@ describe("Overview page seam", () => {
         theme: "system",
         selectedProviderId: "anthropic",
         selectedModelId: null,
-        costNoticeAccepted: false,
+        modelTestCostNoticeAccepted: false,
       }),
       saveUiSettings,
     });
@@ -2598,7 +2596,7 @@ describe("Overview page seam", () => {
         theme: "dark",
         selectedProviderId,
         selectedModelId,
-        costNoticeAccepted: true,
+        modelTestCostNoticeAccepted: true,
       }),
       saveUiSettings,
     }, true);
@@ -2609,7 +2607,6 @@ describe("Overview page seam", () => {
       theme: "dark",
       selectedProviderId: expectedProviderId,
       selectedModelId: expectedModelId,
-      costNoticeAccepted: true,
     });
     expect(screen.getAllByText("之前选择的模型已不存在，请重新选择。")).toHaveLength(1);
   });
@@ -2622,6 +2619,7 @@ describe("Overview page seam", () => {
   });
   it.each([
     ["openai-responses", "https://example.com/v1/responses?region=us"],
+    ["anthropic-messages", "https://example.com/v1/messages?region=us"],
     ["google-generative-ai", "https://example.com/v1/models/gpt-5.6-sol:streamGenerateContent?region=us&alt=sse"],
   ] as const)("builds the %s preview path before the base URL query", async (effectiveApi, expectedAddress) => {
     const overview = overviewDto();
@@ -2727,7 +2725,7 @@ describe("Overview page seam", () => {
     expect(panel).toHaveTextContent("https://legacy.example/v1/chat/completions");
     expect(panel).toHaveTextContent(/Text\s+·\s+Image\s+·\s+Reasoning/);
     expect(panel).toHaveTextContent("64,000");
-    expect(screen.getByRole("button", { name: "测试模型（尚未启用）" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "测试模型" })).toBeDisabled();
   });
 
   it("keeps an alternate YAML file in warning status", async () => {
@@ -2904,5 +2902,369 @@ describe("Overview page seam", () => {
     await user.click(footer);
     expect(await screen.findByRole("heading", { name: "设置" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "OMP 与 Target configuration" })).toBeVisible();
+  });
+});
+
+describe("Model test page seam", () => {
+  it("shows the one-time cost notice and starts a saved model test after confirmation", async () => {
+    const user = userEvent.setup();
+    const acceptModelTestCostNotice = vi.fn(async () => ({
+      ompExecutablePath: "/usr/local/bin/omp",
+      theme: "dark" as const,
+      selectedProviderId: "dnslin",
+      selectedModelId: "gpt-5.6-sol",
+      modelTestCostNoticeAccepted: true,
+    }));
+    const testModel = vi.fn(async () => ({
+      success: true,
+      providerId: "dnslin",
+      modelId: "gpt-5.6-sol",
+      protocol: "openai-responses" as const,
+      latencyMs: 42,
+      status: 200,
+      message: "模型连接成功",
+    }));
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        modelTestCostNoticeAccepted: false,
+      }),
+      acceptModelTestCostNotice,
+      testModel,
+    });
+
+    await screen.findByRole("region", { name: "快速测试" });
+    await user.click(screen.getByRole("button", { name: "测试模型" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("模型测试会向 Provider 发起真实 API 请求，可能产生费用。");
+    expect(testModel).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "继续测试" }));
+    await waitFor(() => expect(acceptModelTestCostNotice).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(testModel).toHaveBeenCalledWith({ providerId: "dnslin", modelId: "gpt-5.6-sol" }));
+    expect(await screen.findByText("模型连接成功")).toBeVisible();
+    expect(screen.getByText("42 ms")).toBeVisible();
+  });
+
+  it("exposes cancellation while a test is running and renders the cancelled result", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<Awaited<ReturnType<TauriClient["testModel"]>>>();
+    const cancelModelTest = vi.fn(async () => {
+      pending.resolve({
+        success: false,
+        providerId: "dnslin",
+        modelId: "gpt-5.6-sol",
+        protocol: "openai-responses" as const,
+        latencyMs: 8,
+        message: "测试已取消",
+        errorCode: "cancelled",
+      });
+      return true;
+    });
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        modelTestCostNoticeAccepted: true,
+      }),
+      testModel: () => pending.promise,
+      cancelModelTest,
+    });
+
+    await screen.findByRole("region", { name: "快速测试" });
+    await user.click(screen.getByRole("button", { name: "测试模型" }));
+    expect(await screen.findByRole("button", { name: "取消测试" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "取消测试" }));
+    await waitFor(() => expect(cancelModelTest).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("测试已取消")).toBeVisible();
+  });
+
+  it("provides a saved-model test action from Provider Detail without using form values", async () => {
+    const user = userEvent.setup();
+    const testModel = vi.fn(async () => ({
+      success: true,
+      providerId: "dnslin",
+      modelId: "gpt-5.6-sol",
+      protocol: "openai-responses" as const,
+      latencyMs: 16,
+      status: 200,
+      message: "模型连接成功",
+    }));
+    renderRoute("/providers/dnslin", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        modelTestCostNoticeAccepted: true,
+      }),
+      testModel,
+    });
+
+    const row = (await screen.findByText("gpt-5.6-sol", { exact: true })).closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: "Model 操作 gpt-5.6-sol" }));
+    await user.click(screen.getByRole("menuitem", { name: "测试模型" }));
+    await waitFor(() => expect(testModel).toHaveBeenCalledWith({ providerId: "dnslin", modelId: "gpt-5.6-sol" }));
+  });
+
+  it("tests the saved model from the edit sheet instead of dirty form values", async () => {
+    const user = userEvent.setup();
+    const acceptModelTestCostNotice = vi.fn(unavailableClient.acceptModelTestCostNotice);
+    const testModel = vi.fn(async () => ({
+      success: true,
+      providerId: "dnslin",
+      modelId: "gpt-5.6-sol",
+      protocol: "openai-responses" as const,
+      latencyMs: 18,
+      status: 200,
+      message: "模型连接成功",
+    }));
+    renderRoute("/providers/dnslin", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        modelTestCostNoticeAccepted: false,
+      }),
+      acceptModelTestCostNotice,
+      testModel,
+    });
+
+    const row = (await screen.findByText("gpt-5.6-sol", { exact: true })).closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: "Model 操作 gpt-5.6-sol" }));
+    await user.click(screen.getByRole("menuitem", { name: "编辑" }));
+    const sheet = await screen.findByRole("dialog");
+    await user.click(within(sheet).getByRole("button", { name: "测试模型" }));
+    const dialog = await screen.findByRole("dialog", { name: "模型测试费用说明" });
+    await user.click(within(dialog).getByRole("button", { name: "继续测试" }));
+    await waitFor(() => expect(acceptModelTestCostNotice).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(testModel).toHaveBeenCalledWith({ providerId: "dnslin", modelId: "gpt-5.6-sol" }));
+  });
+
+  it("silently refreshes the saved endpoint after testing without closing a dirty edit sheet", async () => {
+    const user = userEvent.setup();
+    const initial = overviewDto();
+    const refreshed = overviewDto({
+      providers: [{ ...initial.providers[0], baseUrl: "https://updated.example/v1" }],
+    });
+    let loadCount = 0;
+    const getOverviewLoad = vi.fn(async () => overviewLoad(structuredClone(loadCount++ === 0 ? initial : refreshed), readyState));
+    const testModel = vi.fn(async () => ({
+      success: true,
+      providerId: "dnslin",
+      modelId: "gpt-5.6-sol",
+      protocol: "openai-responses" as const,
+      latencyMs: 18,
+      status: 200,
+      message: "模型连接成功",
+    }));
+    renderRoute("/providers/dnslin", {
+      ...unavailableClient,
+      getOverviewLoad,
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        modelTestCostNoticeAccepted: true,
+      }),
+      testModel,
+    });
+
+    const row = (await screen.findByText("gpt-5.6-sol", { exact: true })).closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: "Model 操作 gpt-5.6-sol" }));
+    await user.click(screen.getByRole("menuitem", { name: "编辑" }));
+    const sheet = await screen.findByRole("dialog", { name: "编辑模型" });
+    const name = within(sheet).getByRole("textbox", { name: "名称" });
+    await user.clear(name);
+    await user.type(name, "Dirty name");
+    await user.click(within(sheet).getByRole("button", { name: "测试模型" }));
+
+    await waitFor(() => expect(testModel).toHaveBeenCalledWith({ providerId: "dnslin", modelId: "gpt-5.6-sol" }));
+    await waitFor(() => expect(getOverviewLoad).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("dialog", { name: "编辑模型" })).toBeVisible();
+    expect(within(screen.getByRole("dialog", { name: "编辑模型" })).getByRole("textbox", { name: "名称" })).toHaveValue("Dirty name");
+    expect(within(screen.getByRole("dialog", { name: "编辑模型" })).getByRole("textbox", { name: "最终地址" })).toHaveValue("https://updated.example/v1/responses");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(getOverviewLoad).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not replace a delayed initial overview load when restoring a previous result", async () => {
+    const initialLoad = deferred<OverviewLoad>();
+    const restoredResult = {
+      success: true,
+      providerId: "dnslin",
+      modelId: "gpt-5.6-sol",
+      protocol: "openai-responses" as const,
+      latencyMs: 18,
+      status: 200,
+      message: "模型连接成功",
+    };
+    const overview = overviewDto();
+    let loadCount = 0;
+    const getOverviewLoad = vi.fn(async () => {
+      if (loadCount++ === 0) return initialLoad.promise;
+      return overviewLoad(structuredClone(overview), readyState);
+    });
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad,
+      getModelTestState: async () => ({ running: false, providerId: null, modelId: null, result: restoredResult }),
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        modelTestCostNoticeAccepted: true,
+      }),
+    });
+
+    expect(screen.getByRole("status", { name: "正在读取配置" })).toBeVisible();
+    initialLoad.resolve(overviewLoad(overview, readyState));
+    await screen.findByRole("region", { name: "快速测试" });
+    expect(screen.getByText("模型连接成功")).toBeVisible();
+    await waitFor(() => expect(getOverviewLoad).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(getOverviewLoad).toHaveBeenCalledTimes(2);
+  });
+
+  it("disables saved-model testing when API key mode has no saved key", async () => {
+    const base = overviewDto();
+    const provider = { ...base.providers[0], hasApiKey: false };
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto({ providers: [provider] }), readyState),
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        modelTestCostNoticeAccepted: true,
+      }),
+    });
+
+    const panel = await screen.findByRole("region", { name: "快速测试" });
+    expect(within(panel).getByRole("button", { name: "测试模型" })).toBeDisabled();
+  });
+
+  it("does not expose testing for an unsaved copy sheet", async () => {
+    const user = userEvent.setup();
+    const testModel = vi.fn(unavailableClient.testModel);
+    renderRoute("/providers/dnslin", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        modelTestCostNoticeAccepted: true,
+      }),
+      testModel,
+    });
+
+    const row = (await screen.findByText("gpt-5.6-sol", { exact: true })).closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: "Model 操作 gpt-5.6-sol" }));
+    await user.click(screen.getByRole("menuitem", { name: "复制" }));
+    const sheet = await screen.findByRole("dialog");
+    expect(within(sheet).getByRole("button", { name: "测试模型" })).toBeDisabled();
+    expect(testModel).not.toHaveBeenCalled();
+  });
+
+  it("shows visible progress and disables other saved-model test actions while one is running", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<Awaited<ReturnType<TauriClient["testModel"]>>>();
+    const cancelModelTest = vi.fn(async () => {
+      pending.resolve({
+        success: false,
+        providerId: "dnslin",
+        modelId: "gpt-5.6-sol",
+        protocol: "openai-responses" as const,
+        latencyMs: 5,
+        message: "测试已取消",
+        errorCode: "cancelled",
+      });
+      return true;
+    });
+    const base = overviewDto();
+    const secondModel = { ...base.models[0], id: "gpt-5.6-terra", name: "Terra" };
+    const overview = overviewDto({
+      counts: { ...base.counts, modelCount: 2 },
+      providers: [{ ...base.providers[0], modelCount: 2, models: [base.models[0], secondModel] }],
+      models: [base.models[0], secondModel],
+    });
+    renderRoute("/providers/dnslin", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overview, readyState),
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        modelTestCostNoticeAccepted: true,
+      }),
+      testModel: () => pending.promise,
+      cancelModelTest,
+    });
+
+    const firstRow = (await screen.findByText("gpt-5.6-sol", { exact: true })).closest("tr") as HTMLElement;
+    await user.click(within(firstRow).getByRole("button", { name: "Model 操作 gpt-5.6-sol" }));
+    await user.click(screen.getByRole("menuitem", { name: "测试模型" }));
+    expect(within(firstRow).getByText("测试中…", { exact: true })).toBeVisible();
+    expect(screen.getByRole("button", { name: "取消测试 dnslin/gpt-5.6-sol" })).toBeEnabled();
+
+    const secondRow = (await screen.findByText("gpt-5.6-terra", { exact: true })).closest("tr") as HTMLElement;
+    await user.click(within(secondRow).getByRole("button", { name: "Model 操作 gpt-5.6-terra" }));
+    expect(screen.getByRole("menuitem", { name: "测试模型" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "取消测试 dnslin/gpt-5.6-sol" }));
+    await waitFor(() => expect(cancelModelTest).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole("cell", { name: "测试已取消" })).toBeVisible());
+  });
+
+  it("renders a failed result with the shared danger status", async () => {
+    const user = userEvent.setup();
+    const testModel = vi.fn(async () => ({
+      success: false,
+      providerId: "dnslin",
+      modelId: "gpt-5.6-sol",
+      protocol: "openai-responses" as const,
+      latencyMs: 21,
+      status: 401,
+      message: "Provider 拒绝了认证，请检查 API Key。",
+      errorCode: "http-401",
+    }));
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        modelTestCostNoticeAccepted: true,
+      }),
+      testModel,
+    });
+
+    const panel = await screen.findByRole("region", { name: "快速测试" });
+    await user.click(within(panel).getByRole("button", { name: "测试模型" }));
+    const result = await screen.findByRole("region", { name: "测试结果" });
+    await waitFor(() => expect(result).toHaveTextContent("Provider 拒绝了认证，请检查 API Key。"));
+    expect(result.querySelector(".status-indicator--danger")).not.toBeNull();
   });
 });

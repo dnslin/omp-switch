@@ -4,7 +4,8 @@ import { Link, Navigate, Route, Routes, useNavigate, useParams } from "react-rou
 import { toast, Toaster } from "sonner";
 import { RedetectionLoader } from "../components/redetection-loader";
 import { Button, Card, ConfirmDialog, PageTitle, SearchInput, StatusIndicator } from "../components/ui";
-import { asAppError, useTauriClient, type OverviewModel, type StartupState } from "../lib/tauri-client";
+import { asAppError, useTauriClient, type ModelTestResult, type OverviewModel, type StartupState } from "../lib/tauri-client";
+import { useModelTestStore } from "../store/model-test";
 import { useUiSettings } from "../store/ui-settings";
 import { MainShell } from "./MainShell";
 import { ModelCreateSheet } from "./ModelCreateSheet";
@@ -13,10 +14,13 @@ import { ProviderEditDialog } from "./ProviderEditDialog";
 import { ProvidersPage } from "./ProvidersPage";
 import { ModelRolesPage } from "./ModelRolesPage";
 import { useOverviewLoad } from "./overview-load";
+import { buildModelEndpoint } from "./model-endpoint";
+import { isModelTestable, useModelTestRunner } from "./model-test";
 import { fileStatusView, providerAuthSummary, startupShellStatus, targetConfigurationStatusView, type RowStatus } from "./omp-presentation";
 
 
 const REDETECT_MINIMUM_DURATION_MS = 1200;
+const MODEL_TEST_STATE_POLL_MS = 250;
 
 
 
@@ -355,7 +359,14 @@ const providerDetailLoadCopy = {
 function ProviderDetailPage() {
   const { providerId } = useParams();
   const client = useTauriClient();
-  const { data, error, loading, reload, shellStatus } = useOverviewLoad(providerDetailLoadCopy);
+  const modelTest = useModelTestRunner();
+  const { data, error, loading, reload, refresh, shellStatus } = useOverviewLoad(providerDetailLoadCopy);
+  const refreshedModelTestResult = useRef<ModelTestResult | null>(null);
+  useEffect(() => {
+    if (!modelTest.result || modelTest.result.providerId !== providerId || !data || loading || refreshedModelTestResult.current === modelTest.result) return;
+    refreshedModelTestResult.current = modelTest.result;
+    void refresh();
+  }, [loading, modelTest.result, providerId, refresh]);
   const [editing, setEditing] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const [modelEditor, setModelEditor] = useState<{ mode: "create" | "edit" | "view"; model?: OverviewModel; copy?: boolean } | null>(null);
@@ -364,6 +375,12 @@ function ProviderDetailPage() {
   const [openModelActions, setOpenModelActions] = useState<string | null>(null);
   const provider = data?.providers.find((item) => item.id === providerId);
   const authSummary = provider ? providerAuthSummary(provider) : "不支持的认证";
+  const latestResult = provider && modelTest.result?.providerId === provider.id ? modelTest.result : null;
+  const latestModel = latestResult ? provider?.models.find((model) => model.id === latestResult.modelId) ?? null : null;
+  const activeModel = provider ? provider.models.find((model) => modelTest.isActive(provider.id, model.id)) ?? null : null;
+  const latestEndpoint = latestModel && !latestModel.hasBaseUrlOverride
+    ? buildModelEndpoint(provider?.baseUrl, latestModel.id, latestModel.effectiveApi)
+    : { kind: "not-configured" as const };
   const openedModelsHash = data?.files.models.contentHash ?? null;
   const openedConfigHash = data?.files.config.contentHash ?? null;
   const targetWritable = data?.targetConfiguration.writable ?? false;
@@ -468,16 +485,21 @@ function ProviderDetailPage() {
                   ) : models.map((model) => {
                     const status = modelStatusView(model);
                     const sourceLabel = model.apiSource === "provider" ? "继承 Provider" : model.apiSource === "model" ? "模型指定" : "未配置";
+                    const recentResult = modelTest.result?.providerId === provider.id && modelTest.result.modelId === model.id ? modelTest.result : null;
+                    const testable = isModelTestable(provider, model);
+                    const active = modelTest.isActive(provider.id, model.id);
+                    const busy = modelTest.isBusy(provider.id, model.id);
                     return (
                       <tr key={model.id} className={model.status === "read-only" ? "provider-detail-model-row--readonly" : undefined}>
                         <td><div className="provider-detail-model-cell"><strong>{model.name ?? "未命名模型"}</strong><code>{model.id}</code><span className={`provider-detail-model-status provider-detail-model-status--${status.tone}`}>{status.label}</span></div></td>
                         <td>{model.effectiveApi ?? "未配置"}</td>
                         <td title={sourceLabel}>{sourceLabel}</td>
                         <td>{model.input.length ? model.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : "不支持").join(" · ") : "未配置"}</td>
-                        <td>{formatNumber(model.contextWindow)}</td><td>{formatNumber(model.maxTokens)}</td><td>{model.referenceCount}</td><td>—</td>
+                        <td>{formatNumber(model.contextWindow)}</td><td>{formatNumber(model.maxTokens)}</td><td>{model.referenceCount}</td><td>{active ? <StatusIndicator tone="warning">测试中…</StatusIndicator> : recentResult ? (recentResult.success ? `${recentResult.latencyMs} ms` : recentResult.message) : "—"}</td>
                         <td><div className="provider-detail-model-actions">
                           <Button type="button" variant="secondary" className="provider-detail-model-action" aria-label={`Model 操作 ${model.id}`} aria-expanded={openModelActions === model.id} title="Model 操作" onClick={() => setOpenModelActions((current) => current === model.id ? null : model.id)}><MoreHorizontal aria-hidden="true" size={18} /></Button>
                           {openModelActions === model.id ? <div className="provider-detail-model-menu" role="menu">
+                            <Button type="button" variant="secondary" role="menuitem" disabled={active ? false : !testable || busy} title={!active && !testable ? "当前 Model definition 不满足测试条件" : !active && busy ? "已有模型测试正在进行" : undefined} onClick={() => { setOpenModelActions(null); if (active) modelTest.cancel(); else modelTest.start(provider.id, model.id); }}><SquareTerminal aria-hidden="true" size={15} />{active ? "取消测试" : "测试模型"}</Button>
                             {model.editable ? (
                               <>
                                 <Button type="button" variant="secondary" role="menuitem" onClick={() => { setOpenModelActions(null); setModelEditor({ mode: "edit", model }); }}><Pencil aria-hidden="true" size={15} />编辑</Button>
@@ -494,10 +516,30 @@ function ProviderDetailPage() {
                 </tbody>
               </table>
             </section>
-            <section className="provider-detail-latest-test" aria-label="最近测试"><StatusIndicator tone="neutral">暂无测试结果</StatusIndicator><span>保存后的 Model 测试结果会显示在这里。</span></section>
+            <section className="provider-detail-latest-test" aria-label="最近测试" aria-live="polite">
+              {activeModel ? (
+                <>
+                  <StatusIndicator tone="warning">测试中…</StatusIndicator>
+                  <span>{provider.id}/{activeModel.id}</span>
+                  <span>{activeModel.effectiveApi ?? "—"}</span>
+                  <span>请求进行中</span>
+                  <Button type="button" variant="secondary" className="provider-detail-latest-test__cancel" aria-label={`取消测试 ${provider.id}/${activeModel.id}`} onClick={() => modelTest.cancel()}>取消测试</Button>
+                </>
+              ) : latestResult ? (
+                <>
+                  <StatusIndicator tone={latestResult.success ? "success" : latestResult.errorCode === "cancelled" ? "warning" : "danger"}>{latestResult.message}</StatusIndicator>
+                  <span>{latestResult.providerId}/{latestResult.modelId}</span>
+                  <span>{latestResult.protocol}</span>
+                  <span>{latestEndpoint.kind === "available" ? latestEndpoint.value : "—"}</span>
+                  <span>{latestResult.latencyMs} ms</span>
+                  <span>{latestResult.status ? `HTTP ${latestResult.status}` : "—"}</span>
+                </>
+              ) : <><StatusIndicator tone="neutral">暂无测试结果</StatusIndicator><span>保存后的 Model 测试结果会显示在这里。</span></>}
+            </section>
+            {modelTest.costNoticeDialog}
+            {deletingModel ? <ConfirmDialog title="删除模型？" confirmLabel="删除模型" onCancel={() => setDeletingModel(null)} onConfirm={() => void deleteModel()}><p>将删除 {provider.id}/{deletingModel.id}。</p>{deletingModel.referenceCount > 0 ? <p>检测到 {deletingModel.referenceCount} 个配置引用：{deletingModel.referencePaths.join("、")}。删除会被阻止。</p> : null}{provider.modelCount <= 1 ? <p>这是 Provider 下的最后一个 Model definition，删除会被阻止。</p> : <p>此操作会创建备份。</p>}</ConfirmDialog> : null}
             {editing && openedModelsHash ? <ProviderEditDialog provider={provider} openedModelsHash={openedModelsHash} onDismiss={() => setEditing(false)} onReload={reload} onSaved={async () => reload()} /> : null}
             {modelEditor && openedModelsHash ? <ModelCreateSheet key={`${modelEditor.mode}-${modelEditor.model?.id ?? "new"}-${modelEditor.copy ? "copy" : "edit"}`} provider={provider} openedModelsHash={openedModelsHash} mode={modelEditor.mode} model={modelEditor.model} copy={modelEditor.copy} onDismiss={() => setModelEditor(null)} onReload={reload} onSaved={saveModel} /> : null}
-            {deletingModel ? <ConfirmDialog title="删除模型？" confirmLabel="删除模型" onCancel={() => setDeletingModel(null)} onConfirm={() => void deleteModel()}><p>将删除 {provider.id}/{deletingModel.id}。</p>{deletingModel.referenceCount > 0 ? <p>检测到 {deletingModel.referenceCount} 个配置引用：{deletingModel.referencePaths.join("、")}。删除会被阻止。</p> : null}{provider.modelCount <= 1 ? <p>这是 Provider 下的最后一个 Model definition，删除会被阻止。</p> : <p>此操作会创建备份。</p>}</ConfirmDialog> : null}
           </>
         )}
       </main>
@@ -530,6 +572,8 @@ export function App() {
   const beginHydration = useUiSettings((state) => state.beginHydration);
   const hydrate = useUiSettings((state) => state.hydrate);
   const failHydration = useUiSettings((state) => state.failHydration);
+  const hydrateModelTest = useModelTestStore((state) => state.hydrate);
+  const prepareModelTestHydration = useModelTestStore((state) => state.prepareHydration);
 
   useEffect(() => {
     let active = true;
@@ -544,6 +588,33 @@ export function App() {
     });
     return () => { active = false; };
   }, [beginHydration, client, failHydration, hydrate]);
+
+  useEffect(() => {
+    prepareModelTestHydration();
+    let active = true;
+    let timer: number | undefined;
+    const syncModelTestState = async () => {
+      const generation = useModelTestStore.getState().generation;
+      try {
+        const state = await client.getModelTestState();
+        if (!active) return;
+        hydrateModelTest(state, generation);
+        if (state.running) {
+          timer = window.setTimeout(() => void syncModelTestState(), MODEL_TEST_STATE_POLL_MS);
+        }
+      } catch (cause: unknown) {
+        if (active) {
+          const appError = asAppError(cause, "无法读取模型测试状态");
+          toast.error(appError.message, { description: appError.action });
+        }
+      }
+    };
+    void syncModelTestState();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [client, hydrateModelTest, prepareModelTestHydration]);
 
   return (
     <div className="window">

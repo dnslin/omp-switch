@@ -14,6 +14,7 @@ use tauri_plugin_opener::OpenerExt;
 pub(crate) use crate::model_mutation::{
     CreateModelInput, DeleteModelInput, EditModelInput, ModelMutationResult,
 };
+pub(crate) use crate::model_test::{ModelTestInput, ModelTestResult, ModelTestState};
 pub(crate) use crate::models_write::ModelsWriteFailurePoint;
 pub(crate) use crate::provider_mutation::{
     CreateCustomProviderInput, CreateCustomProviderResult, EditCustomProviderInput,
@@ -33,8 +34,9 @@ use crate::{
     bundled_catalog,
     error::{AppError, io_error_cause},
     model_mutation,
+    model_test::{self, ModelTestCoordinator},
     omp_environment::{OmpEnvironment, SystemOmpEnvironment},
-    overview::{OverviewDto, OverviewReadResult, read_overview},
+    overview::{OverviewDto, OverviewReadResult, read_model_test_configuration, read_overview},
     provider_mutation,
     redaction::redact_diagnostic,
     role_mutation,
@@ -109,7 +111,8 @@ pub struct AppSettings {
     pub theme: Theme,
     pub selected_provider_id: Option<String>,
     pub selected_model_id: Option<String>,
-    pub cost_notice_accepted: bool,
+    #[serde(alias = "costNoticeAccepted")]
+    pub model_test_cost_notice_accepted: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -118,7 +121,6 @@ pub struct UiSettingsUpdate {
     pub theme: Theme,
     pub selected_provider_id: Option<String>,
     pub selected_model_id: Option<String>,
-    pub cost_notice_accepted: bool,
 }
 
 struct OverviewLoadCoordinator {
@@ -239,6 +241,8 @@ pub struct AppService {
     configuration_snapshot: Arc<RwLock<Option<ConfigurationSnapshot>>>,
     detection_lock: Arc<Mutex<()>>,
     overview_load: Arc<OverviewLoadCoordinator>,
+    model_tests: Arc<ModelTestCoordinator>,
+    model_test_timeout: Arc<RwLock<std::time::Duration>>,
     #[cfg(test)]
     models_write_failure: Arc<Mutex<Option<ModelsWriteFailurePoint>>>,
 }
@@ -382,6 +386,8 @@ impl AppService {
             configuration_snapshot: Arc::new(RwLock::new(None)),
             detection_lock: Arc::new(Mutex::new(())),
             overview_load: Arc::new(OverviewLoadCoordinator::default()),
+            model_tests: Arc::new(ModelTestCoordinator::default()),
+            model_test_timeout: Arc::new(RwLock::new(model_test::DEFAULT_TIMEOUT)),
             #[cfg(test)]
             models_write_failure: Arc::new(Mutex::new(None)),
         })
@@ -857,7 +863,12 @@ impl AppService {
             settings.theme = update.theme;
             settings.selected_provider_id = update.selected_provider_id;
             settings.selected_model_id = update.selected_model_id;
-            settings.cost_notice_accepted = update.cost_notice_accepted;
+        })
+    }
+
+    pub fn accept_model_test_cost_notice(&self) -> Result<AppSettings, AppError> {
+        self.update_settings(|settings| {
+            settings.model_test_cost_notice_accepted = true;
         })
     }
 
@@ -966,6 +977,95 @@ impl AppService {
         result
     }
 
+    pub async fn test_model(&self, input: ModelTestInput) -> Result<ModelTestResult, AppError> {
+        if !self.settings.read().model_test_cost_notice_accepted {
+            return Err(AppError::new(
+                "model-test-cost-notice-required",
+                "模型测试费用说明尚未确认。",
+                "请先确认模型测试费用说明后重试。",
+            ));
+        }
+        let guard = self
+            .model_tests
+            .begin(&input.provider_id, &input.model_id)?;
+        let (configuration, timeout) = {
+            let _detection = self.detection_lock.lock();
+            let (target, catalog) = self.prepare_model_test()?;
+            let configuration = read_model_test_configuration(
+                &target,
+                catalog,
+                &input.provider_id,
+                &input.model_id,
+            )?;
+            (configuration, *self.model_test_timeout.read())
+        };
+        let result = model_test::execute(configuration, guard.cancellation(), timeout).await;
+        match result {
+            Ok(result) => {
+                guard.complete(result.clone());
+                Ok(result)
+            }
+            Err(error) => {
+                drop(guard);
+                Err(error)
+            }
+        }
+    }
+
+    pub fn cancel_model_test(&self) -> bool {
+        self.model_tests.cancel()
+    }
+
+    pub fn get_model_test_state(&self) -> ModelTestState {
+        self.model_tests.state()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_model_test_timeout_for_test(&self, timeout: std::time::Duration) {
+        *self.model_test_timeout.write() = timeout;
+    }
+
+    fn prepare_model_test(
+        &self,
+    ) -> Result<
+        (
+            Box<TargetConfigurationDiscovery>,
+            &'static bundled_catalog::BundledCatalog,
+        ),
+        AppError,
+    > {
+        let state = self.detect_omp_internal();
+        let (version, target) = match state {
+            StartupState::OmpReady {
+                version,
+                target_configuration,
+                requires_confirmation: false,
+                ..
+            } => (version, target_configuration),
+            StartupState::OmpReady { .. } => {
+                return Err(AppError::new(
+                    "model-test-confirmation-required",
+                    "尚未确认新的 OMP 与 Target configuration，不能测试模型。",
+                    "请先在设置页面确认 OMP 与 Target configuration 后重试。",
+                ));
+            }
+            _ => {
+                return Err(AppError::new(
+                    "model-test-unavailable",
+                    "无法重新验证 OMP 的 Target configuration。",
+                    "请重新检测或重新选择 OMP。",
+                ));
+            }
+        };
+        let catalog = bundled_catalog::for_version(&version)?.ok_or_else(|| {
+            AppError::new(
+                "model-test-catalog-missing",
+                "当前 OMP 版本没有匹配的 bundled Provider 清单。",
+                "为避免误测内置或未知 Provider，模型测试暂时不可用。",
+            )
+        })?;
+        Ok((target, catalog))
+    }
     fn prepare_role_write(
         &self,
     ) -> Result<
@@ -1269,6 +1369,16 @@ pub fn save_ui_settings(
 }
 
 #[tauri::command]
+pub fn accept_model_test_cost_notice(
+    service: tauri::State<'_, AppService>,
+) -> Result<AppSettings, AppError> {
+    let started_at = Instant::now();
+    let result = service.accept_model_test_cost_notice();
+    log_command_result("accept_model_test_cost_notice", started_at, &result);
+    result
+}
+
+#[tauri::command]
 pub fn create_custom_provider(
     service: tauri::State<'_, AppService>,
     input: CreateCustomProviderInput,
@@ -1331,6 +1441,32 @@ pub fn save_model_roles(
     let result = service.save_model_roles(input);
     log_command_result("save_model_roles", started_at, &result);
     result
+}
+
+#[tauri::command]
+pub async fn test_model(
+    service: tauri::State<'_, AppService>,
+    input: ModelTestInput,
+) -> Result<ModelTestResult, AppError> {
+    let started_at = Instant::now();
+    let result = service.test_model(input).await;
+    log_command_result("test_model", started_at, &result);
+    result
+}
+
+#[tauri::command]
+pub fn cancel_model_test(service: tauri::State<'_, AppService>) -> bool {
+    let cancelled = service.cancel_model_test();
+    tracing::info!(
+        operation = "cancel_model_test",
+        status = if cancelled { "requested" } else { "idle" },
+    );
+    cancelled
+}
+
+#[tauri::command]
+pub fn get_model_test_state(service: tauri::State<'_, AppService>) -> ModelTestState {
+    service.get_model_test_state()
 }
 
 #[tauri::command]
