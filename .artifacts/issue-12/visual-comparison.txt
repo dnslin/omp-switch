@@ -11,7 +11,7 @@ Real Tauri captures:
 - overview-tauri-native-final-1536x961.png
 - provider-detail-tauri-native-final-1536x961.png
 
-Observed:
+- The state captures listed below were regenerated from the final Tauri build after the result panel settled on the six-row layout: model, effective protocol, final URL, latency, status code, and time.
 - Overview preserves the approved sidebar, sync strip, environment grid, metrics strip, two-column quick-test/result area, and shared controls.
 - Provider Detail preserves the approved sidebar, provider header/actions, search row, summary strip, model table, and latest-test strip.
 - Test failure uses the existing latest-test/status language and card geometry; no separate visual language or raw response/body is shown.
@@ -26,7 +26,6 @@ Observed:
 - `provider-detail-test-success-tauri-1536x1024.png`: Provider Detail success result.
 - `model-edit-sheet-test-tauri-1536x1024.png`: saved-model edit Sheet with test entry.
 
-State coverage:
-- Cost notice, running, cancel, success, failure, saved-model edit Sheet and idle page states were exercised through the real Tauri window.
+- State coverage: cost notice, running, cancel, success, failure, saved-model edit Sheet and idle page states were exercised through the real Tauri window. The Overview running, success, and cancelled artifacts above are final-build captures with the six-row result layout.
 - The external configuration change path was exercised with a local hanging/success Mock HTTP service; completion triggers a silent overview refresh without closing the dirty edit Sheet.
 - The final native Tauri captures are 1536×961 logical pixels / 3072×1922 Retina pixels on this macOS display. `src-tauri/tauri.conf.json` requests a 1536×1024 window; macOS reserves 63 logical pixels for native window/system chrome. The comparison therefore uses the real Tauri pixels at the approved 1536 width, excludes native chrome, and checks the page anchors against the 1536×1024 Pencil canvas. No synthetic resize or cross-compiled binary was used.

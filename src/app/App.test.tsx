@@ -3137,9 +3137,25 @@ describe("Model test page seam", () => {
     await waitFor(() => expect(cancelModelTest).toHaveBeenCalledTimes(1));
     expect(await screen.findByText("测试已取消")).toBeVisible();
   });
-  it("keeps a visible terminal state when preflight cancellation rejects the request", async () => {
+  it("reconciles a deferred preflight cancellation before showing the terminal state", async () => {
     const user = userEvent.setup();
+    let rejected = false;
+    let remotePolls = 0;
+    const terminal = {
+      providerId: "dnslin",
+      modelId: "gpt-5.6-sol",
+      message: "测试已取消",
+      errorCode: "cancelled",
+    } as const;
+    const getModelTestState = vi.fn(async () => {
+      if (!rejected) return { running: false, providerId: null, modelId: null, result: null, terminal: null };
+      remotePolls += 1;
+      return remotePolls === 1
+        ? { running: true, providerId: null, modelId: null, result: null, terminal }
+        : { running: false, providerId: null, modelId: null, result: null, terminal };
+    });
     const testModel = vi.fn(async () => {
+      rejected = true;
       throw {
         code: "model-test-cancelled",
         message: "模型测试已取消。",
@@ -3149,6 +3165,7 @@ describe("Model test page seam", () => {
     renderRoute("/overview", {
       ...unavailableClient,
       getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      getModelTestState,
       getUiSettings: async () => ({
         ompExecutablePath: "/usr/local/bin/omp",
         theme: "dark",
@@ -3161,6 +3178,7 @@ describe("Model test page seam", () => {
 
     const panel = await screen.findByRole("region", { name: "快速测试" });
     await user.click(within(panel).getByRole("button", { name: "测试模型" }));
+    await waitFor(() => expect(remotePolls).toBeGreaterThanOrEqual(2), { timeout: 1000 });
     expect(await screen.findByText("测试已取消")).toBeVisible();
     expect(screen.getByRole("region", { name: "测试结果" })).not.toHaveTextContent("模型连接成功");
     expect(testModel).toHaveBeenCalledTimes(1);

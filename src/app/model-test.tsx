@@ -158,15 +158,11 @@ export function useModelTestRunner() {
         return;
       }
       if (error.code === "model-test-cancelled" || error.code === "model-test-timeout") {
-        useModelTestStore.getState().fail({
-          providerId: test.providerId,
-          modelId: test.modelId,
-          message: error.code === "model-test-cancelled" ? "测试已取消" : "模型测试准备超时",
-          errorCode: error.code === "model-test-cancelled" ? "cancelled" : "timeout",
-        });
+        const generation = useModelTestStore.getState().recoverRemote();
         if (error.code === "model-test-timeout") {
           toast.error(error.message, { description: error.action });
         }
+        syncRemoteModelTestState(client, generation);
         return;
       }
       useModelTestStore.getState().fail();
