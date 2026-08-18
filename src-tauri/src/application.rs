@@ -1344,6 +1344,15 @@ impl AppService {
                 Ok(result) => result,
                 Err(_) => Err(AppError::internal("模型测试准备任务失败")),
             };
+            if let Ok(configuration) = result.as_ref() {
+                worker_coordinator.bind(
+                    test_id,
+                    ModelTestBinding {
+                        target_path: configuration.target_path.clone(),
+                        models_hash: configuration.models_hash.clone(),
+                    },
+                );
+            }
             worker_coordinator.finish_preparation(test_id);
             let _ = sender.send(result);
         });

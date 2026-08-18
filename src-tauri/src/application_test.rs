@@ -772,6 +772,35 @@ fn omp_deadline_covers_inherited_output_pipes() {
     assert!(matches!(result, Err(CommandRunError::TimedOut)));
     assert!(started.elapsed() < Duration::from_secs(1));
 }
+
+#[cfg(unix)]
+#[test]
+fn omp_command_output_is_bounded() {
+    let root = tempdir().unwrap();
+    let executable = root.path().join("noisy-omp");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nwhile :; do printf '%8192s' ''; done\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+
+    let environment = SystemOmpEnvironment::new(root.path().join("transactions"));
+    let result = environment.run_with_deadline(
+        &executable,
+        &[],
+        &CancellationToken::new(),
+        Instant::now() + Duration::from_secs(2),
+    );
+
+    assert!(matches!(
+        result,
+        Err(CommandRunError::Io(error))
+            if error.kind() == std::io::ErrorKind::InvalidData
+    ));
+}
 #[cfg(windows)]
 #[test]
 fn omp_deadline_covers_windows_inherited_output_pipes() {
@@ -4510,7 +4539,7 @@ async fn model_test_reloads_saved_openai_completions_and_uses_a_minimal_authenti
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = accept_model_test_connection(&listener);
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
@@ -4665,6 +4694,25 @@ struct CapturedModelTestRequest {
     body: serde_json::Value,
 }
 
+fn accept_model_test_connection(listener: &TcpListener) -> TcpStream {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("mock server accept failed: {error}"),
+        }
+    }
+}
+
 fn start_model_test_server(
     request_count: usize,
 ) -> (String, Receiver<CapturedModelTestRequest>, JoinHandle<()>) {
@@ -4673,7 +4721,7 @@ fn start_model_test_server(
     let (sender, receiver) = mpsc::channel();
     let handle = thread::spawn(move || {
         for _ in 0..request_count {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = accept_model_test_connection(&listener);
             let request = read_model_test_request(&mut stream);
             let response = if request.target.starts_with("/v1/chat/completions") {
                 r#"{"choices":[{"message":{"content":"OK"}}]}"#
@@ -4946,7 +4994,7 @@ async fn model_test_classifies_base_dns_connection_and_tls_failures_safely() {
     let unused_address = unused_listener.local_addr().unwrap();
     drop(unused_listener);
     let connection = ModelTestConfiguration {
-        base_url: format!("http://{unused_address}/v1"),
+        base_url: format!("http://{unused_address}/tls-provider/v1"),
         ..direct_model_test_configuration()
     };
     let connection_result =
@@ -4958,12 +5006,14 @@ async fn model_test_classifies_base_dns_connection_and_tls_failures_safely() {
     let tls_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tls_address = tls_listener.local_addr().unwrap();
     let tls_server = thread::spawn(move || {
-        let (mut stream, _) = tls_listener.accept().unwrap();
+        let mut stream = accept_model_test_connection(&tls_listener);
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
         let mut buffer = [0_u8; 1024];
         let _ = stream.read(&mut buffer);
+        let _ = stream.write_all(b"not tls");
     });
     let tls = ModelTestConfiguration {
         base_url: format!("https://{tls_address}/v1"),
@@ -4976,7 +5026,6 @@ async fn model_test_classifies_base_dns_connection_and_tls_failures_safely() {
     assert_eq!(tls_result.error_code.as_deref(), Some("tls"));
     tls_server.join().unwrap();
 }
-
 fn direct_model_test_configuration() -> ModelTestConfiguration {
     ModelTestConfiguration {
         provider_id: "provider".to_owned(),
@@ -4998,7 +5047,7 @@ fn start_redirect_model_test_server() -> (String, Arc<AtomicBool>, JoinHandle<()
     let forwarded = Arc::new(AtomicBool::new(false));
     let forwarded_in_server = Arc::clone(&forwarded);
     let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = accept_model_test_connection(&listener);
         let _ = read_model_test_request(&mut stream);
         write!(
             stream,
@@ -5027,7 +5076,7 @@ fn start_oversized_model_test_server() -> (String, JoinHandle<()>) {
     let address = format!("http://{}", listener.local_addr().unwrap());
     let body = "x".repeat(crate::model_test::MAX_RESPONSE_BYTES + 1);
     let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = accept_model_test_connection(&listener);
         let _ = read_model_test_request(&mut stream);
         let _ = write!(
             stream,
@@ -5044,7 +5093,7 @@ fn start_status_model_test_server(responses: Vec<(u16, &'static str)>) -> (Strin
     let address = format!("http://{}", listener.local_addr().unwrap());
     let handle = thread::spawn(move || {
         for (status, response) in responses {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = accept_model_test_connection(&listener);
             let _ = read_model_test_request(&mut stream);
             write!(
                 stream,

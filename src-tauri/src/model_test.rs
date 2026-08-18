@@ -85,6 +85,13 @@ struct CoordinatorState {
     result: Option<ModelTestResult>,
     result_binding: Option<ModelTestBinding>,
     terminal: Option<ModelTestTerminal>,
+    terminal_binding: Option<ModelTestBinding>,
+    latest_overview: Option<ObservedOverviewBinding>,
+}
+
+struct ObservedOverviewBinding {
+    target_path: String,
+    models_hash: Option<String>,
 }
 
 struct ActiveModelTest {
@@ -129,18 +136,28 @@ impl ModelTestCoordinator {
             ));
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let binding = state.latest_overview.as_ref().and_then(|overview| {
+            overview
+                .models_hash
+                .as_ref()
+                .map(|models_hash| ModelTestBinding {
+                    target_path: overview.target_path.clone(),
+                    models_hash: models_hash.clone(),
+                })
+        });
         let cancellation = CancellationToken::new();
         state.active = Some(ActiveModelTest {
             id,
             provider_id: provider_id.to_owned(),
             model_id: model_id.to_owned(),
             cancellation: cancellation.clone(),
-            binding: None,
+            binding,
             invalidated: false,
             preparation_finished: false,
             terminal_deferred: false,
         });
         state.terminal = None;
+        state.terminal_binding = None;
         Ok(ModelTestGuard {
             coordinator: self.clone(),
             id,
@@ -166,8 +183,15 @@ impl ModelTestCoordinator {
 
     pub(crate) fn bind(&self, id: u64, binding: ModelTestBinding) {
         let mut state = self.state.lock();
-        if let Some(active) = state.active.as_mut().filter(|active| active.id == id) {
-            active.binding = Some(binding);
+        let deferred = if let Some(active) = state.active.as_mut().filter(|active| active.id == id)
+        {
+            active.binding = Some(binding.clone());
+            active.terminal_deferred
+        } else {
+            false
+        };
+        if deferred && state.terminal.is_some() {
+            state.terminal_binding = Some(binding);
         }
     }
     pub(crate) fn defer_terminal(&self, id: u64, terminal: ModelTestTerminal) {
@@ -179,9 +203,15 @@ impl ModelTestCoordinator {
             } else {
                 false
             };
+        let terminal_binding = state
+            .active
+            .as_ref()
+            .filter(|active| active.id == id)
+            .and_then(|active| active.binding.clone());
         state.result = None;
         state.result_binding = None;
         state.terminal = Some(terminal);
+        state.terminal_binding = terminal_binding;
         if should_release {
             state.active = None;
         }
@@ -189,15 +219,24 @@ impl ModelTestCoordinator {
 
     pub(crate) fn finish_preparation(&self, id: u64) {
         let mut state = self.state.lock();
+        let mut terminal_binding = None;
         let should_release =
             if let Some(active) = state.active.as_mut().filter(|active| active.id == id) {
                 active.preparation_finished = true;
-                active.terminal_deferred
+                if active.terminal_deferred {
+                    terminal_binding = active.binding.clone();
+                    true
+                } else {
+                    false
+                }
             } else {
                 false
             };
         if should_release {
             state.active = None;
+            if state.terminal.is_some() {
+                state.terminal_binding = terminal_binding;
+            }
         }
     }
 
@@ -210,6 +249,8 @@ impl ModelTestCoordinator {
         state.result = None;
         state.result_binding = None;
         state.terminal = None;
+        state.terminal_binding = None;
+        state.latest_overview = None;
     }
 
     pub(crate) fn invalidate_if_changed(&self, target_path: &str, models_hash: Option<&str>) {
@@ -227,7 +268,16 @@ impl ModelTestCoordinator {
                 binding.target_path != target_path
                     || Some(binding.models_hash.as_str()) != models_hash
             });
-        if active_changed || result_changed {
+        let terminal_changed = state.terminal.is_some()
+            && state.terminal_binding.as_ref().is_none_or(|binding| {
+                binding.target_path != target_path
+                    || Some(binding.models_hash.as_str()) != models_hash
+            });
+        state.latest_overview = Some(ObservedOverviewBinding {
+            target_path: target_path.to_owned(),
+            models_hash: models_hash.map(str::to_owned),
+        });
+        if active_changed || result_changed || terminal_changed {
             if let Some(active) = state.active.as_mut() {
                 active.invalidated = true;
                 active.cancellation.cancel();
@@ -235,9 +285,9 @@ impl ModelTestCoordinator {
             state.result = None;
             state.result_binding = None;
             state.terminal = None;
+            state.terminal_binding = None;
         }
     }
-
     pub(crate) fn state(&self) -> ModelTestState {
         let state = self.state.lock();
         ModelTestState {
@@ -264,17 +314,24 @@ impl ModelTestCoordinator {
                 state.result = Some(result);
                 state.result_binding = binding;
                 state.terminal = None;
+                state.terminal_binding = None;
             }
         }
     }
 
     fn fail(&self, id: u64, terminal: ModelTestTerminal) {
         let mut state = self.state.lock();
+        let terminal_binding = state
+            .active
+            .as_ref()
+            .filter(|active| active.id == id)
+            .and_then(|active| active.binding.clone());
         if state.active.as_ref().is_some_and(|active| active.id == id) {
             state.active = None;
             state.result = None;
             state.result_binding = None;
             state.terminal = Some(terminal);
+            state.terminal_binding = terminal_binding;
         }
     }
 
@@ -695,10 +752,12 @@ fn classify_request_error(error: &reqwest::Error) -> RequestFailure {
     if error.is_timeout() {
         return RequestFailure::Timeout;
     }
-    let mut diagnostic = error.to_string();
+    let mut diagnostic = String::new();
     let mut source = error.source();
     while let Some(cause) = source {
-        diagnostic.push(' ');
+        if !diagnostic.is_empty() {
+            diagnostic.push(' ');
+        }
         diagnostic.push_str(&cause.to_string());
         source = cause.source();
     }
@@ -713,6 +772,9 @@ fn classify_request_error(error: &reqwest::Error) -> RequestFailure {
     if diagnostic.contains("tls")
         || diagnostic.contains("ssl")
         || diagnostic.contains("certificate")
+        || diagnostic.contains("invalidcontenttype")
+        || diagnostic.contains("corrupt message")
+        || diagnostic.contains("handshake")
     {
         return RequestFailure::Tls;
     }
@@ -867,6 +929,7 @@ mod tests {
             target_path: "/tmp/target".to_owned(),
             models_hash: "models-v1".to_owned(),
         };
+
         guard.bind(binding.clone());
         guard.complete(
             ModelTestResult {
@@ -888,6 +951,81 @@ mod tests {
         assert!(coordinator.state().result.is_none());
         assert!(!coordinator.state().running);
     }
+    #[test]
+    fn invalidates_bound_terminal_when_target_or_models_hash_changes() {
+        let coordinator = ModelTestCoordinator::default();
+        let guard = coordinator.begin("provider", "model").unwrap();
+        let binding = ModelTestBinding {
+            target_path: "/tmp/target".to_owned(),
+            models_hash: "models-v1".to_owned(),
+        };
+        guard.bind(binding);
+        guard.fail(ModelTestTerminal {
+            provider_id: "provider".to_owned(),
+            model_id: "model".to_owned(),
+            message: "测试超时".to_owned(),
+            error_code: "timeout".to_owned(),
+        });
+
+        coordinator.invalidate_if_changed("/tmp/target", Some("models-v1"));
+        assert!(coordinator.state().terminal.is_some());
+
+        coordinator.invalidate_if_changed("/tmp/target", Some("models-v2"));
+        assert!(coordinator.state().terminal.is_none());
+    }
+    #[test]
+    fn deferred_terminal_uses_latest_overview_binding() {
+        let coordinator = ModelTestCoordinator::default();
+        coordinator.invalidate_if_changed("/tmp/target", Some("models-v1"));
+        let guard = coordinator.begin("provider", "model").unwrap();
+        coordinator.defer_terminal(
+            guard.id(),
+            ModelTestTerminal {
+                provider_id: "provider".to_owned(),
+                model_id: "model".to_owned(),
+                message: "测试已取消".to_owned(),
+                error_code: "cancelled".to_owned(),
+            },
+        );
+
+        coordinator.invalidate_if_changed("/tmp/target", Some("models-v1"));
+        assert!(coordinator.state().terminal.is_some());
+
+        coordinator.invalidate_if_changed("/tmp/target", Some("models-v2"));
+        assert!(coordinator.state().terminal.is_none());
+        drop(guard);
+    }
+
+    #[test]
+    fn worker_binding_is_attached_before_deferred_lease_release() {
+        let coordinator = ModelTestCoordinator::default();
+        let guard = coordinator.begin("provider", "model").unwrap();
+        coordinator.defer_terminal(
+            guard.id(),
+            ModelTestTerminal {
+                provider_id: "provider".to_owned(),
+                model_id: "model".to_owned(),
+                message: "模型测试准备超时".to_owned(),
+                error_code: "timeout".to_owned(),
+            },
+        );
+        coordinator.bind(
+            guard.id(),
+            ModelTestBinding {
+                target_path: "/tmp/target".to_owned(),
+                models_hash: "models-v1".to_owned(),
+            },
+        );
+        coordinator.finish_preparation(guard.id());
+
+        assert!(!coordinator.state().running);
+        coordinator.invalidate_if_changed("/tmp/target", Some("models-v1"));
+        assert!(coordinator.state().terminal.is_some());
+
+        coordinator.invalidate_if_changed("/tmp/target", Some("models-v2"));
+        assert!(coordinator.state().terminal.is_none());
+    }
+
     #[test]
     fn invalidates_unbound_results_when_overview_refreshes() {
         let coordinator = ModelTestCoordinator::default();

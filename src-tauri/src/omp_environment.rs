@@ -41,6 +41,8 @@ pub struct CommandOutput {
     pub stderr: String,
 }
 
+const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
+
 #[derive(Debug)]
 pub enum CommandRunError {
     Io(io::Error),
@@ -332,10 +334,24 @@ impl OmpEnvironment for SystemOmpEnvironment {
                 )));
             }
         };
-        let stdout_reader = thread::spawn(move || read_pipe(stdout));
-        let stderr_reader = thread::spawn(move || read_pipe(stderr));
+        let mut stdout_reader = Some(thread::spawn(move || read_pipe(stdout)));
+        let mut stderr_reader = Some(thread::spawn(move || read_pipe(stderr)));
+        let mut stdout = None;
+        let mut stderr = None;
 
         let status = loop {
+            if let Err(error) = collect_finished_pipe(&mut stdout_reader, &mut stdout) {
+                terminate_child(&mut child, process_id, &process_tree);
+                drop(stdout_reader);
+                drop(stderr_reader);
+                return Err(error);
+            }
+            if let Err(error) = collect_finished_pipe(&mut stderr_reader, &mut stderr) {
+                terminate_child(&mut child, process_id, &process_tree);
+                drop(stdout_reader);
+                drop(stderr_reader);
+                return Err(error);
+            }
             if cancellation.is_cancelled() {
                 terminate_child(&mut child, process_id, &process_tree);
 
@@ -362,20 +378,40 @@ impl OmpEnvironment for SystemOmpEnvironment {
                 }
             }
         };
-        let stdout = match join_pipe_until(stdout_reader, cancellation, deadline) {
-            Ok(stdout) => stdout,
-            Err(error) => {
-                terminate_child(&mut child, process_id, &process_tree);
+        let stdout = match stdout {
+            Some(stdout) => stdout,
+            None => {
+                let Some(reader) = stdout_reader.take() else {
+                    return Err(CommandRunError::Io(io::Error::other(
+                        "OMP stdout reader unavailable",
+                    )));
+                };
+                match join_pipe_until(reader, cancellation, deadline) {
+                    Ok(stdout) => stdout,
+                    Err(error) => {
+                        terminate_child(&mut child, process_id, &process_tree);
 
-                return Err(error);
+                        return Err(error);
+                    }
+                }
             }
         };
-        let stderr = match join_pipe_until(stderr_reader, cancellation, deadline) {
-            Ok(stderr) => stderr,
-            Err(error) => {
-                terminate_child(&mut child, process_id, &process_tree);
+        let stderr = match stderr {
+            Some(stderr) => stderr,
+            None => {
+                let Some(reader) = stderr_reader.take() else {
+                    return Err(CommandRunError::Io(io::Error::other(
+                        "OMP stderr reader unavailable",
+                    )));
+                };
+                match join_pipe_until(reader, cancellation, deadline) {
+                    Ok(stderr) => stderr,
+                    Err(error) => {
+                        terminate_child(&mut child, process_id, &process_tree);
 
-                return Err(error);
+                        return Err(error);
+                    }
+                }
             }
         };
         Ok(CommandOutput {
@@ -416,8 +452,34 @@ impl OmpEnvironment for SystemOmpEnvironment {
 
 fn read_pipe(mut pipe: impl Read) -> io::Result<Vec<u8>> {
     let mut output = Vec::new();
-    pipe.read_to_end(&mut output)?;
-    Ok(output)
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = pipe.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(output);
+        }
+        if output.len().saturating_add(read) > MAX_COMMAND_OUTPUT_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "OMP command output exceeded the limit",
+            ));
+        }
+        output.extend_from_slice(&buffer[..read]);
+    }
+}
+
+fn collect_finished_pipe(
+    reader: &mut Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+    output: &mut Option<Vec<u8>>,
+) -> Result<(), CommandRunError> {
+    if output.is_some() || !reader.as_ref().is_some_and(|reader| reader.is_finished()) {
+        return Ok(());
+    }
+    let Some(reader) = reader.take() else {
+        return Ok(());
+    };
+    *output = Some(join_pipe(reader).map_err(CommandRunError::Io)?);
+    Ok(())
 }
 
 fn join_pipe_until(
