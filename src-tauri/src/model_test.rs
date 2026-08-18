@@ -94,12 +94,15 @@ struct ActiveModelTest {
     cancellation: CancellationToken,
     binding: Option<ModelTestBinding>,
     invalidated: bool,
+    preparation_finished: bool,
+    terminal_deferred: bool,
 }
 
 pub(crate) struct ModelTestGuard {
     coordinator: ModelTestCoordinator,
     id: u64,
     cancellation: CancellationToken,
+    deferred_release: bool,
 }
 
 impl Default for ModelTestCoordinator {
@@ -134,12 +137,15 @@ impl ModelTestCoordinator {
             cancellation: cancellation.clone(),
             binding: None,
             invalidated: false,
+            preparation_finished: false,
+            terminal_deferred: false,
         });
         state.terminal = None;
         Ok(ModelTestGuard {
             coordinator: self.clone(),
             id,
             cancellation,
+            deferred_release: false,
         })
     }
 
@@ -162,6 +168,36 @@ impl ModelTestCoordinator {
         let mut state = self.state.lock();
         if let Some(active) = state.active.as_mut().filter(|active| active.id == id) {
             active.binding = Some(binding);
+        }
+    }
+    pub(crate) fn defer_terminal(&self, id: u64, terminal: ModelTestTerminal) {
+        let mut state = self.state.lock();
+        let should_release =
+            if let Some(active) = state.active.as_mut().filter(|active| active.id == id) {
+                active.terminal_deferred = true;
+                active.preparation_finished
+            } else {
+                false
+            };
+        state.result = None;
+        state.result_binding = None;
+        state.terminal = Some(terminal);
+        if should_release {
+            state.active = None;
+        }
+    }
+
+    pub(crate) fn finish_preparation(&self, id: u64) {
+        let mut state = self.state.lock();
+        let should_release =
+            if let Some(active) = state.active.as_mut().filter(|active| active.id == id) {
+                active.preparation_finished = true;
+                active.terminal_deferred
+            } else {
+                false
+            };
+        if should_release {
+            state.active = None;
         }
     }
 
@@ -254,6 +290,9 @@ impl ModelTestGuard {
     pub(crate) fn cancellation(&self) -> CancellationToken {
         self.cancellation.clone()
     }
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
 
     pub(crate) fn bind(&self, binding: ModelTestBinding) {
         self.coordinator.bind(self.id, binding);
@@ -265,11 +304,15 @@ impl ModelTestGuard {
     pub(crate) fn fail(self, terminal: ModelTestTerminal) {
         self.coordinator.fail(self.id, terminal);
     }
+    pub(crate) fn keep_lease(mut self) {
+        self.deferred_release = true;
+    }
 }
-
 impl Drop for ModelTestGuard {
     fn drop(&mut self) {
-        self.coordinator.abandon(self.id);
+        if !self.deferred_release {
+            self.coordinator.abandon(self.id);
+        }
     }
 }
 

@@ -354,6 +354,20 @@ struct ProviderWriteContext {
     target: Box<TargetConfigurationDiscovery>,
     catalog: &'static bundled_catalog::BundledCatalog,
 }
+struct ModelTestPreparationError {
+    error: AppError,
+    terminal_deferred: bool,
+}
+
+impl From<AppError> for ModelTestPreparationError {
+    fn from(error: AppError) -> Self {
+        Self {
+            error,
+            terminal_deferred: false,
+        }
+    }
+}
+
 impl AppService {
     pub fn new(settings_path: PathBuf) -> Result<Self, AppError> {
         let transaction_root = settings_path
@@ -1162,12 +1176,17 @@ impl AppService {
                 input.provider_id.clone(),
                 input.model_id.clone(),
                 guard.cancellation(),
+                guard.id(),
                 deadline,
             )
             .await
         {
             Ok(configuration) => configuration,
-            Err(error) => {
+            Err(preparation_error) => {
+                let ModelTestPreparationError {
+                    error,
+                    terminal_deferred,
+                } = preparation_error;
                 let terminal = match error.code {
                     "model-test-cancelled" => Some(model_test::ModelTestTerminal {
                         provider_id: input.provider_id.clone(),
@@ -1183,7 +1202,9 @@ impl AppService {
                     }),
                     _ => None,
                 };
-                if let Some(terminal) = terminal {
+                if terminal_deferred {
+                    guard.keep_lease();
+                } else if let Some(terminal) = terminal {
                     guard.fail(terminal);
                 } else {
                     self.model_tests.invalidate();
@@ -1273,10 +1294,15 @@ impl AppService {
         provider_id: String,
         model_id: String,
         cancellation: CancellationToken,
+        test_id: u64,
         deadline: Instant,
-    ) -> Result<crate::overview::ModelTestConfiguration, AppError> {
+    ) -> Result<crate::overview::ModelTestConfiguration, ModelTestPreparationError> {
         let service = self.clone();
         let preparation_cancellation = cancellation.clone();
+        let terminal_provider_id = provider_id.clone();
+        let terminal_model_id = model_id.clone();
+        let (sender, mut receiver) = tokio::sync::oneshot::channel();
+        let worker_coordinator = service.model_tests.clone();
         let preparation = tokio::task::spawn_blocking(move || {
             let (target, catalog) = {
                 let _detection = loop {
@@ -1313,30 +1339,61 @@ impl AppService {
                 deadline,
             )
         });
-        let mut preparation = preparation;
-        let preparation = tokio::select! {
-            result = &mut preparation => match result {
+        tokio::spawn(async move {
+            let result = match preparation.await {
                 Ok(result) => result,
                 Err(_) => Err(AppError::internal("模型测试准备任务失败")),
+            };
+            worker_coordinator.finish_preparation(test_id);
+            let _ = sender.send(result);
+        });
+
+        let preparation = tokio::select! {
+            result = &mut receiver => match result {
+                Ok(result) => result.map_err(ModelTestPreparationError::from),
+                Err(_) => Err(ModelTestPreparationError::from(AppError::internal("模型测试准备任务失败"))),
             },
             _ = cancellation.cancelled() => {
-                preparation.abort();
-                Err(AppError::new(
-                    "model-test-cancelled",
-                    "模型测试已取消。",
-                    "无需继续操作。",
-                ))
+                self.model_tests.defer_terminal(
+                    test_id,
+                    model_test::ModelTestTerminal {
+                        provider_id: terminal_provider_id.clone(),
+                        model_id: terminal_model_id.clone(),
+                        message: "测试已取消".to_owned(),
+                        error_code: "cancelled".to_owned(),
+                    },
+                );
+                return Err(ModelTestPreparationError {
+                    error: AppError::new(
+                        "model-test-cancelled",
+                        "模型测试已取消。",
+                        "无需继续操作。",
+                    ),
+                    terminal_deferred: true,
+                });
             },
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                preparation.abort();
-                Err(AppError::new(
-                    "model-test-timeout",
-                    "模型测试准备超时。",
-                    "请检查 OMP 可执行文件和配置目录后重试。",
-                ))
-            },
+                self.model_tests.defer_terminal(
+                    test_id,
+                    model_test::ModelTestTerminal {
+                        provider_id: terminal_provider_id,
+                        model_id: terminal_model_id,
+                        message: "模型测试准备超时".to_owned(),
+                        error_code: "timeout".to_owned(),
+                    },
+                );
+                return Err(ModelTestPreparationError {
+                    error: AppError::new(
+                        "model-test-timeout",
+                        "模型测试准备超时。",
+                        "请检查 OMP 可执行文件和配置目录后重试。",
+                    ),
+                    terminal_deferred: true,
+                });
+            }
         };
-        Self::ensure_model_test_window(&cancellation, deadline)?;
+        Self::ensure_model_test_window(&cancellation, deadline)
+            .map_err(ModelTestPreparationError::from)?;
         preparation
     }
 

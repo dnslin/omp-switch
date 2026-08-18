@@ -4511,6 +4511,9 @@ async fn model_test_reloads_saved_openai_completions_and_uses_a_minimal_authenti
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
         let mut request = Vec::new();
         let mut buffer = [0_u8; 4096];
         loop {
@@ -4956,6 +4959,9 @@ async fn model_test_classifies_base_dns_connection_and_tls_failures_safely() {
     let tls_address = tls_listener.local_addr().unwrap();
     let tls_server = thread::spawn(move || {
         let (mut stream, _) = tls_listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
         let mut buffer = [0_u8; 1024];
         let _ = stream.read(&mut buffer);
     });
@@ -5274,6 +5280,12 @@ async fn model_test_cancels_and_times_out_a_hanging_omp_preflight() {
     let cancelled = first.await.unwrap().unwrap_err();
     assert_eq!(cancelled.code, "model-test-cancelled");
     assert!(started.elapsed() < Duration::from_secs(1));
+    for _ in 0..100 {
+        if !service.get_model_test_state().running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     let cancelled_state = service.get_model_test_state();
     assert!(!cancelled_state.running);
     assert_eq!(
@@ -5288,6 +5300,12 @@ async fn model_test_cancels_and_times_out_a_hanging_omp_preflight() {
     let timed_out = service.test_model(input).await.unwrap_err();
     assert_eq!(timed_out.code, "model-test-timeout");
     assert!(started.elapsed() < Duration::from_secs(1));
+    for _ in 0..100 {
+        if !service.get_model_test_state().running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     let timed_out_state = service.get_model_test_state();
     assert!(!timed_out_state.running);
     assert_eq!(
@@ -5297,6 +5315,60 @@ async fn model_test_cancels_and_times_out_a_hanging_omp_preflight() {
             .map(|terminal| terminal.error_code.as_str()),
         Some("timeout")
     );
+}
+
+#[tokio::test]
+async fn model_test_keeps_lease_until_blocking_preflight_worker_exits() {
+    let root = tempdir().unwrap();
+    let target = root.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let release_preflight = Arc::new(Barrier::new(2));
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.clone()),
+        inspect_real_target: true,
+        transaction_root: root.path().join("transactions"),
+        block_first_version: Some((release_preflight.clone(), Arc::new(AtomicBool::new(false)))),
+        ..FakeOmpEnvironment::default()
+    });
+    let service = service_with(environment.clone(), None);
+    service.accept_model_test_cost_notice().unwrap();
+    service.set_model_test_timeout_for_test(Duration::from_secs(2));
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "blocked-provider",
+        "modelId": "blocked-model"
+    }))
+    .unwrap();
+
+    let first_service = service.clone();
+    let first_input = input.clone();
+    let first = tokio::spawn(async move { first_service.test_model(first_input).await });
+    for _ in 0..100 {
+        if !environment.calls().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(!environment.calls().is_empty());
+    assert!(service.cancel_model_test());
+    let cancelled = first.await.unwrap().unwrap_err();
+    assert_eq!(cancelled.code, "model-test-cancelled");
+
+    let busy = service.test_model(input.clone()).await.unwrap_err();
+    assert_eq!(busy.code, "model-test-busy");
+
+    release_preflight.wait();
+    for _ in 0..100 {
+        if !service.get_model_test_state().running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(!service.get_model_test_state().running);
+    let retry = service.test_model(input).await.unwrap_err();
+    assert_ne!(retry.code, "model-test-busy");
 }
 
 #[tokio::test]
