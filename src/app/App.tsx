@@ -3,11 +3,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useNavigate, useParams } from "react-router";
 import { toast, Toaster } from "sonner";
 import { RedetectionLoader } from "../components/redetection-loader";
-import { Button, Card, PageTitle, StatusIndicator } from "../components/ui";
+import { Button, Card, PageTitle, SearchInput, StatusIndicator } from "../components/ui";
 import { asAppError, useTauriClient, type StartupState } from "../lib/tauri-client";
 import { useUiSettings } from "../store/ui-settings";
 import { MainShell } from "./MainShell";
 import { OverviewPage } from "./OverviewPage";
+import { ProviderEditDialog } from "./ProviderEditDialog";
 import { ProvidersPage } from "./ProvidersPage";
 import { useOverviewLoad } from "./overview-load";
 import { fileStatusView, providerAuthSummary, startupShellStatus, targetConfigurationStatusView, type RowStatus } from "./omp-presentation";
@@ -365,13 +366,23 @@ function PlaceholderPage({ page }: { page: keyof typeof routeCopy }) {
 function ProviderDetailPage() {
   const { providerId } = useParams();
   const { data, error, loading, reload, shellStatus } = useOverviewLoad(providerDetailLoadCopy);
+  const [editing, setEditing] = useState(false);
+  const [modelSearch, setModelSearch] = useState("");
   const provider = data?.providers.find((item) => item.id === providerId);
   const authSummary = provider ? providerAuthSummary(provider) : "不支持的认证";
+  const openedModelsHash = data?.files.models.contentHash ?? null;
+  const targetWritable = data?.targetConfiguration.writable ?? false;
+  const normalizedSearch = modelSearch.trim().toLocaleLowerCase();
+  const models = provider?.models.filter((model) => [
+    model.id,
+    model.name,
+    model.effectiveApi,
+    model.readOnlyReason,
+  ].some((value) => value?.toLocaleLowerCase().includes(normalizedSearch))) ?? [];
 
   return (
     <MainShell status={shellStatus}>
       <main className="provider-detail-page" aria-busy={loading}>
-        <Link className="provider-detail-back" to="/providers">← <span>Providers</span></Link>
         {loading ? (
           <section className="provider-detail-loading" role="status" aria-live="polite">正在读取 Provider…</section>
         ) : error ? (
@@ -386,38 +397,101 @@ function ProviderDetailPage() {
           </section>
         ) : (
           <>
-            <header className="provider-detail-heading">
-              <h1>{provider.id}</h1>
-              <code>{provider.baseUrl ?? "未配置地址"}</code>
+            <header className="provider-detail-top">
+              <div className="provider-detail-identity">
+                <Link className="provider-detail-back" to="/providers">← <span>Providers</span></Link>
+                <h1>{provider.id}</h1>
+                <code>{provider.baseUrl ?? "未配置地址"}</code>
+              </div>
+              <div className="provider-detail-actions">
+                <Button
+                  type="button"
+                  disabled={!provider.editable || !openedModelsHash || !targetWritable}
+                  onClick={() => setEditing(true)}
+                >
+                  编辑 Provider
+                </Button>
+                <Button type="button" variant="secondary" className="provider-detail-delete" disabled>
+                  删除
+                </Button>
+              </div>
             </header>
+            {!provider.editable ? (
+              <p className="provider-detail-readonly" role="status">{provider.readOnlyReason ?? "当前 Provider 只能查看。"}</p>
+            ) : null}
+            <section className="provider-detail-search-row" aria-label="Model 操作">
+              <SearchInput
+                name="model-search"
+                aria-label="搜索 Model ID"
+                value={modelSearch}
+                onChange={(event) => setModelSearch(event.target.value)}
+                placeholder="搜索 Model ID…"
+              />
+              <Button type="button" disabled>新增模型</Button>
+            </section>
             <section className="provider-detail-summary" aria-label="Provider 摘要">
-              <span>默认协议</span><strong>{provider.defaultApi ?? "由模型指定"}</strong>
-              <span>认证</span><strong>{authSummary}</strong>
-              <span>模型</span><strong>{provider.modelCount}</strong>
-              <span>状态</span><StatusIndicator tone={provider.editable ? "success" : "warning"}>{provider.editable ? "正常" : "只读"}</StatusIndicator>
+              <div><span>默认协议</span><strong>{provider.defaultApi ?? "由模型指定"}</strong></div>
+              <div><span>认证</span><strong>{authSummary}</strong></div>
+              <div><span>模型</span><strong>{provider.modelCount}</strong></div>
+              <div><span>状态</span><StatusIndicator tone={provider.editable ? "success" : "warning"}>{provider.editable ? "正常" : "只读"}</StatusIndicator></div>
             </section>
             <section className="provider-detail-models" aria-labelledby="provider-detail-models-title">
-              <h2 id="provider-detail-models-title">模型</h2>
+              <h2 id="provider-detail-models-title" className="provider-detail-visually-hidden">模型</h2>
               <table>
-                <thead><tr><th scope="col">名称 / Model ID</th><th scope="col">有效协议</th><th scope="col">能力</th><th scope="col">Context</th><th scope="col">Max Tokens</th></tr></thead>
+                <thead>
+                  <tr>
+                    <th scope="col">名称 / Model ID</th>
+                    <th scope="col">有效协议</th>
+                    <th scope="col">来源</th>
+                    <th scope="col">能力</th>
+                    <th scope="col">Context</th>
+                    <th scope="col">Max Tokens</th>
+                    <th scope="col">引用</th>
+                    <th scope="col">最近测试</th>
+                    <th scope="col">操作</th>
+                  </tr>
+                </thead>
                 <tbody>
-                  {provider.models.map((model) => (
+                  {models.length === 0 ? (
+                    <tr><td className="provider-detail-models-empty" colSpan={9}>没有匹配的 Model definition</td></tr>
+                  ) : models.map((model) => (
                     <tr key={model.id}>
                       <td><strong>{model.name ?? "未命名模型"}</strong><code>{model.id}</code></td>
                       <td>{model.effectiveApi ?? "未配置"}</td>
-                      <td>{model.input.join(", ") || "未配置"}</td>
-                      <td>{model.contextWindow?.toLocaleString() ?? "未配置"}</td>
-                      <td>{model.maxTokens?.toLocaleString() ?? "未配置"}</td>
+                      <td>{model.apiSource === "provider" ? "继承 Provider" : model.apiSource === "model" ? "模型指定" : "未配置"}</td>
+                      <td>{model.input.length ? model.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : "不支持").join(" · ") : "未配置"}</td>
+                      <td>{formatNumber(model.contextWindow)}</td>
+                      <td>{formatNumber(model.maxTokens)}</td>
+                      <td>—</td>
+                      <td>—</td>
+                      <td><span className="provider-detail-model-action" aria-label="Model 操作不可用">…</span></td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </section>
+            <section className="provider-detail-latest-test" aria-label="最近测试">
+              <StatusIndicator tone="neutral">暂无测试结果</StatusIndicator>
+              <span>保存后的 Model 测试结果会显示在这里。</span>
+            </section>
+            {editing && openedModelsHash ? (
+              <ProviderEditDialog
+                provider={provider}
+                openedModelsHash={openedModelsHash}
+                onDismiss={() => setEditing(false)}
+                onReload={reload}
+                onSaved={async () => reload()}
+              />
+            ) : null}
           </>
         )}
       </main>
     </MainShell>
   );
+}
+
+function formatNumber(value: number | null): string {
+  return value === null ? "未配置" : new Intl.NumberFormat("zh-CN").format(value);
 }
 
 function NotFoundPage() {

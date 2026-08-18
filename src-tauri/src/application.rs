@@ -11,25 +11,31 @@ use parking_lot::{Condvar, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_opener::OpenerExt;
 
-pub(crate) use crate::provider_creation::{CreateCustomProviderInput, CreateCustomProviderResult};
+pub(crate) use crate::provider_mutation::{
+    CreateCustomProviderInput, CreateCustomProviderResult, EditCustomProviderInput,
+    EditCustomProviderResult, ProviderMutationFailurePoint,
+};
 
 #[cfg(test)]
-pub(crate) use crate::provider_creation::{
-    CreateModelFields, CreateProviderFields, ProviderAuthMode, ProviderCreationFailurePoint,
-    SupportedApi, SupportedInput,
+pub(crate) use crate::provider_mutation::{
+    CreateModelFields, CreateProviderFields, DirectApiKeyIntent, ProviderAuthMode, SupportedApi,
+    SupportedInput,
 };
 
 use crate::{
     bundled_catalog,
     error::{AppError, io_error_cause},
     omp_environment::{OmpEnvironment, SystemOmpEnvironment},
-    overview::{ConfigurationSnapshot, OverviewDto, read_overview},
-    provider_creation,
+    overview::{OverviewDto, OverviewReadResult, read_overview},
+    provider_mutation,
     redaction::redact_diagnostic,
     target_configuration::{
         TargetConfigurationDiscovery, TargetConfigurationStatus, TargetInitializationExpectation,
     },
 };
+
+#[cfg(test)]
+use crate::overview::ConfigurationSnapshot;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(
@@ -219,13 +225,71 @@ pub struct AppService {
     environment: Arc<dyn OmpEnvironment>,
     pending_omp: Arc<RwLock<Option<PathBuf>>>,
     recovery_notice: Arc<RwLock<Option<(PathBuf, String)>>>,
+    #[cfg(test)]
     configuration_snapshot: Arc<RwLock<Option<ConfigurationSnapshot>>>,
     detection_lock: Arc<Mutex<()>>,
     overview_load: Arc<OverviewLoadCoordinator>,
     #[cfg(test)]
-    provider_creation_failure: Arc<Mutex<Option<ProviderCreationFailurePoint>>>,
+    provider_mutation_failure: Arc<Mutex<Option<ProviderMutationFailurePoint>>>,
 }
 
+#[derive(Clone, Copy)]
+enum ProviderWriteOperation {
+    Create,
+    Edit,
+}
+
+impl ProviderWriteOperation {
+    fn confirmation_required_error(self) -> AppError {
+        match self {
+            Self::Create => AppError::new(
+                "provider-create-confirmation-required",
+                "尚未确认新的 OMP 与 Target configuration，不能创建 Provider。",
+                "请先在设置页面确认 OMP 切换后重试。",
+            ),
+            Self::Edit => AppError::new(
+                "provider-edit-confirmation-required",
+                "尚未确认新的 OMP 与 Target configuration，不能编辑 Provider。",
+                "请先在设置页面确认 OMP 切换后重试。",
+            ),
+        }
+    }
+
+    fn unavailable_error(self) -> AppError {
+        match self {
+            Self::Create => AppError::new(
+                "provider-create-unavailable",
+                "无法重新验证 OMP 的 Target configuration。",
+                "请重新检测或重新选择 OMP。",
+            ),
+            Self::Edit => AppError::new(
+                "provider-edit-unavailable",
+                "无法重新验证 OMP 的 Target configuration。",
+                "请重新检测或重新选择 OMP。",
+            ),
+        }
+    }
+
+    fn catalog_missing_error(self) -> AppError {
+        match self {
+            Self::Create => AppError::new(
+                "provider-create-catalog-missing",
+                "当前 OMP 版本没有匹配的 bundled Provider 清单。",
+                "为避免覆盖 OMP 内置 Provider，Provider 与模型管理暂时只读。",
+            ),
+            Self::Edit => AppError::new(
+                "provider-edit-catalog-missing",
+                "当前 OMP 版本没有匹配的 bundled Provider 清单。",
+                "为避免覆盖 OMP 内置 Provider，Provider 与模型管理暂时只读。",
+            ),
+        }
+    }
+}
+
+struct ProviderWriteContext {
+    target: Box<TargetConfigurationDiscovery>,
+    catalog: &'static bundled_catalog::BundledCatalog,
+}
 impl AppService {
     pub fn new(settings_path: PathBuf) -> Result<Self, AppError> {
         let transaction_root = settings_path
@@ -255,11 +319,12 @@ impl AppService {
             environment,
             pending_omp: Arc::new(RwLock::new(None)),
             recovery_notice: Arc::new(RwLock::new(None)),
+            #[cfg(test)]
             configuration_snapshot: Arc::new(RwLock::new(None)),
             detection_lock: Arc::new(Mutex::new(())),
             overview_load: Arc::new(OverviewLoadCoordinator::default()),
             #[cfg(test)]
-            provider_creation_failure: Arc::new(Mutex::new(None)),
+            provider_mutation_failure: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -368,7 +433,7 @@ impl AppService {
     }
 
     fn read_overview_for_state(&self, state: StartupState) -> Result<OverviewDto, AppError> {
-        *self.configuration_snapshot.write() = None;
+        self.clear_configuration_snapshot();
         let (executable_path, version, target_configuration) = match state {
             StartupState::OmpReady {
                 executable_path,
@@ -396,8 +461,26 @@ impl AppService {
             }
         };
         let result = read_overview(&executable_path, &version, &target_configuration)?;
+        Ok(self.finish_overview_read(result))
+    }
+
+    #[cfg(test)]
+    fn clear_configuration_snapshot(&self) {
+        *self.configuration_snapshot.write() = None;
+    }
+
+    #[cfg(not(test))]
+    fn clear_configuration_snapshot(&self) {}
+
+    #[cfg(test)]
+    fn finish_overview_read(&self, result: OverviewReadResult) -> OverviewDto {
         *self.configuration_snapshot.write() = result.snapshot;
-        Ok(result.dto)
+        result.dto
+    }
+
+    #[cfg(not(test))]
+    fn finish_overview_read(&self, result: OverviewReadResult) -> OverviewDto {
+        result.dto
     }
 
     #[cfg(test)]
@@ -724,6 +807,43 @@ impl AppService {
         input: CreateCustomProviderInput,
     ) -> Result<CreateCustomProviderResult, AppError> {
         let _detection = self.detection_lock.lock();
+        let context = self.prepare_provider_write(ProviderWriteOperation::Create)?;
+        let result = provider_mutation::create_custom_provider(
+            &context.target,
+            &self.backup_root,
+            context.catalog,
+            &input,
+            self.take_provider_mutation_failure(),
+        );
+        if result.is_ok() {
+            self.clear_configuration_snapshot();
+        }
+        result
+    }
+
+    pub fn edit_custom_provider(
+        &self,
+        input: EditCustomProviderInput,
+    ) -> Result<EditCustomProviderResult, AppError> {
+        let _detection = self.detection_lock.lock();
+        let context = self.prepare_provider_write(ProviderWriteOperation::Edit)?;
+        let result = provider_mutation::edit_custom_provider(
+            &context.target,
+            &self.backup_root,
+            context.catalog,
+            &input,
+            self.take_provider_mutation_failure(),
+        );
+        if result.is_ok() {
+            self.clear_configuration_snapshot();
+        }
+        result
+    }
+
+    fn prepare_provider_write(
+        &self,
+        operation: ProviderWriteOperation,
+    ) -> Result<ProviderWriteContext, AppError> {
         let state = self.detect_omp_internal();
         let (version, target) = match state {
             StartupState::OmpReady {
@@ -732,51 +852,31 @@ impl AppService {
                 requires_confirmation: false,
                 ..
             } => (version, target_configuration),
-            StartupState::OmpReady { .. } => {
-                return Err(AppError::new(
-                    "provider-create-confirmation-required",
-                    "尚未确认新的 OMP 与 Target configuration，不能创建 Provider。",
-                    "请先在设置页面确认 OMP 切换后重试。",
-                ));
-            }
-            _ => {
-                return Err(AppError::new(
-                    "provider-create-unavailable",
-                    "无法重新验证 OMP 的 Target configuration。",
-                    "请重新检测或重新选择 OMP。",
-                ));
-            }
+            StartupState::OmpReady { .. } => return Err(operation.confirmation_required_error()),
+            _ => return Err(operation.unavailable_error()),
         };
-        let catalog = bundled_catalog::for_version(&version)?.ok_or_else(|| {
-            AppError::new(
-                "provider-create-catalog-missing",
-                "当前 OMP 版本没有匹配的 bundled Provider 清单。",
-                "为避免覆盖 OMP 内置 Provider，Provider 与模型管理暂时只读。",
-            )
-        })?;
+        let catalog = bundled_catalog::for_version(&version)?
+            .ok_or_else(|| operation.catalog_missing_error())?;
+        Ok(ProviderWriteContext { target, catalog })
+    }
+
+    fn take_provider_mutation_failure(&self) -> Option<ProviderMutationFailurePoint> {
         #[cfg(test)]
-        let failure = self.provider_creation_failure.lock().take();
-        #[cfg(not(test))]
-        let failure = None;
-        let result = provider_creation::create_custom_provider(
-            &target,
-            &self.backup_root,
-            catalog,
-            &input,
-            failure,
-        );
-        if result.is_ok() {
-            *self.configuration_snapshot.write() = None;
+        {
+            self.provider_mutation_failure.lock().take()
         }
-        result
+        #[cfg(not(test))]
+        {
+            None
+        }
     }
 
     #[cfg(test)]
-    pub(crate) fn set_provider_creation_failure_for_test(
+    pub(crate) fn set_provider_mutation_failure_for_test(
         &self,
-        failure: ProviderCreationFailurePoint,
+        failure: ProviderMutationFailurePoint,
     ) {
-        *self.provider_creation_failure.lock() = Some(failure);
+        *self.provider_mutation_failure.lock() = Some(failure);
     }
 
     fn update_settings(
@@ -986,6 +1086,17 @@ pub fn create_custom_provider(
     let started_at = Instant::now();
     let result = service.create_custom_provider(input);
     log_command_result("create_custom_provider", started_at, &result);
+    result
+}
+
+#[tauri::command]
+pub fn edit_custom_provider(
+    service: tauri::State<'_, AppService>,
+    input: EditCustomProviderInput,
+) -> Result<EditCustomProviderResult, AppError> {
+    let started_at = Instant::now();
+    let result = service.edit_custom_provider(input);
+    log_command_result("edit_custom_provider", started_at, &result);
     result
 }
 

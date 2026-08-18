@@ -87,7 +87,7 @@ MVP 是可公开使用的正式版本。安全写入、备份、冲突检测、�
 - 模型自动发现。
 - OAuth。
 - `.env` 或环境变量凭据配置。
-- `!command` 凭据的创建、查看或执行。
+- `!command` 凭据的创建、查看、编辑或执行。
 - 自定义 Header 的创建或编辑。
 - OMP 高级 Provider 配置编辑。
 - OMP 高级模型配置编辑。
@@ -301,6 +301,8 @@ Provider 默认协议是模型的可选继承值，不是 Provider 的固定协�
 
 实现状态（issue #8）：`create_custom_provider` 在 Rust 中一次接收 Provider 与首个 Model definition，并在写入前检查打开表单时的 `models.yml` 内容 Hash、当前配置和 bundled catalog。通过校验后才备份当前文件、在最新树中插入完整节点、fsync 临时文件、重新解析和验证未触及路径，再执行原子替换；任何失败均不写入空 Custom Provider。
 
+实现状态（issue #9）：既有普通 Custom Provider 可编辑 Base URL、默认协议和认证方式；Provider ID 保持 Stable ID。Direct API Key 仅以 keep、replace、delete 明确意图进入一次保存，关闭或成功提交后清空表单输入。写入沿用内容 Hash、备份、临时重解析、未触及路径比较和原子替换。已有 `!command` 凭据保持高级/受限状态并只读，不会伪装成普通 Custom Provider。
+
 
 ### 7.3 Provider ID
 
@@ -342,9 +344,9 @@ MVP 只创建和使用直接文本 API Key：
 - 新值不得以 `!` 开头。
 - 不加载 `.env`，不解析环境变量，不执行命令。
 - 模型测试直接使用 Provider 保存的文本值。
-- API Key 不进入应用设置、前端持久状态、IPC 响应、日志或测试结果。
+- API Key 不进入应用设置、前端持久状态、后端概览缓存、IPC 响应、日志或测试结果。
 
-已有 `!command` 不显示、不执行；用户可以明确替换为新的直接文本 API Key。替换前 Provider 受限，替换后若不存在其他高级配置则恢复普通编辑。
+已有 `!command` 不显示、不执行或编辑，并保持高级/受限分类和只读状态。
 
 产品不额外显示 API Key 明文存储确认弹窗。
 

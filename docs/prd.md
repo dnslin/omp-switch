@@ -440,7 +440,7 @@ type ProviderView = {
   id: string
   baseUrl: string
   defaultApi?: SupportedApi
-  authMode: "api-key" | "none"
+  authMode: "api-key" | "none" | "unsupported"
   hasApiKey: boolean
   modelCount: number
   editable: boolean
@@ -462,12 +462,9 @@ type ProviderView = {
 
 已有 `!command`：
 
-- 不回传或执行。
-- 显示不受支持的凭据状态。
-- 允许用户明确替换为直接文本 Key。
-- 未替换时禁用测试。
-
-产品不额外显示明文存储确认，但必须确保 UI、状态、IPC、日志和测试结果不包含 Key。
+- 不回传、执行或编辑。
+- 保持高级/受限分类和只读状态，不得伪装成普通 Custom Provider。
+- 禁用测试。
 
 ### 9.6 高级 Provider
 

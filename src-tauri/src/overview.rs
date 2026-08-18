@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     bundled_catalog::{self, BundledCatalog},
     error::AppError,
-    redaction::{redact_diagnostic, redact_projection},
+    redaction::{redact_diagnostic, redact_projection, url_projection_is_lossless},
     target_configuration::{TargetConfigurationDiscovery, TargetConfigurationStatus},
 };
 
@@ -169,6 +169,7 @@ pub(crate) struct ParsedConfiguration {
     pub(crate) tree: Value,
 }
 
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct ConfigurationSnapshot {
     pub(crate) models: ParsedConfiguration,
@@ -177,6 +178,7 @@ pub(crate) struct ConfigurationSnapshot {
 
 pub(crate) struct OverviewReadResult {
     pub(crate) dto: OverviewDto,
+    #[cfg(test)]
     pub(crate) snapshot: Option<ConfigurationSnapshot>,
 }
 
@@ -313,10 +315,15 @@ pub(crate) fn read_overview(
         next_action,
         read_only_reason,
     };
+    #[cfg(test)]
     let snapshot = models_document
         .zip(config_document)
         .map(|(models, config)| ConfigurationSnapshot { models, config });
-    Ok(OverviewReadResult { dto, snapshot })
+    Ok(OverviewReadResult {
+        dto,
+        #[cfg(test)]
+        snapshot,
+    })
 }
 
 fn read_only_reason(
@@ -483,6 +490,18 @@ fn project_providers(
     (providers, keys_are_strings && !provider_id_collision)
 }
 
+pub(crate) fn is_editable_custom_provider(
+    tree: &Value,
+    provider_id: &str,
+    catalog: &BundledCatalog,
+) -> bool {
+    let (providers, provider_ids_are_safe) = project_providers(tree, Some(catalog));
+    provider_ids_are_safe
+        && providers
+            .iter()
+            .any(|provider| provider.id == provider_id && provider.editable)
+}
+
 fn project_provider(
     provider_id: String,
     value: &Value,
@@ -509,6 +528,13 @@ fn project_provider(
     let base_url_valid = base_url_raw.as_deref().is_some_and(valid_http_url);
     if !base_url_valid {
         field_reason.get_or_insert_with(|| "Provider 必须包含有效的 HTTP(S) Base URL。".to_owned());
+    }
+    let base_url_safe_to_edit = base_url_raw
+        .as_deref()
+        .is_some_and(|value| url_projection_is_lossless(value.trim()));
+    if !base_url_safe_to_edit {
+        field_reason
+            .get_or_insert_with(|| "Base URL 包含无法安全回写的脱敏信息，只能查看。".to_owned());
     }
     let default_api_raw = mapping_get(provider, "api");
     let default_api_is_configured =
@@ -561,6 +587,7 @@ fn project_provider(
                 .iter()
                 .any(|model| catalog.contains_model(&provider_id, &model.id))
     });
+
     let classification = if catalog.is_none() {
         ProviderClassification::Unavailable
     } else if built_in_override {
@@ -902,10 +929,8 @@ fn credential_projection(provider: &Mapping) -> (OverviewAuthMode, bool, bool) {
         Value::String(value) => !value.is_empty(),
         _ => true,
     });
-    let unsupported_credential = value.is_some_and(|value| match value {
-        Value::String(value) => value.starts_with('!'),
-        Value::Null => false,
-        _ => true,
+    let unsupported_credential = value.is_some_and(|value| {
+        is_command_credential(value) || !matches!(value, Value::Null | Value::String(_))
     });
     let api_key_mode = matches!(value, Some(Value::String(_)));
     let auth_mode = if unsupported_credential {
@@ -916,6 +941,14 @@ fn credential_projection(provider: &Mapping) -> (OverviewAuthMode, bool, bool) {
         OverviewAuthMode::None
     };
     (auth_mode, has_api_key, unsupported_credential)
+}
+
+fn is_command_credential(value: &Value) -> bool {
+    match value {
+        Value::Tagged(tagged) => tagged.tag == "command",
+        Value::String(value) => value.starts_with('!'),
+        _ => false,
+    }
 }
 fn unsupported_field_reason(map: &Mapping, supported_fields: &[&str]) -> Option<String> {
     let supported_fields = supported_fields.iter().copied().collect::<HashSet<_>>();
@@ -993,7 +1026,12 @@ fn scalar_string(value: &Value) -> Option<String> {
     }
 }
 fn safe_base_url(value: &str) -> String {
-    redact_projection(value.trim())
+    let value = value.trim();
+    if url_projection_is_lossless(value) {
+        value.to_owned()
+    } else {
+        redact_projection(value)
+    }
 }
 
 fn valid_http_url(value: &str) -> bool {

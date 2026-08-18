@@ -4,13 +4,13 @@ mod error;
 mod logging;
 mod omp_environment;
 mod overview;
-mod provider_creation;
+mod provider_mutation;
 mod redaction;
 mod target_configuration;
 
 use application::{
-    AppService, confirm_selected_omp, create_custom_provider, detect_omp, get_overview_load,
-    get_startup_state, get_ui_settings, initialize_target_configuration,
+    AppService, confirm_selected_omp, create_custom_provider, detect_omp, edit_custom_provider,
+    get_overview_load, get_startup_state, get_ui_settings, initialize_target_configuration,
     open_target_configuration_directory, save_ui_settings, validate_selected_omp,
 };
 
@@ -49,6 +49,7 @@ pub fn run() {
             get_ui_settings,
             save_ui_settings,
             create_custom_provider,
+            edit_custom_provider,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run OMP Switch");

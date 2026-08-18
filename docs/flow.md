@@ -515,14 +515,6 @@ API Key
 - 删除使用单独确认。
 - 新值以 `!` 开头时显示不支持错误。
 
-已有命令凭据：
-
-```text
-当前 Provider 使用不受支持的命令凭据。
-OMP Switch 不会显示或执行该命令。
-
-[替换为文本 API Key]
-```
 
 高级 Custom Provider 详情仍可提供“删除完整 Provider”，确认文案说明模型和未知字段会一起删除。OMP 内置 Provider/模型覆盖不显示普通删除入口。
 
