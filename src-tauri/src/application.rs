@@ -12,14 +12,15 @@ use serde::{Deserialize, Serialize};
 use tauri_plugin_opener::OpenerExt;
 
 pub(crate) use crate::model_mutation::{
-    CreateModelInput, DeleteModelInput, EditModelInput, ModelDefinitionFields, ModelEditFields,
-    ModelMutationResult,
+    CreateModelInput, DeleteModelInput, EditModelInput, ModelMutationResult,
 };
 pub(crate) use crate::provider_mutation::{
     CreateCustomProviderInput, CreateCustomProviderResult, EditCustomProviderInput,
     EditCustomProviderResult, ProviderMutationFailurePoint,
 };
 
+#[cfg(test)]
+pub(crate) use crate::model_mutation::{ModelDefinitionFields, ModelEditFields};
 #[cfg(test)]
 pub(crate) use crate::provider_mutation::{
     CreateModelFields, CreateProviderFields, DirectApiKeyIntent, ProviderAuthMode, SupportedApi,
