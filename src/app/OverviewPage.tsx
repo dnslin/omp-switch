@@ -11,7 +11,7 @@ import { MainShell } from "./MainShell";
 import { fileStatusView } from "./omp-presentation";
 import { useOverviewLoad } from "./overview-load";
 import { buildModelEndpoint, type ModelEndpoint } from "./model-endpoint";
-import { isModelTestable, useModelTestRunner, type ModelTestRunner } from "./model-test";
+import { isModelTestable, useModelTestRunner, useRefreshAfterModelTest, type ModelTestRunner } from "./model-test";
 type OverviewError = Pick<AppError, "message" | "action">;
 
 const overviewLoadCopy = {
@@ -109,12 +109,7 @@ export function OverviewPage() {
   const hydrationState = useUiSettings((state) => state.hydrationState);
   const { data, startupState, error, loading, reload, refresh, shellStatus } = useOverviewLoad(overviewLoadCopy);
   const modelTest = useModelTestRunner();
-  const refreshedModelTestResult = useRef<ModelTestResult | null>(null);
-  useEffect(() => {
-    if (modelTest.running || !modelTest.result || !data || loading || refreshedModelTestResult.current === modelTest.result) return;
-    refreshedModelTestResult.current = modelTest.result;
-    void refresh();
-  }, [loading, modelTest.result, modelTest.running, refresh]);
+  useRefreshAfterModelTest({ ready: Boolean(data), loading, refresh });
 
   async function openTargetDirectory() {
     if (startupState?.kind !== "omp-ready") return;
@@ -249,8 +244,8 @@ function OverviewContentBody({ data, modelTest }: { data: OverviewDto; modelTest
       <OverviewMetrics data={data} />
       {data.state === "empty" || data.state === "read-only" ? <OverviewStateBanner data={data} /> : null}
       <div className="overview-test-area">
-        <QuickTestPanel providers={data.providers} provider={selectedProvider} model={selectedModel} onProviderChange={handleProviderChange} onModelChange={handleModelChange} modelTest={modelTest} />
-        <TestResultPanel result={modelTest.result} running={modelTest.running} providerId={modelTest.activeProviderId} modelId={modelTest.activeModelId} />
+        <QuickTestPanel providers={data.providers} provider={selectedProvider} model={selectedModel} targetWritable={data.targetConfiguration.status === "writable" && data.targetConfiguration.writable} onProviderChange={handleProviderChange} onModelChange={handleModelChange} modelTest={modelTest} />
+        <TestResultPanel providers={data.providers} result={modelTest.result} running={modelTest.running} providerId={modelTest.activeProviderId} modelId={modelTest.activeModelId} />
       </div>
       {modelTest.costNoticeDialog}
     </>
@@ -341,6 +336,7 @@ function QuickTestPanel({
   providers,
   provider,
   model,
+  targetWritable,
   onProviderChange,
   onModelChange,
   modelTest,
@@ -348,6 +344,7 @@ function QuickTestPanel({
   providers: readonly OverviewProvider[];
   provider: OverviewProvider | null;
   model: OverviewModel | null;
+  targetWritable: boolean;
   onProviderChange(value: string): void;
   onModelChange(value: string): void;
   modelTest: ModelTestRunner;
@@ -358,7 +355,7 @@ function QuickTestPanel({
   const capabilities = model
     ? [...model.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : "Unsupported"), ...(model.reasoning === true ? ["Reasoning"] : [])].join("  ·  ") || "—"
     : "—";
-  const canTest = Boolean(provider && model && isModelTestable(provider, model));
+  const canTest = Boolean(provider && model && isModelTestable(provider, model, targetWritable));
   const active = Boolean(provider && model && modelTest.isActive(provider.id, model.id));
   const disabled = active ? false : !canTest || modelTest.isBusy(provider?.id ?? "", model?.id ?? "");
   const testLabel = active ? "取消测试" : "测试模型";
@@ -452,14 +449,25 @@ function OverviewField({ label, value, mono = false }: { label: string; value: s
   );
 }
 
-function TestResultPanel({ result, running, providerId, modelId }: { result: ModelTestResult | null; running: boolean; providerId: string | null; modelId: string | null }) {
+function TestResultPanel({ providers, result, running, providerId, modelId }: { providers: readonly OverviewProvider[]; result: ModelTestResult | null; running: boolean; providerId: string | null; modelId: string | null }) {
+  const contextProviderId = running ? providerId : result?.providerId ?? null;
+  const contextModelId = running ? modelId : result?.modelId ?? null;
+  const contextProvider = contextProviderId ? providers.find((item) => item.id === contextProviderId) : undefined;
+  const contextModel = contextProvider && contextModelId ? contextProvider.models.find((item) => item.id === contextModelId) : undefined;
+  const protocol = running ? contextModel?.effectiveApi ?? "—" : result?.protocol ?? "—";
+  const endpointResult = contextProvider && contextModel && !contextModel.hasBaseUrlOverride
+    ? buildModelEndpoint(contextProvider.baseUrl, contextModel.id, running ? contextModel.effectiveApi : result?.protocol)
+    : { kind: "not-configured" as const };
+  const endpoint = endpointResult.kind === "available" ? endpointResult.value : "—";
   const statusLabel = running ? "测试中…" : result?.message ?? "尚未测试";
   const tone = running ? "warning" : result === null ? "neutral" : result.success ? "success" : result.errorCode === "cancelled" ? "warning" : "danger";
-  const displayModel = running && providerId && modelId ? `${providerId}/${modelId}` : result ? `${result.providerId}/${result.modelId}` : "—";
+  const displayModel = contextProviderId && contextModelId ? `${contextProviderId}/${contextModelId}` : "—";
   return (
     <section className="overview-panel overview-result" aria-label="测试结果" aria-live="polite">
       <header><h2>测试结果</h2><StatusIndicator tone={tone}>{statusLabel}</StatusIndicator></header>
       <OverviewResultRow label="模型" value={displayModel} />
+      <OverviewResultRow label="有效协议" value={protocol} />
+      <OverviewResultRow label="最终地址" value={endpoint} mono />
       <OverviewResultRow label="耗时" value={running ? "—" : result ? `${result.latencyMs} ms` : "—"} />
       <OverviewResultRow label="状态码" value={running ? "—" : result?.status ? String(result.status) : "—"} />
       <OverviewResultRow label="时间" value={running ? "请求进行中" : result ? "刚刚" : "—"} />
@@ -467,8 +475,8 @@ function TestResultPanel({ result, running, providerId, modelId }: { result: Mod
   );
 }
 
-function OverviewResultRow({ label, value }: { label: string; value: string }) {
-  return <div className="overview-result-row"><span>{label}</span><span>{value}</span></div>;
+function OverviewResultRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return <div className="overview-result-row"><span>{label}</span><span className={mono ? "overview-result-row__value--mono" : undefined}>{value}</span></div>;
 }
 
 

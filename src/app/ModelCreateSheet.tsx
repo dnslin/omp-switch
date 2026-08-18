@@ -51,6 +51,7 @@ type ModelFormValues = z.infer<typeof modelSchema>;
 
 type ModelCreateSheetProps = {
   provider: OverviewProvider;
+  targetWritable: boolean;
   openedModelsHash: string;
   mode: "create" | "edit" | "view";
   model?: OverviewModel;
@@ -62,6 +63,7 @@ type ModelCreateSheetProps = {
 
 export function ModelCreateSheet({
   provider,
+  targetWritable,
   openedModelsHash,
   mode,
   model,
@@ -113,7 +115,7 @@ export function ModelCreateSheet({
     : null;
   const endpointText = endpoint?.kind === "available" ? endpoint.value : "填写有效 Model ID 和协议后显示最终地址";
   const canSave = !isViewing && isDirty && modelSchema.safeParse(values).success && !submitting;
-  const canTest = Boolean(source && isEditing && isModelTestable(provider, source));
+  const canTest = Boolean(source && isEditing && isModelTestable(provider, source, targetWritable));
   const activeTest = Boolean(source && modelTest.isActive(provider.id, source.id));
   const testDisabled = activeTest ? false : !canTest || modelTest.isBusy(provider.id, source?.id ?? "");
   const testLabel = activeTest ? "取消测试" : "测试模型";

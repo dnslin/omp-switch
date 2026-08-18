@@ -4546,7 +4546,8 @@ fn read_model_test_request(stream: &mut TcpStream) -> CapturedModelTestRequest {
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {
+                ) =>
+            {
                 assert!(
                     Instant::now() < deadline,
                     "timed out while reading model-test request"
@@ -4754,7 +4755,7 @@ async fn model_test_classifies_base_dns_connection_and_tls_failures_safely() {
         provider_id: "provider".to_owned(),
         model_id: "model".to_owned(),
         base_url: "not-a-url".to_owned(),
-        protocol: "openai-responses".to_owned(),
+        protocol: SupportedApi::OpenAiResponses,
         auth_mode: OverviewAuthMode::None,
         api_key: None,
     };
@@ -4811,7 +4812,7 @@ fn direct_model_test_configuration() -> ModelTestConfiguration {
         provider_id: "provider".to_owned(),
         model_id: "model".to_owned(),
         base_url: "http://127.0.0.1:1/v1".to_owned(),
-        protocol: "openai-responses".to_owned(),
+        protocol: SupportedApi::OpenAiResponses,
         auth_mode: OverviewAuthMode::None,
         api_key: None,
     }

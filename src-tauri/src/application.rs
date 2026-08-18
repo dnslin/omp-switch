@@ -988,17 +988,10 @@ impl AppService {
         let guard = self
             .model_tests
             .begin(&input.provider_id, &input.model_id)?;
-        let (configuration, timeout) = {
-            let _detection = self.detection_lock.lock();
-            let (target, catalog) = self.prepare_model_test()?;
-            let configuration = read_model_test_configuration(
-                &target,
-                catalog,
-                &input.provider_id,
-                &input.model_id,
-            )?;
-            (configuration, *self.model_test_timeout.read())
-        };
+        let timeout = *self.model_test_timeout.read();
+        let configuration = self
+            .prepare_model_test_configuration(input.provider_id.clone(), input.model_id.clone())
+            .await?;
         let result = model_test::execute(configuration, guard.cancellation(), timeout).await;
         match result {
             Ok(result) => {
@@ -1065,6 +1058,20 @@ impl AppService {
             )
         })?;
         Ok((target, catalog))
+    }
+    async fn prepare_model_test_configuration(
+        &self,
+        provider_id: String,
+        model_id: String,
+    ) -> Result<crate::overview::ModelTestConfiguration, AppError> {
+        let service = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _detection = service.detection_lock.lock();
+            let (target, catalog) = service.prepare_model_test()?;
+            read_model_test_configuration(&target, catalog, &provider_id, &model_id)
+        })
+        .await
+        .map_err(|_| AppError::internal("模型测试准备任务失败"))?
     }
     fn prepare_role_write(
         &self,
@@ -1285,6 +1292,29 @@ fn log_command_result<T>(
         Err(error) => tracing::warn!(operation, status = "error", code = error.code, elapsed_ms),
     }
 }
+fn log_model_test_result(started_at: Instant, result: &Result<ModelTestResult, AppError>) {
+    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+    match result {
+        Ok(model_result) if model_result.success => {
+            tracing::info!(operation = "test_model", status = "success", elapsed_ms)
+        }
+        Ok(model_result) => tracing::warn!(
+            operation = "test_model",
+            status = "error",
+            code = model_result
+                .error_code
+                .as_deref()
+                .unwrap_or("model-test-failed"),
+            elapsed_ms
+        ),
+        Err(error) => tracing::warn!(
+            operation = "test_model",
+            status = "error",
+            code = error.code,
+            elapsed_ms
+        ),
+    }
+}
 
 fn log_startup_state(operation: &'static str, started_at: Instant, state: &StartupState) {
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
@@ -1450,7 +1480,7 @@ pub async fn test_model(
 ) -> Result<ModelTestResult, AppError> {
     let started_at = Instant::now();
     let result = service.test_model(input).await;
-    log_command_result("test_model", started_at, &result);
+    log_model_test_result(started_at, &result);
     result
 }
 

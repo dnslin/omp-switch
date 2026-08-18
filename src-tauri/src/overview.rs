@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     bundled_catalog::{self, BundledCatalog},
     error::AppError,
+    provider_mutation::SupportedApi,
     redaction::{redact_diagnostic, redact_projection, url_projection_is_lossless},
     target_configuration::{
         ConfigurationFileStatus, TargetConfigurationDiscovery, TargetConfigurationStatus,
@@ -208,7 +209,7 @@ pub(crate) struct ModelTestConfiguration {
     pub(crate) provider_id: String,
     pub(crate) model_id: String,
     pub(crate) base_url: String,
-    pub(crate) protocol: String,
+    pub(crate) protocol: SupportedApi,
     pub(crate) auth_mode: OverviewAuthMode,
     pub(crate) api_key: Option<String>,
 }
@@ -505,6 +506,11 @@ pub(crate) fn read_model_test_configuration(
     provider_id: &str,
     model_id: &str,
 ) -> Result<ModelTestConfiguration, AppError> {
+    if !matches!(target.status, TargetConfigurationStatus::Writable) || !target.writable {
+        return Err(model_test_not_eligible(
+            "当前 Target configuration 只读，不能测试模型。",
+        ));
+    }
     let path = target
         .models
         .resolved_path
@@ -549,9 +555,13 @@ pub(crate) fn read_model_test_configuration(
                 .unwrap_or("当前 Model definition 不完整，不能测试。"),
         ));
     }
-    let protocol = model.effective_api.clone().ok_or_else(|| {
-        model_test_not_eligible("当前 Model definition 没有有效的 Supported protocol。")
-    })?;
+    let protocol = model
+        .effective_api
+        .as_deref()
+        .and_then(SupportedApi::from_str)
+        .ok_or_else(|| {
+            model_test_not_eligible("当前 Model definition 没有有效的 Supported protocol。")
+        })?;
     let root = mapping(&document.tree)
         .ok_or_else(|| model_test_not_eligible("models.yml 结构无法识别。"))?;
     let providers_value = mapping_get(root, "providers")

@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { ConfirmDialog } from "../components/ui";
@@ -7,11 +7,12 @@ import { useModelTestStore } from "../store/model-test";
 import { useUiSettings } from "../store/ui-settings";
 import { buildModelEndpoint } from "./model-endpoint";
 
-export function isModelTestable(provider: OverviewProvider, model: OverviewModel): boolean {
+export function isModelTestable(provider: OverviewProvider, model: OverviewModel, targetWritable: boolean): boolean {
   const endpoint = provider.baseUrl && model.effectiveApi
     ? buildModelEndpoint(provider.baseUrl, model.id, model.effectiveApi)
     : { kind: "not-configured" as const };
-  return provider.editable
+  return targetWritable
+    && provider.editable
     && (provider.authMode !== "api-key" || provider.hasApiKey)
     && provider.authMode !== "unsupported"
     && model.editable
@@ -19,6 +20,28 @@ export function isModelTestable(provider: OverviewProvider, model: OverviewModel
     && !model.unsupportedProtocol
     && !model.hasBaseUrlOverride
     && endpoint.kind === "available";
+}
+
+export function useRefreshAfterModelTest({
+  ready,
+  loading,
+  providerId,
+  refresh,
+}: {
+  ready: boolean;
+  loading: boolean;
+  providerId?: string;
+  refresh(): Promise<unknown>;
+}) {
+  const result = useModelTestStore((state) => state.result);
+  const running = useModelTestStore((state) => state.running);
+  const refreshedResult = useRef<ModelTestResult | null>(null);
+
+  useEffect(() => {
+    if (running || !result || !ready || loading || (providerId && result.providerId !== providerId) || refreshedResult.current === result) return;
+    refreshedResult.current = result;
+    void refresh();
+  }, [loading, providerId, ready, refresh, result, running]);
 }
 
 type PendingTest = { providerId: string; modelId: string };
@@ -113,7 +136,21 @@ function notifyResult(result: ModelTestResult) {
     toast.success(`模型连接成功 · ${result.latencyMs} ms`);
     return;
   }
-  toast.error("模型测试失败");
+  toast.error(result.message, { description: modelTestFailureAction(result.errorCode) });
+}
+
+function modelTestFailureAction(errorCode: string | undefined): string {
+  switch (errorCode) {
+    case "http-401": return "检查 API Key 后重试。";
+    case "http-403": return "检查 Provider 权限后重试。";
+    case "http-404": return "检查 Model ID 和最终地址后重试。";
+    case "http-429": return "检查额度或稍后重试。";
+    case "timeout": return "检查网络和 Provider 响应后重试。";
+    case "dns": return "检查 Provider 域名和网络后重试。";
+    case "tls": return "检查 HTTPS 证书和地址后重试。";
+    case "response-format": return "检查模型协议和 Provider 响应格式后重试。";
+    default: return "检查 Provider 配置和网络后重试。";
+  }
 }
 
 export type ModelTestRunner = ReturnType<typeof useModelTestRunner>;

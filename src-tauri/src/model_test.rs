@@ -270,13 +270,7 @@ async fn read_response_body(response: &mut reqwest::Response) -> Result<String, 
 }
 
 fn build_request(configuration: &ModelTestConfiguration) -> Result<PreparedRequest, AppError> {
-    let protocol = SupportedApi::from_str(&configuration.protocol).ok_or_else(|| {
-        AppError::new(
-            "model-test-not-eligible",
-            "当前 Model definition 使用了不支持的协议。",
-            "请在 Provider 详情修复协议后重试。",
-        )
-    })?;
+    let protocol = configuration.protocol;
     let base_url = Url::parse(&configuration.base_url).map_err(|_| {
         AppError::new(
             "model-test-base-url",
@@ -584,11 +578,14 @@ fn network_failure_result(
         RequestFailure::Dns => ("dns", "无法解析 Provider 地址，请检查域名或网络。"),
         RequestFailure::Tls => ("tls", "TLS 连接失败，请检查证书和 HTTPS 配置。"),
         RequestFailure::Connection => ("connection", "无法连接到 Provider，请检查网络或服务状态。"),
-        RequestFailure::ResponseFormat => ("response-format", "Provider 返回了不符合协议的响应。"),
+        RequestFailure::ResponseFormat => (
+            "response-format",
+            "Provider 返回了不符合协议的响应，请检查协议和响应格式。",
+        ),
     };
     failure_result(
         configuration,
-        SupportedApi::from_str(&configuration.protocol).unwrap_or(SupportedApi::OpenAiResponses),
+        configuration.protocol,
         latency_ms,
         None,
         error_code,
@@ -599,7 +596,7 @@ fn network_failure_result(
 fn cancelled_result(configuration: &ModelTestConfiguration, latency_ms: u64) -> ModelTestResult {
     failure_result(
         configuration,
-        SupportedApi::from_str(&configuration.protocol).unwrap_or(SupportedApi::OpenAiResponses),
+        configuration.protocol,
         latency_ms,
         None,
         "cancelled",
@@ -648,7 +645,7 @@ mod tests {
             provider_id: "provider".to_owned(),
             model_id: "model".to_owned(),
             base_url: base_url.to_owned(),
-            protocol: "anthropic-messages".to_owned(),
+            protocol: SupportedApi::AnthropicMessages,
             auth_mode: OverviewAuthMode::ApiKey,
             api_key: Some("saved-key".to_owned()),
         }

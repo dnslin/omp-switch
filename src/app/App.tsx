@@ -4,7 +4,7 @@ import { Link, Navigate, Route, Routes, useNavigate, useParams } from "react-rou
 import { toast, Toaster } from "sonner";
 import { RedetectionLoader } from "../components/redetection-loader";
 import { Button, Card, ConfirmDialog, PageTitle, SearchInput, StatusIndicator } from "../components/ui";
-import { asAppError, useTauriClient, type ModelTestResult, type OverviewModel, type StartupState } from "../lib/tauri-client";
+import { asAppError, useTauriClient, type OverviewModel, type StartupState } from "../lib/tauri-client";
 import { useModelTestStore } from "../store/model-test";
 import { useUiSettings } from "../store/ui-settings";
 import { MainShell } from "./MainShell";
@@ -15,7 +15,7 @@ import { ProvidersPage } from "./ProvidersPage";
 import { ModelRolesPage } from "./ModelRolesPage";
 import { useOverviewLoad } from "./overview-load";
 import { buildModelEndpoint } from "./model-endpoint";
-import { isModelTestable, useModelTestRunner } from "./model-test";
+import { isModelTestable, useModelTestRunner, useRefreshAfterModelTest } from "./model-test";
 import { fileStatusView, providerAuthSummary, startupShellStatus, targetConfigurationStatusView, type RowStatus } from "./omp-presentation";
 
 
@@ -361,12 +361,7 @@ function ProviderDetailPage() {
   const client = useTauriClient();
   const modelTest = useModelTestRunner();
   const { data, error, loading, reload, refresh, shellStatus } = useOverviewLoad(providerDetailLoadCopy);
-  const refreshedModelTestResult = useRef<ModelTestResult | null>(null);
-  useEffect(() => {
-    if (modelTest.running || !modelTest.result || modelTest.result.providerId !== providerId || !data || loading || refreshedModelTestResult.current === modelTest.result) return;
-    refreshedModelTestResult.current = modelTest.result;
-    void refresh();
-  }, [loading, modelTest.result, modelTest.running, providerId, refresh]);
+  useRefreshAfterModelTest({ ready: Boolean(data), loading, providerId, refresh });
   const [editing, setEditing] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const [modelEditor, setModelEditor] = useState<{ mode: "create" | "edit" | "view"; model?: OverviewModel; copy?: boolean } | null>(null);
@@ -486,7 +481,7 @@ function ProviderDetailPage() {
                     const status = modelStatusView(model);
                     const sourceLabel = model.apiSource === "provider" ? "继承 Provider" : model.apiSource === "model" ? "模型指定" : "未配置";
                     const recentResult = modelTest.result?.providerId === provider.id && modelTest.result.modelId === model.id ? modelTest.result : null;
-                    const testable = isModelTestable(provider, model);
+                    const testable = isModelTestable(provider, model, targetWritable);
                     const active = modelTest.isActive(provider.id, model.id);
                     const busy = modelTest.isBusy(provider.id, model.id);
                     return (
@@ -539,7 +534,7 @@ function ProviderDetailPage() {
             {modelTest.costNoticeDialog}
             {deletingModel ? <ConfirmDialog title="删除模型？" confirmLabel="删除模型" onCancel={() => setDeletingModel(null)} onConfirm={() => void deleteModel()}><p>将删除 {provider.id}/{deletingModel.id}。</p>{deletingModel.referenceCount > 0 ? <p>检测到 {deletingModel.referenceCount} 个配置引用：{deletingModel.referencePaths.join("、")}。删除会被阻止。</p> : null}{provider.modelCount <= 1 ? <p>这是 Provider 下的最后一个 Model definition，删除会被阻止。</p> : <p>此操作会创建备份。</p>}</ConfirmDialog> : null}
             {editing && openedModelsHash ? <ProviderEditDialog provider={provider} openedModelsHash={openedModelsHash} onDismiss={() => setEditing(false)} onReload={reload} onSaved={async () => reload()} /> : null}
-            {modelEditor && openedModelsHash ? <ModelCreateSheet key={`${modelEditor.mode}-${modelEditor.model?.id ?? "new"}-${modelEditor.copy ? "copy" : "edit"}`} provider={provider} openedModelsHash={openedModelsHash} mode={modelEditor.mode} model={modelEditor.model} copy={modelEditor.copy} onDismiss={() => setModelEditor(null)} onReload={reload} onSaved={saveModel} /> : null}
+            {modelEditor && openedModelsHash ? <ModelCreateSheet key={`${modelEditor.mode}-${modelEditor.model?.id ?? "new"}-${modelEditor.copy ? "copy" : "edit"}`} provider={provider} targetWritable={targetWritable} openedModelsHash={openedModelsHash} mode={modelEditor.mode} model={modelEditor.model} copy={modelEditor.copy} onDismiss={() => setModelEditor(null)} onReload={reload} onSaved={saveModel} /> : null}
           </>
         )}
       </main>
