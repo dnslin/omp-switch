@@ -98,7 +98,7 @@ fn normalize_version(version: &str) -> &str {
         .unwrap_or(trimmed)
 }
 
-fn normalize_id(value: &str) -> String {
+pub(crate) fn normalize_id(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
 

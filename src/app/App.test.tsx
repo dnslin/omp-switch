@@ -40,6 +40,9 @@ const unavailableClient: TauriClient = {
   getOverviewLoad: async () => overviewLoad(overviewDto({ state: "empty", counts: { providerCount: 0, modelCount: 0, roleCount: 0 }, providers: [], models: [], roles: [], emptyReason: "还没有可管理的自定义 Provider。", nextAction: "创建一个 Provider，并同时配置它的第一个模型。" })),
   createCustomProvider: async () => ({ providerId: "new-provider", modelId: "new-model" }),
   editCustomProvider: async () => ({ providerId: "dnslin" }),
+  createModel: async () => ({ providerId: "dnslin", modelId: "new-model" }),
+  editModel: async () => ({ providerId: "dnslin", modelId: "gpt-5.6-sol" }),
+  deleteModel: async () => ({ providerId: "dnslin", modelId: "gpt-5.6-sol" }),
   detectOmp: async () => ({ kind: "omp-unavailable", message: "仍未找到 OMP" }),
   selectOmpExecutable: async () => null,
   validateSelectedOmp: async () => ({ kind: "invalid-executable", executablePath: "/tmp/not-omp", message: "无法运行", diagnosticCode: "io-not-found" }),
@@ -1523,6 +1526,100 @@ describe("React page seam", () => {
     expect(document.body.textContent).not.toContain(typedKey);
     expect(screen.getAllByText("无法保存 Provider").length).toBeGreaterThanOrEqual(1);
   });
+  it("renders searchable Model definitions and submits the create Sheet", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const createModel = vi.fn(async () => ({ providerId: "dnslin", modelId: "new-model" }));
+    renderRoute("/providers/dnslin", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(base, readyState),
+      createModel,
+    });
+
+    expect(await screen.findByText("Sol")).toBeVisible();
+    expect(screen.getByTitle("模型指定")).toBeVisible();
+    await user.type(screen.getByLabelText("搜索 Model ID"), "missing-model");
+    expect(screen.getByText("没有匹配的 Model definition")).toBeVisible();
+    await user.clear(screen.getByLabelText("搜索 Model ID"));
+    await user.click(screen.getByRole("button", { name: "新增模型" }));
+    const sheet = await screen.findByRole("dialog");
+    expect(within(sheet).getByRole("heading", { name: "新增模型" })).toBeVisible();
+    expect(within(sheet).getByLabelText("Model ID")).toBeVisible();
+    await user.type(within(sheet).getByLabelText("Model ID"), "new-model");
+    await user.type(within(sheet).getByLabelText("名称"), "New Model");
+    await user.click(within(sheet).getByRole("button", { name: "保存模型" }));
+
+    await waitFor(() => expect(createModel).toHaveBeenCalledWith(expect.objectContaining({ providerId: "dnslin", model: expect.objectContaining({ id: "new-model", name: "New Model", input: ["text", "image"] }) })));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("keeps incomplete models repairable, locks read-only models, and confirms deletion", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const incomplete: OverviewModel = { ...base.models[0], id: "incomplete", name: null, contextWindow: null, maxTokens: null, input: [], complete: false, status: "incomplete", editable: true, referenceCount: 0, referencePaths: [], readOnlyReason: null };
+    const locked: OverviewModel = { ...base.models[0], id: "locked", name: "Locked", complete: false, status: "read-only", editable: false, referenceCount: 1, referencePaths: ["modelRoles[\"default\"]"], readOnlyReason: "Model definition 包含当前版本不支持的配置，只能查看。" };
+    const referenced = { ...base.models[0], referenceCount: 1, referencePaths: ["modelRoles[\"default\"]"] };
+    const overview = overviewDto({
+      providers: [{ ...base.providers[0], modelCount: 3, models: [referenced, incomplete, locked] }],
+      models: [referenced, incomplete, locked],
+      counts: { providerCount: 1, modelCount: 3, roleCount: 2 },
+    });
+    const createModel = vi.fn(async () => ({ providerId: "dnslin", modelId: "copied-model" }));
+    const editModel = vi.fn(async () => ({ providerId: "dnslin", modelId: "incomplete" }));
+    const deleteModel = vi.fn(async () => {
+      throw { code: "model-delete-referenced", message: "无法删除 Model：仍有配置引用。", action: "请先处理引用。" };
+    });
+    renderRoute("/providers/dnslin", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overview, readyState),
+      createModel,
+      editModel,
+      deleteModel,
+    });
+
+    expect(await screen.findByText("配置不完整")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Model 操作 locked" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Model 操作 locked" }));
+    await user.click(screen.getByRole("menuitem", { name: "查看" }));
+    const readOnlySheet = await screen.findByRole("dialog");
+    expect(within(readOnlySheet).getByRole("heading", { name: "查看模型" })).toBeVisible();
+    expect(readOnlySheet).toHaveTextContent(locked.readOnlyReason!);
+    expect(within(readOnlySheet).queryByRole("button", { name: "保存模型" })).not.toBeInTheDocument();
+    await user.click(within(readOnlySheet).getByRole("button", { name: "关闭" }));
+    await user.click(screen.getByRole("button", { name: "Model 操作 incomplete" }));
+    await user.click(screen.getByRole("menuitem", { name: "编辑" }));
+    const repairSheet = await screen.findByRole("dialog");
+    expect(within(repairSheet).getByLabelText("Context Window")).toHaveValue(null);
+    expect(within(repairSheet).getByLabelText("Max Tokens")).toHaveValue(null);
+    await user.type(within(repairSheet).getByLabelText("名称"), "Repaired");
+    await user.click(within(repairSheet).getByRole("checkbox", { name: "Text" }));
+    await user.type(within(repairSheet).getByLabelText("Context Window"), "100000");
+    await user.type(within(repairSheet).getByLabelText("Max Tokens"), "1000");
+    expect(within(repairSheet).getByLabelText("Model ID")).toHaveAttribute("readonly");
+    await user.click(within(repairSheet).getByRole("button", { name: "保存模型" }));
+    await waitFor(() => expect(editModel).toHaveBeenCalledWith(expect.objectContaining({ modelId: "incomplete", model: expect.objectContaining({ name: "Repaired", input: ["text"], contextWindow: 100000, maxTokens: 1000 }) })));
+    await user.click(screen.getByRole("button", { name: "Model 操作 gpt-5.6-sol" }));
+    await user.click(screen.getByRole("menuitem", { name: "复制" }));
+    const copySheet = await screen.findByRole("dialog");
+    expect(within(copySheet).getByLabelText("Model ID")).toHaveValue("gpt-5.6-sol-copy");
+    expect(within(copySheet).getByLabelText("名称")).toHaveValue("Sol");
+    await user.clear(within(copySheet).getByLabelText("Model ID"));
+    await user.type(within(copySheet).getByLabelText("Model ID"), "copied-model");
+    await user.click(within(copySheet).getByRole("button", { name: "保存模型" }));
+    await waitFor(() => expect(createModel).toHaveBeenCalledWith(expect.objectContaining({ model: expect.objectContaining({ id: "copied-model", name: "Sol" }) })));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+
+    await user.click(screen.getByRole("button", { name: "Model 操作 gpt-5.6-sol" }));
+    await user.click(screen.getByRole("menuitem", { name: "删除" }));
+    const confirmation = await screen.findByRole("heading", { name: "删除模型？" });
+    expect(confirmation.closest('[role="dialog"]')).toHaveTextContent("此操作会创建备份");
+    expect(confirmation.closest('[role="dialog"]')).toHaveTextContent("modelRoles[\"default\"]");
+    await user.click(within(confirmation.closest('[role="dialog"]') as HTMLElement).getByRole("button", { name: "删除模型" }));
+    expect(await screen.findByText("无法删除 Model：仍有配置引用。")).toBeVisible();
+    expect(deleteModel).toHaveBeenCalledTimes(1);
+  });
+
 });
 
 function overviewDto(overrides: Partial<OverviewDto> = {}): OverviewDto {
@@ -1538,7 +1635,10 @@ function overviewDto(overrides: Partial<OverviewDto> = {}): OverviewDto {
     contextWindow: 356000,
     maxTokens: 32768,
     complete: true,
+    status: "normal",
     editable: true,
+    referenceCount: 0,
+    referencePaths: [],
     readOnlyReason: null,
   };
   return {

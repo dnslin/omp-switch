@@ -1,12 +1,13 @@
-import { CheckCircle2, File, Folder, Info, SquareTerminal } from "lucide-react";
+import { CheckCircle2, Copy, File, Folder, Info, MoreHorizontal, Pencil, SquareTerminal, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useNavigate, useParams } from "react-router";
 import { toast, Toaster } from "sonner";
 import { RedetectionLoader } from "../components/redetection-loader";
-import { Button, Card, PageTitle, SearchInput, StatusIndicator } from "../components/ui";
-import { asAppError, useTauriClient, type StartupState } from "../lib/tauri-client";
+import { Button, Card, ConfirmDialog, PageTitle, SearchInput, StatusIndicator } from "../components/ui";
+import { asAppError, useTauriClient, type OverviewModel, type StartupState } from "../lib/tauri-client";
 import { useUiSettings } from "../store/ui-settings";
 import { MainShell } from "./MainShell";
+import { ModelCreateSheet } from "./ModelCreateSheet";
 import { OverviewPage } from "./OverviewPage";
 import { ProviderEditDialog } from "./ProviderEditDialog";
 import { ProvidersPage } from "./ProvidersPage";
@@ -365,20 +366,61 @@ function PlaceholderPage({ page }: { page: keyof typeof routeCopy }) {
 
 function ProviderDetailPage() {
   const { providerId } = useParams();
+  const client = useTauriClient();
   const { data, error, loading, reload, shellStatus } = useOverviewLoad(providerDetailLoadCopy);
   const [editing, setEditing] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
+  const [modelEditor, setModelEditor] = useState<{ mode: "create" | "edit" | "view"; model?: OverviewModel; copy?: boolean } | null>(null);
+  const [deletingModel, setDeletingModel] = useState<OverviewModel | null>(null);
+  const [deleteError, setDeleteError] = useState<ReturnType<typeof asAppError> | null>(null);
+  const [openModelActions, setOpenModelActions] = useState<string | null>(null);
   const provider = data?.providers.find((item) => item.id === providerId);
   const authSummary = provider ? providerAuthSummary(provider) : "不支持的认证";
   const openedModelsHash = data?.files.models.contentHash ?? null;
+  const openedConfigHash = data?.files.config.contentHash ?? null;
   const targetWritable = data?.targetConfiguration.writable ?? false;
+  const canManageModels = Boolean(provider?.editable && openedModelsHash && openedConfigHash && targetWritable);
   const normalizedSearch = modelSearch.trim().toLocaleLowerCase();
   const models = provider?.models.filter((model) => [
     model.id,
     model.name,
     model.effectiveApi,
     model.readOnlyReason,
+    model.status,
+    ...model.referencePaths,
   ].some((value) => value?.toLocaleLowerCase().includes(normalizedSearch))) ?? [];
+
+  const saveModel = async () => {
+    if (!modelEditor || !openedModelsHash || !provider) return null;
+    const reloadError = await reload();
+    if (reloadError) return reloadError;
+    setModelEditor(null);
+    toast.success(modelEditor.mode === "edit" ? "Model 已保存" : "Model 已创建");
+    return null;
+  };
+
+  const deleteModel = async () => {
+    if (!deletingModel || !provider || !openedModelsHash || !openedConfigHash) return;
+    try {
+      await client.deleteModel({
+        openedModelsHash,
+        openedConfigHash,
+        providerId: provider.id,
+        modelId: deletingModel.id,
+      });
+      setDeletingModel(null);
+      setDeleteError(null);
+      const reloadError = await reload();
+      if (reloadError) {
+        setDeleteError(reloadError);
+        return;
+      }
+      toast.success("Model 已删除");
+    } catch (cause: unknown) {
+      setDeletingModel(null);
+      setDeleteError(asAppError(cause, "删除 Model 失败"));
+    }
+  };
 
   return (
     <MainShell status={shellStatus}>
@@ -404,30 +446,20 @@ function ProviderDetailPage() {
                 <code>{provider.baseUrl ?? "未配置地址"}</code>
               </div>
               <div className="provider-detail-actions">
-                <Button
-                  type="button"
-                  disabled={!provider.editable || !openedModelsHash || !targetWritable}
-                  onClick={() => setEditing(true)}
-                >
-                  编辑 Provider
-                </Button>
-                <Button type="button" variant="secondary" className="provider-detail-delete" disabled>
-                  删除
-                </Button>
+                <Button type="button" disabled={!provider.editable || !openedModelsHash || !targetWritable} onClick={() => setEditing(true)}>编辑 Provider</Button>
+                <Button type="button" variant="secondary" className="provider-detail-delete" disabled>删除</Button>
               </div>
             </header>
-            {!provider.editable ? (
-              <p className="provider-detail-readonly" role="status">{provider.readOnlyReason ?? "当前 Provider 只能查看。"}</p>
+            {!provider.editable ? <p className="provider-detail-readonly" role="status">{provider.readOnlyReason ?? "当前 Provider 只能查看。"}</p> : null}
+            {deleteError ? (
+              <section className="provider-detail-model-error" role="alert" aria-live="assertive">
+                <div><strong>{deleteError.code === "models-hash-conflict" || deleteError.code === "config-hash-conflict" ? "配置冲突" : "无法删除 Model"}</strong><p>{deleteError.message}</p><p>{deleteError.action}</p></div>
+                {(deleteError.code === "models-hash-conflict" || deleteError.code === "config-hash-conflict") ? <Button type="button" variant="secondary" onClick={() => void reload()}>重新读取</Button> : null}
+              </section>
             ) : null}
             <section className="provider-detail-search-row" aria-label="Model 操作">
-              <SearchInput
-                name="model-search"
-                aria-label="搜索 Model ID"
-                value={modelSearch}
-                onChange={(event) => setModelSearch(event.target.value)}
-                placeholder="搜索 Model ID…"
-              />
-              <Button type="button" disabled>新增模型</Button>
+              <SearchInput name="model-search" aria-label="搜索 Model ID" value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="搜索 Model ID…" />
+              <Button type="button" disabled={!canManageModels} onClick={() => setModelEditor({ mode: "create" })} title={!canManageModels ? "当前 Provider 只读或配置不可写" : undefined}>新增模型</Button>
             </section>
             <section className="provider-detail-summary" aria-label="Provider 摘要">
               <div><span>默认协议</span><strong>{provider.defaultApi ?? "由模型指定"}</strong></div>
@@ -438,56 +470,57 @@ function ProviderDetailPage() {
             <section className="provider-detail-models" aria-labelledby="provider-detail-models-title">
               <h2 id="provider-detail-models-title" className="provider-detail-visually-hidden">模型</h2>
               <table>
-                <thead>
-                  <tr>
-                    <th scope="col">名称 / Model ID</th>
-                    <th scope="col">有效协议</th>
-                    <th scope="col">来源</th>
-                    <th scope="col">能力</th>
-                    <th scope="col">Context</th>
-                    <th scope="col">Max Tokens</th>
-                    <th scope="col">引用</th>
-                    <th scope="col">最近测试</th>
-                    <th scope="col">操作</th>
-                  </tr>
-                </thead>
+                <colgroup>
+                  <col className="provider-detail-models__identity" /><col className="provider-detail-models__api" /><col className="provider-detail-models__source" /><col className="provider-detail-models__input" /><col className="provider-detail-models__context" /><col className="provider-detail-models__max" /><col className="provider-detail-models__references" /><col className="provider-detail-models__test" /><col className="provider-detail-models__actions" />
+                </colgroup>
+                <thead><tr><th scope="col">名称 / Model ID</th><th scope="col">有效协议</th><th scope="col">来源</th><th scope="col">能力</th><th scope="col">Context</th><th scope="col">Max Tokens</th><th scope="col">引用</th><th scope="col">最近测试</th><th scope="col">操作</th></tr></thead>
                 <tbody>
                   {models.length === 0 ? (
-                    <tr><td className="provider-detail-models-empty" colSpan={9}>没有匹配的 Model definition</td></tr>
-                  ) : models.map((model) => (
-                    <tr key={model.id}>
-                      <td><strong>{model.name ?? "未命名模型"}</strong><code>{model.id}</code></td>
-                      <td>{model.effectiveApi ?? "未配置"}</td>
-                      <td>{model.apiSource === "provider" ? "继承 Provider" : model.apiSource === "model" ? "模型指定" : "未配置"}</td>
-                      <td>{model.input.length ? model.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : "不支持").join(" · ") : "未配置"}</td>
-                      <td>{formatNumber(model.contextWindow)}</td>
-                      <td>{formatNumber(model.maxTokens)}</td>
-                      <td>—</td>
-                      <td>—</td>
-                      <td><span className="provider-detail-model-action" aria-label="Model 操作不可用">…</span></td>
-                    </tr>
-                  ))}
+                    <tr><td className="provider-detail-models-empty" colSpan={9}>{provider.models.length === 0 ? "尚未配置 Model definition。" : "没有匹配的 Model definition"}</td></tr>
+                  ) : models.map((model) => {
+                    const status = modelStatusView(model);
+                    const sourceLabel = model.apiSource === "provider" ? "继承 Provider" : model.apiSource === "model" ? "模型指定" : "未配置";
+                    return (
+                      <tr key={model.id} className={model.status === "read-only" ? "provider-detail-model-row--readonly" : undefined}>
+                        <td><div className="provider-detail-model-cell"><strong>{model.name ?? "未命名模型"}</strong><code>{model.id}</code><span className={`provider-detail-model-status provider-detail-model-status--${status.tone}`}>{status.label}</span></div></td>
+                        <td>{model.effectiveApi ?? "未配置"}</td>
+                        <td title={sourceLabel}>{sourceLabel}</td>
+                        <td>{model.input.length ? model.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : "不支持").join(" · ") : "未配置"}</td>
+                        <td>{formatNumber(model.contextWindow)}</td><td>{formatNumber(model.maxTokens)}</td><td>{model.referenceCount}</td><td>—</td>
+                        <td><div className="provider-detail-model-actions">
+                          <Button type="button" variant="secondary" className="provider-detail-model-action" aria-label={`Model 操作 ${model.id}`} aria-expanded={openModelActions === model.id} title="Model 操作" onClick={() => setOpenModelActions((current) => current === model.id ? null : model.id)}><MoreHorizontal aria-hidden="true" size={18} /></Button>
+                          {openModelActions === model.id ? <div className="provider-detail-model-menu" role="menu">
+                            {model.editable ? (
+                              <>
+                                <Button type="button" variant="secondary" role="menuitem" onClick={() => { setOpenModelActions(null); setModelEditor({ mode: "edit", model }); }}><Pencil aria-hidden="true" size={15} />编辑</Button>
+                                {model.status === "normal" ? <Button type="button" variant="secondary" role="menuitem" onClick={() => { setOpenModelActions(null); setModelEditor({ mode: "create", model, copy: true }); }}><Copy aria-hidden="true" size={15} />复制</Button> : null}
+                                <Button type="button" variant="secondary" role="menuitem" className="provider-detail-model-menu__danger" onClick={() => { setOpenModelActions(null); setDeleteError(null); setDeletingModel(model); }}><Trash2 aria-hidden="true" size={15} />删除</Button>
+                              </>
+                            ) : <Button type="button" variant="secondary" role="menuitem" onClick={() => { setOpenModelActions(null); setModelEditor({ mode: "view", model }); }}><Info aria-hidden="true" size={15} />查看</Button>}
+                          </div> : null}
+                          {!model.editable ? <span className="provider-detail-model-readonly-label">只读</span> : null}
+                        </div></td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </section>
-            <section className="provider-detail-latest-test" aria-label="最近测试">
-              <StatusIndicator tone="neutral">暂无测试结果</StatusIndicator>
-              <span>保存后的 Model 测试结果会显示在这里。</span>
-            </section>
-            {editing && openedModelsHash ? (
-              <ProviderEditDialog
-                provider={provider}
-                openedModelsHash={openedModelsHash}
-                onDismiss={() => setEditing(false)}
-                onReload={reload}
-                onSaved={async () => reload()}
-              />
-            ) : null}
+            <section className="provider-detail-latest-test" aria-label="最近测试"><StatusIndicator tone="neutral">暂无测试结果</StatusIndicator><span>保存后的 Model 测试结果会显示在这里。</span></section>
+            {editing && openedModelsHash ? <ProviderEditDialog provider={provider} openedModelsHash={openedModelsHash} onDismiss={() => setEditing(false)} onReload={reload} onSaved={async () => reload()} /> : null}
+            {modelEditor && openedModelsHash ? <ModelCreateSheet key={`${modelEditor.mode}-${modelEditor.model?.id ?? "new"}-${modelEditor.copy ? "copy" : "edit"}`} provider={provider} openedModelsHash={openedModelsHash} mode={modelEditor.mode} model={modelEditor.model} copy={modelEditor.copy} onDismiss={() => setModelEditor(null)} onReload={reload} onSaved={saveModel} /> : null}
+            {deletingModel ? <ConfirmDialog title="删除模型？" confirmLabel="删除模型" onCancel={() => setDeletingModel(null)} onConfirm={() => void deleteModel()}><p>将删除 {provider.id}/{deletingModel.id}。</p>{deletingModel.referenceCount > 0 ? <p>检测到 {deletingModel.referenceCount} 个配置引用：{deletingModel.referencePaths.join("、")}。删除会被阻止。</p> : null}{provider.modelCount <= 1 ? <p>这是 Provider 下的最后一个 Model definition，删除会被阻止。</p> : <p>此操作会创建备份。</p>}</ConfirmDialog> : null}
           </>
         )}
       </main>
     </MainShell>
   );
+}
+
+function modelStatusView(model: OverviewModel): { label: string; tone: "success" | "warning" | "danger" } {
+  if (model.status === "read-only" || !model.editable) return { label: "只读", tone: "danger" };
+  if (model.status === "incomplete" || !model.complete) return { label: "配置不完整", tone: "warning" };
+  return { label: "正常", tone: "success" };
 }
 
 function formatNumber(value: number | null): string {

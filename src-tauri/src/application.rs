@@ -11,11 +11,17 @@ use parking_lot::{Condvar, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_opener::OpenerExt;
 
+pub(crate) use crate::model_mutation::{
+    CreateModelInput, DeleteModelInput, EditModelInput, ModelMutationResult,
+};
+pub(crate) use crate::models_write::ModelsWriteFailurePoint;
 pub(crate) use crate::provider_mutation::{
     CreateCustomProviderInput, CreateCustomProviderResult, EditCustomProviderInput,
-    EditCustomProviderResult, ProviderMutationFailurePoint,
+    EditCustomProviderResult,
 };
 
+#[cfg(test)]
+pub(crate) use crate::model_mutation::{ModelDefinitionFields, ModelEditFields};
 #[cfg(test)]
 pub(crate) use crate::provider_mutation::{
     CreateModelFields, CreateProviderFields, DirectApiKeyIntent, ProviderAuthMode, SupportedApi,
@@ -25,6 +31,7 @@ pub(crate) use crate::provider_mutation::{
 use crate::{
     bundled_catalog,
     error::{AppError, io_error_cause},
+    model_mutation,
     omp_environment::{OmpEnvironment, SystemOmpEnvironment},
     overview::{OverviewDto, OverviewReadResult, read_overview},
     provider_mutation,
@@ -230,7 +237,7 @@ pub struct AppService {
     detection_lock: Arc<Mutex<()>>,
     overview_load: Arc<OverviewLoadCoordinator>,
     #[cfg(test)]
-    provider_mutation_failure: Arc<Mutex<Option<ProviderMutationFailurePoint>>>,
+    models_write_failure: Arc<Mutex<Option<ModelsWriteFailurePoint>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -285,6 +292,55 @@ impl ProviderWriteOperation {
         }
     }
 }
+#[derive(Clone, Copy)]
+enum ModelWriteOperation {
+    Create,
+    Edit,
+    Delete,
+}
+
+impl ModelWriteOperation {
+    fn confirmation_required_error(self) -> AppError {
+        let operation = match self {
+            Self::Create => "创建模型",
+            Self::Edit => "编辑模型",
+            Self::Delete => "删除模型",
+        };
+        AppError::new(
+            match self {
+                Self::Create => "model-create-confirmation-required",
+                Self::Edit => "model-edit-confirmation-required",
+                Self::Delete => "model-delete-confirmation-required",
+            },
+            format!("尚未确认新的 OMP 与 Target configuration，不能{operation}。"),
+            "请先在设置页面确认 OMP 与 Target configuration 后重试。",
+        )
+    }
+
+    fn unavailable_error(self) -> AppError {
+        AppError::new(
+            match self {
+                Self::Create => "model-create-unavailable",
+                Self::Edit => "model-edit-unavailable",
+                Self::Delete => "model-delete-unavailable",
+            },
+            "无法重新验证 OMP 的 Target configuration。",
+            "请重新检测或重新选择 OMP。",
+        )
+    }
+
+    fn catalog_missing_error(self) -> AppError {
+        AppError::new(
+            match self {
+                Self::Create => "model-create-catalog-missing",
+                Self::Edit => "model-edit-catalog-missing",
+                Self::Delete => "model-delete-catalog-missing",
+            },
+            "当前 OMP 版本没有匹配的 bundled Provider 清单。",
+            "为避免覆盖 OMP 内置 Provider，Provider 与模型管理暂时只读。",
+        )
+    }
+}
 
 struct ProviderWriteContext {
     target: Box<TargetConfigurationDiscovery>,
@@ -324,7 +380,7 @@ impl AppService {
             detection_lock: Arc::new(Mutex::new(())),
             overview_load: Arc::new(OverviewLoadCoordinator::default()),
             #[cfg(test)]
-            provider_mutation_failure: Arc::new(Mutex::new(None)),
+            models_write_failure: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -813,7 +869,7 @@ impl AppService {
             &self.backup_root,
             context.catalog,
             &input,
-            self.take_provider_mutation_failure(),
+            self.take_models_write_failure(),
         );
         if result.is_ok() {
             self.clear_configuration_snapshot();
@@ -832,7 +888,7 @@ impl AppService {
             &self.backup_root,
             context.catalog,
             &input,
-            self.take_provider_mutation_failure(),
+            self.take_models_write_failure(),
         );
         if result.is_ok() {
             self.clear_configuration_snapshot();
@@ -840,6 +896,73 @@ impl AppService {
         result
     }
 
+    pub fn create_model(&self, input: CreateModelInput) -> Result<ModelMutationResult, AppError> {
+        let _detection = self.detection_lock.lock();
+        let context = self.prepare_model_write(ModelWriteOperation::Create)?;
+        let result = model_mutation::create_model(
+            &context.target,
+            &self.backup_root,
+            context.catalog,
+            &input,
+            self.take_models_write_failure(),
+        );
+        if result.is_ok() {
+            self.clear_configuration_snapshot();
+        }
+        result
+    }
+
+    pub fn edit_model(&self, input: EditModelInput) -> Result<ModelMutationResult, AppError> {
+        let _detection = self.detection_lock.lock();
+        let context = self.prepare_model_write(ModelWriteOperation::Edit)?;
+        let result = model_mutation::edit_model(
+            &context.target,
+            &self.backup_root,
+            context.catalog,
+            &input,
+            self.take_models_write_failure(),
+        );
+        if result.is_ok() {
+            self.clear_configuration_snapshot();
+        }
+        result
+    }
+
+    pub fn delete_model(&self, input: DeleteModelInput) -> Result<ModelMutationResult, AppError> {
+        let _detection = self.detection_lock.lock();
+        let context = self.prepare_model_write(ModelWriteOperation::Delete)?;
+        let result = model_mutation::delete_model(
+            &context.target,
+            &self.backup_root,
+            context.catalog,
+            &input,
+            self.take_models_write_failure(),
+        );
+        if result.is_ok() {
+            self.clear_configuration_snapshot();
+        }
+        result
+    }
+
+    fn prepare_model_write(
+        &self,
+        operation: ModelWriteOperation,
+    ) -> Result<ProviderWriteContext, AppError> {
+        let state = self.detect_omp_internal();
+        let (version, target) = match state {
+            StartupState::OmpReady {
+                version,
+                target_configuration,
+                requires_confirmation: false,
+                ..
+            } => (version, target_configuration),
+            StartupState::OmpReady { .. } => return Err(operation.confirmation_required_error()),
+            _ => return Err(operation.unavailable_error()),
+        };
+        let catalog = bundled_catalog::for_version(&version)?
+            .ok_or_else(|| operation.catalog_missing_error())?;
+        Ok(ProviderWriteContext { target, catalog })
+    }
     fn prepare_provider_write(
         &self,
         operation: ProviderWriteOperation,
@@ -860,10 +983,10 @@ impl AppService {
         Ok(ProviderWriteContext { target, catalog })
     }
 
-    fn take_provider_mutation_failure(&self) -> Option<ProviderMutationFailurePoint> {
+    fn take_models_write_failure(&self) -> Option<ModelsWriteFailurePoint> {
         #[cfg(test)]
         {
-            self.provider_mutation_failure.lock().take()
+            self.models_write_failure.lock().take()
         }
         #[cfg(not(test))]
         {
@@ -872,11 +995,8 @@ impl AppService {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_provider_mutation_failure_for_test(
-        &self,
-        failure: ProviderMutationFailurePoint,
-    ) {
-        *self.provider_mutation_failure.lock() = Some(failure);
+    pub(crate) fn set_models_write_failure_for_test(&self, failure: ModelsWriteFailurePoint) {
+        *self.models_write_failure.lock() = Some(failure);
     }
 
     fn update_settings(
@@ -1100,6 +1220,38 @@ pub fn edit_custom_provider(
     result
 }
 
+#[tauri::command]
+pub fn create_model(
+    service: tauri::State<'_, AppService>,
+    input: CreateModelInput,
+) -> Result<ModelMutationResult, AppError> {
+    let started_at = Instant::now();
+    let result = service.create_model(input);
+    log_command_result("create_model", started_at, &result);
+    result
+}
+
+#[tauri::command]
+pub fn edit_model(
+    service: tauri::State<'_, AppService>,
+    input: EditModelInput,
+) -> Result<ModelMutationResult, AppError> {
+    let started_at = Instant::now();
+    let result = service.edit_model(input);
+    log_command_result("edit_model", started_at, &result);
+    result
+}
+
+#[tauri::command]
+pub fn delete_model(
+    service: tauri::State<'_, AppService>,
+    input: DeleteModelInput,
+) -> Result<ModelMutationResult, AppError> {
+    let started_at = Instant::now();
+    let result = service.delete_model(input);
+    log_command_result("delete_model", started_at, &result);
+    result
+}
 #[tauri::command]
 pub fn detect_omp(service: tauri::State<'_, AppService>) -> StartupState {
     let started_at = Instant::now();

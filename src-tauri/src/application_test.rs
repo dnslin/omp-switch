@@ -10,10 +10,11 @@ use std::{
 
 use crate::{
     application::{
-        AppService, AppSettings, CreateCustomProviderInput, CreateModelFields,
-        CreateProviderFields, DirectApiKeyIntent, EditCustomProviderInput, OverviewLoadDto,
-        ProviderAuthMode, ProviderMutationFailurePoint, StartupState, SupportedApi, SupportedInput,
-        Theme, UiSettingsUpdate,
+        AppService, AppSettings, CreateCustomProviderInput, CreateModelFields, CreateModelInput,
+        CreateProviderFields, DeleteModelInput, DirectApiKeyIntent, EditCustomProviderInput,
+        EditModelInput, ModelDefinitionFields, ModelEditFields, ModelsWriteFailurePoint,
+        OverviewLoadDto, ProviderAuthMode, StartupState, SupportedApi, SupportedInput, Theme,
+        UiSettingsUpdate,
     },
     omp_environment::{CommandOutput, OmpEnvironment},
     target_configuration::{
@@ -2708,58 +2709,55 @@ fn provider_edit_stops_on_an_external_models_hash_conflict() {
 #[test]
 fn provider_edit_failure_injection_keeps_the_original_file_intact() {
     let mut failures = vec![
-        ("before backup", ProviderMutationFailurePoint::BeforeBackup),
+        ("before backup", ModelsWriteFailurePoint::BeforeBackup),
         (
             "backup directory",
-            ProviderMutationFailurePoint::BackupDirectoryCreationFailure,
+            ModelsWriteFailurePoint::BackupDirectoryCreationFailure,
         ),
         (
             "backup file open",
-            ProviderMutationFailurePoint::BackupFileOpenFailure,
+            ModelsWriteFailurePoint::BackupFileOpenFailure,
         ),
         (
             "backup file write",
-            ProviderMutationFailurePoint::BackupFileWriteFailure,
+            ModelsWriteFailurePoint::BackupFileWriteFailure,
         ),
         (
             "backup file sync",
-            ProviderMutationFailurePoint::BackupFileSyncFailure,
+            ModelsWriteFailurePoint::BackupFileSyncFailure,
         ),
         (
             "temporary open",
-            ProviderMutationFailurePoint::TemporaryFileOpenFailure,
+            ModelsWriteFailurePoint::TemporaryFileOpenFailure,
         ),
         (
             "temporary write",
-            ProviderMutationFailurePoint::TemporaryFileWriteFailure,
+            ModelsWriteFailurePoint::TemporaryFileWriteFailure,
         ),
         (
             "temporary sync",
-            ProviderMutationFailurePoint::TemporaryFileSyncFailure,
+            ModelsWriteFailurePoint::TemporaryFileSyncFailure,
         ),
-        ("after backup", ProviderMutationFailurePoint::AfterBackup),
+        ("after backup", ModelsWriteFailurePoint::AfterBackup),
         (
             "before temporary write",
-            ProviderMutationFailurePoint::BeforeTemporaryWrite,
+            ModelsWriteFailurePoint::BeforeTemporaryWrite,
         ),
         (
             "temporary reparse",
-            ProviderMutationFailurePoint::CorruptTemporaryFile,
+            ModelsWriteFailurePoint::CorruptTemporaryFile,
         ),
         (
             "untouched comparison",
-            ProviderMutationFailurePoint::MutateUntouchedValue,
+            ModelsWriteFailurePoint::MutateUntouchedValue,
         ),
         (
             "before replacement",
-            ProviderMutationFailurePoint::BeforeReplacement,
+            ModelsWriteFailurePoint::BeforeReplacement,
         ),
     ];
     #[cfg(unix)]
-    failures.push((
-        "replacement commit",
-        ProviderMutationFailurePoint::CommitFailure,
-    ));
+    failures.push(("replacement commit", ModelsWriteFailurePoint::CommitFailure));
     for (name, failure) in failures {
         let app_data = tempdir().unwrap();
         let target = app_data.path().join("agent");
@@ -2774,7 +2772,7 @@ fn provider_edit_failure_injection_keeps_the_original_file_intact() {
                 value: "fixture-replacement-for-injection".to_owned(),
             },
         );
-        service.set_provider_mutation_failure_for_test(failure);
+        service.set_models_write_failure_for_test(failure);
 
         let error = service.edit_custom_provider(input).unwrap_err();
 
@@ -3252,57 +3250,57 @@ fn custom_provider_creation_rejects_invalid_and_colliding_values_without_writing
 #[test]
 fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
     let mut failures = vec![
-        ("before backup", ProviderMutationFailurePoint::BeforeBackup),
+        ("before backup", ModelsWriteFailurePoint::BeforeBackup),
         (
             "backup directory creation",
-            ProviderMutationFailurePoint::BackupDirectoryCreationFailure,
+            ModelsWriteFailurePoint::BackupDirectoryCreationFailure,
         ),
         (
             "backup file open",
-            ProviderMutationFailurePoint::BackupFileOpenFailure,
+            ModelsWriteFailurePoint::BackupFileOpenFailure,
         ),
         (
             "backup file write",
-            ProviderMutationFailurePoint::BackupFileWriteFailure,
+            ModelsWriteFailurePoint::BackupFileWriteFailure,
         ),
         (
             "backup file sync",
-            ProviderMutationFailurePoint::BackupFileSyncFailure,
+            ModelsWriteFailurePoint::BackupFileSyncFailure,
         ),
         (
             "temporary file open",
-            ProviderMutationFailurePoint::TemporaryFileOpenFailure,
+            ModelsWriteFailurePoint::TemporaryFileOpenFailure,
         ),
         (
             "temporary file write",
-            ProviderMutationFailurePoint::TemporaryFileWriteFailure,
+            ModelsWriteFailurePoint::TemporaryFileWriteFailure,
         ),
         (
             "temporary file sync",
-            ProviderMutationFailurePoint::TemporaryFileSyncFailure,
+            ModelsWriteFailurePoint::TemporaryFileSyncFailure,
         ),
-        ("after backup", ProviderMutationFailurePoint::AfterBackup),
+        ("after backup", ModelsWriteFailurePoint::AfterBackup),
         (
             "before temporary write",
-            ProviderMutationFailurePoint::BeforeTemporaryWrite,
+            ModelsWriteFailurePoint::BeforeTemporaryWrite,
         ),
         (
             "temporary reparse",
-            ProviderMutationFailurePoint::CorruptTemporaryFile,
+            ModelsWriteFailurePoint::CorruptTemporaryFile,
         ),
         (
             "untouched comparison",
-            ProviderMutationFailurePoint::MutateUntouchedValue,
+            ModelsWriteFailurePoint::MutateUntouchedValue,
         ),
         (
             "before replacement",
-            ProviderMutationFailurePoint::BeforeReplacement,
+            ModelsWriteFailurePoint::BeforeReplacement,
         ),
     ];
     #[cfg(unix)]
     failures.push((
         "replacement commit failure",
-        ProviderMutationFailurePoint::CommitFailure,
+        ModelsWriteFailurePoint::CommitFailure,
     ));
     for (name, failure) in failures {
         let app_data = tempdir().unwrap();
@@ -3320,7 +3318,7 @@ fn custom_provider_creation_failure_injection_keeps_the_original_file_intact() {
             .models
             .content_hash
             .unwrap();
-        service.set_provider_mutation_failure_for_test(failure);
+        service.set_models_write_failure_for_test(failure);
 
         assert!(
             service
@@ -3353,9 +3351,7 @@ fn custom_provider_creation_does_not_report_failure_after_replacing_models() {
         .models
         .content_hash
         .unwrap();
-    service.set_provider_mutation_failure_for_test(
-        ProviderMutationFailurePoint::AfterAtomicReplacement,
-    );
+    service.set_models_write_failure_for_test(ModelsWriteFailurePoint::AfterAtomicReplacement);
 
     let result = service.create_custom_provider(provider_creation_input(opened_models_hash));
     let written = fs::read(target.join("models.yml")).unwrap();
@@ -3392,8 +3388,8 @@ fn custom_provider_creation_reports_a_partial_backup_cleanup_failure() {
             .models
             .content_hash
             .unwrap();
-        service.set_provider_mutation_failure_for_test(
-            ProviderMutationFailurePoint::BackupFilePermissionAndCleanupFailure,
+        service.set_models_write_failure_for_test(
+            ModelsWriteFailurePoint::BackupFilePermissionAndCleanupFailure,
         );
 
         let error = service
@@ -3403,4 +3399,498 @@ fn custom_provider_creation_reports_a_partial_backup_cleanup_failure() {
         assert_eq!(fs::read(target.join("models.yml")).unwrap(), original);
     });
     assert_eq!(warnings.load(Ordering::SeqCst), 1);
+}
+#[test]
+fn model_create_and_edit_preserve_unknown_fields_and_stable_protocol_semantics() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"unrecognizedRoot:
+  keep: root
+providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: existing
+        name: Existing
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+      - id: sibling
+        name: Sibling
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+        modelUnknown:
+          keep: model
+  other:
+    baseUrl: https://other.example/v1
+    api: openai-responses
+    providerUnknown:
+      keep: provider
+    models:
+      - id: other-model
+        name: Other
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#,
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let opened_hash = opened_models_hash(&service);
+
+    let created = service
+        .create_model(CreateModelInput {
+            opened_models_hash: opened_hash,
+            provider_id: "editable".to_owned(),
+            model: ModelDefinitionFields {
+                id: "  created  ".to_owned(),
+                name: "Created".to_owned(),
+                api: Some(SupportedApi::AnthropicMessages),
+                reasoning: true,
+                input: vec![SupportedInput::Text, SupportedInput::Image],
+                context_window: 200_000,
+                max_tokens: 20_000,
+            },
+        })
+        .unwrap();
+    assert_eq!(created.model_id, "created");
+
+    let created_tree: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    assert_eq!(created_tree["unrecognizedRoot"]["keep"], "root");
+    assert_eq!(
+        created_tree["providers"]["other"]["providerUnknown"]["keep"],
+        "provider"
+    );
+    assert_eq!(
+        created_tree["providers"]["editable"]["models"][2]["api"],
+        "anthropic-messages"
+    );
+    assert_eq!(
+        created_tree["providers"]["editable"]["models"][1]["modelUnknown"]["keep"],
+        "model"
+    );
+
+    let edited = service
+        .edit_model(EditModelInput {
+            opened_models_hash: opened_models_hash(&service),
+            provider_id: "editable".to_owned(),
+            model_id: "existing".to_owned(),
+            model: ModelEditFields {
+                name: "Edited".to_owned(),
+                api: None,
+                reasoning: false,
+                input: vec![SupportedInput::Image],
+                context_window: 120_000,
+                max_tokens: 12_000,
+            },
+        })
+        .unwrap();
+    assert_eq!(edited.model_id, "existing");
+
+    let edited_tree: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    let existing = &edited_tree["providers"]["editable"]["models"][0];
+    assert_eq!(existing["name"], "Edited");
+    assert_eq!(existing["api"], serde_yaml::Value::Null);
+    assert_eq!(
+        edited_tree["providers"]["editable"]["models"][1]["modelUnknown"]["keep"],
+        "model"
+    );
+    assert_eq!(
+        existing["input"],
+        serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("image".to_owned())])
+    );
+}
+
+#[test]
+fn model_copy_creates_a_new_definition_from_supported_fields_only() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        "providers:\n  editable:\n    baseUrl: https://example.com/v1\n    api: openai-responses\n    models:\n      - id: source\n        name: Source\n        input: [text, image]\n        reasoning: true\n        contextWindow: 100000\n        maxTokens: 10000\n",
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let result = service
+        .create_model(CreateModelInput {
+            opened_models_hash: opened_models_hash(&service),
+            provider_id: "editable".to_owned(),
+            model: ModelDefinitionFields {
+                id: "source-copy".to_owned(),
+                name: "Source Copy".to_owned(),
+                api: None,
+                reasoning: true,
+                input: vec![SupportedInput::Text, SupportedInput::Image],
+                context_window: 100_000,
+                max_tokens: 10_000,
+            },
+        })
+        .unwrap();
+    assert_eq!(result.model_id, "source-copy");
+    let tree: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    let copied = &tree["providers"]["editable"]["models"][1];
+    assert_eq!(copied["id"], "source-copy");
+    assert_eq!(copied["name"], "Source Copy");
+    assert_eq!(copied["api"], serde_yaml::Value::Null);
+    assert_eq!(
+        copied
+            .as_mapping()
+            .unwrap()
+            .get(serde_yaml::Value::String("testResult".to_owned())),
+        None
+    );
+}
+#[test]
+fn model_mutations_enforce_validation_stable_ids_and_read_only_boundaries() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: existing
+        name: Existing
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+      - id: locked
+        name: Locked
+        baseUrl: https://model.example/v1
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#,
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let hash = opened_models_hash(&service);
+
+    let mut duplicate = CreateModelInput {
+        opened_models_hash: hash.clone(),
+        provider_id: "editable".to_owned(),
+        model: ModelDefinitionFields {
+            id: "EXISTING".to_owned(),
+            name: "Duplicate".to_owned(),
+            api: None,
+            reasoning: false,
+            input: vec![SupportedInput::Text],
+            context_window: 100_000,
+            max_tokens: 10_000,
+        },
+    };
+    assert_eq!(
+        service.create_model(duplicate.clone()).unwrap_err().code,
+        "model-id-conflict"
+    );
+    duplicate.model.id = "new:auto".to_owned();
+    assert_eq!(
+        service.create_model(duplicate.clone()).unwrap_err().code,
+        "model-id-invalid"
+    );
+    duplicate.model.id = "new-model".to_owned();
+    duplicate.model.max_tokens = 200_000;
+    assert_eq!(
+        service.create_model(duplicate).unwrap_err().code,
+        "model-token-limit-invalid"
+    );
+
+    let stable_error = service
+        .edit_model(EditModelInput {
+            opened_models_hash: hash.clone(),
+            provider_id: "editable".to_owned(),
+            model_id: "EXISTING".to_owned(),
+            model: ModelEditFields {
+                name: "Changed".to_owned(),
+                api: None,
+                reasoning: false,
+                input: vec![SupportedInput::Text],
+                context_window: 100_000,
+                max_tokens: 10_000,
+            },
+        })
+        .unwrap_err();
+    assert_eq!(stable_error.code, "model-id-immutable");
+
+    let read_only_edit = service
+        .edit_model(EditModelInput {
+            opened_models_hash: hash.clone(),
+            provider_id: "editable".to_owned(),
+            model_id: "locked".to_owned(),
+            model: ModelEditFields {
+                name: "Changed".to_owned(),
+                api: None,
+                reasoning: false,
+                input: vec![SupportedInput::Text],
+                context_window: 100_000,
+                max_tokens: 10_000,
+            },
+        })
+        .unwrap_err();
+    assert_eq!(read_only_edit.code, "model-read-only");
+
+    let overview = service.get_overview_load().overview.unwrap();
+    let read_only_delete = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash: overview.files.models.content_hash.unwrap(),
+            opened_config_hash: overview.files.config.content_hash.unwrap(),
+            provider_id: "editable".to_owned(),
+            model_id: "locked".to_owned(),
+        })
+        .unwrap_err();
+    assert_eq!(read_only_delete.code, "model-read-only");
+}
+#[test]
+fn overview_classifies_incomplete_and_read_only_models_and_counts_full_config_references() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: incomplete
+        name: ""
+        input: []
+        contextWindow: 0
+        maxTokens: 0
+      - id: locked
+        name: Locked
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+        baseUrl: https://model.example/v1
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        r#"modelRoles:
+  default: editable/locked
+otherSettings:
+  fallback: editable/locked:high
+  "api_key=fixture-reference-secret": editable/locked
+"#,
+    )
+    .unwrap();
+
+    let service = service_for_target(&target);
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    let incomplete = dto["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "incomplete")
+        .unwrap();
+    let locked = dto["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "locked")
+        .unwrap();
+    assert_eq!(incomplete["status"], "incomplete");
+    assert_eq!(incomplete["complete"], false);
+    assert_eq!(incomplete["editable"], true);
+    assert_eq!(locked["status"], "read-only");
+    assert_eq!(locked["editable"], false);
+    assert_eq!(locked["referenceCount"], 3);
+    assert_eq!(locked["referencePaths"].as_array().unwrap().len(), 3);
+    assert!(!dto.to_string().contains("fixture-reference-secret"));
+}
+
+#[test]
+fn model_delete_requires_no_reference_and_never_removes_the_last_model() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"unrecognizedRoot:
+  keep: root
+providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: first
+        name: First
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+      - id: second
+        name: Second
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#,
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let deleted = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash: opened_models_hash(&service),
+            opened_config_hash: service
+                .get_overview_load()
+                .overview
+                .unwrap()
+                .files
+                .config
+                .content_hash
+                .unwrap(),
+            provider_id: "editable".to_owned(),
+            model_id: "second".to_owned(),
+        })
+        .unwrap();
+    assert_eq!(deleted.model_id, "second");
+    let after_delete: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    assert_eq!(after_delete["unrecognizedRoot"]["keep"], "root");
+    assert_eq!(
+        after_delete["providers"]["editable"]["models"]
+            .as_sequence()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    fs::write(target.join("config.yml"), "modelRoles:\n  default: Editable/FIRST:high\notherSettings:\n  candidates:\n    - editable/first\n    - EDITABLE/*\n").unwrap();
+    let blocked = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash: opened_models_hash(&service),
+            opened_config_hash: service
+                .get_overview_load()
+                .overview
+                .unwrap()
+                .files
+                .config
+                .content_hash
+                .unwrap(),
+            provider_id: "editable".to_owned(),
+            model_id: "first".to_owned(),
+        })
+        .unwrap_err();
+    assert_eq!(blocked.code, "model-delete-referenced");
+    assert!(blocked.message.contains("modelRoles[\"default\"]"));
+
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let last = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash: opened_models_hash(&service),
+            opened_config_hash: service
+                .get_overview_load()
+                .overview
+                .unwrap()
+                .files
+                .config
+                .content_hash
+                .unwrap(),
+            provider_id: "editable".to_owned(),
+            model_id: "first".to_owned(),
+        })
+        .unwrap_err();
+    assert_eq!(last.code, "model-last-definition");
+}
+#[test]
+fn model_delete_rechecks_config_hash_before_atomic_replacement() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_models = b"providers:\n  editable:\n    baseUrl: https://example.com/v1\n    api: openai-responses\n    models:\n      - id: first\n        name: First\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n      - id: second\n        name: Second\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n";
+    fs::write(target.join("models.yml"), original_models).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+    service
+        .set_models_write_failure_for_test(ModelsWriteFailurePoint::MutateConfigBeforeReplacement);
+
+    let error = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash: overview.files.models.content_hash.unwrap(),
+            opened_config_hash: overview.files.config.content_hash.unwrap(),
+            provider_id: "editable".to_owned(),
+            model_id: "second".to_owned(),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, "config-hash-conflict");
+    assert_eq!(
+        fs::read(target.join("models.yml")).unwrap(),
+        original_models
+    );
+    assert!(
+        String::from_utf8(fs::read(target.join("config.yml")).unwrap())
+            .unwrap()
+            .contains("editable/second")
+    );
+}
+#[test]
+fn overview_marks_malformed_model_fields_read_only() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: malformed-name
+        name: 123
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+      - id: malformed-context
+        name: Malformed Context
+        input: [text]
+        contextWindow: nope
+        maxTokens: 1000
+"#,
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+
+    let dto = serde_json::to_value(
+        service_for_target(&target)
+            .get_overview_load()
+            .overview
+            .unwrap(),
+    )
+    .unwrap();
+    for id in ["malformed-name", "malformed-context"] {
+        let model = dto["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == id)
+            .unwrap();
+        assert_eq!(model["status"], "read-only", "{id}");
+        assert_eq!(model["editable"], false, "{id}");
+        assert!(
+            model["readOnlyReason"]
+                .as_str()
+                .unwrap()
+                .contains("字段格式不受支持"),
+            "{id}: {:?}",
+            model["readOnlyReason"]
+        );
+    }
 }
