@@ -24,6 +24,7 @@ a { color: inherit; text-decoration: none; }
 .sidebar-footer code { color: var(--color-text-disabled); font-family: var(--font-mono); font-size: 13px; }
 .sidebar-footer__status { color: var(--color-text-disabled); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .page-content { min-width: 0; overflow: auto; padding: 34px 40px 28px; }
+.page-content--roles { padding-inline: 36px; }
 .placeholder-card { margin-top: 20px; max-width: 760px; color: var(--color-text-secondary); }
 .setup-body { min-height: 100%; height: 100%; overflow: auto; display: flex; align-items: safe center; justify-content: center; padding: 64px 0; }
 .setup-body--extended { padding-block: 0; }
@@ -508,13 +509,13 @@ a { color: inherit; text-decoration: none; }
   .provider-edit-no-auth { margin-left: 0; }
 }
 
-.roles-page { min-width: 0; display: grid; align-content: start; gap: 20px; }
+.roles-page { min-width: 0; display: grid; align-content: start; gap: 16px; }
 .roles-header { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
-.roles-header-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 12px; }
-.roles-header-actions .app-button { min-height: 46px; padding-inline: 22px; }
+.roles-header-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 14px; }
+.roles-header-actions .app-button { min-height: 46px; padding-inline: 20px; }
 .roles-header-actions .roles-more-button { width: 54px; min-width: 54px; padding: 0; }
-.roles-dirty-status { display: inline-flex; align-items: center; gap: 8px; color: var(--color-warning); font-size: var(--font-size-sm); white-space: nowrap; }
-.roles-dirty-status .status-dot { width: 10px; height: 10px; background: var(--color-warning); }
+.roles-dirty-status { display: inline-flex; align-items: center; gap: 10px; color: var(--color-text-secondary); font-size: 15px; white-space: nowrap; }
+.roles-dirty-status .status-dot { width: 12px; height: 12px; background: var(--color-warning); }
 .roles-search { width: min(352px, 100%); min-height: 50px; }
 .roles-search:focus-within { border-color: var(--color-primary); box-shadow: 0 0 0 3px var(--color-primary-soft); }
 .roles-table-scroll { min-width: 0; height: auto; max-height: min(700px, calc(100vh - 240px)); min-height: 360px; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-bg-surface); }

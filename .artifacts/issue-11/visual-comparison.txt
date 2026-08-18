@@ -6,6 +6,8 @@ Implementation: `.artifacts/issue-11/roles-normal-tauri-1536x961.png` and `.arti
 Matched structure and dimensions:
 - Native macOS title bar is used; no second HTML title bar is drawn.
 - Sidebar width, active Roles navigation state, footer status block, page left/right padding, title/description hierarchy, and search control follow the reference tokens.
+- Roles Content now uses the Pencil padding tuple [34, 36, 28, 36] and 16 px vertical gap; at the 1536 px Tauri width the 1184 px table fits inside the 1188 px content track without horizontal overflow.
+- Header actions use 14 px gap and 20 px horizontal button padding. Dirty status uses 10 px gap, a 12 px warning dot, 15 px text, and secondary text color as in the Pencil frame.
 - Search width is 352 px; header overflow-menu button is 54 px; table header height is 52 px; role row horizontal cell padding is 18 px.
 - The table uses the Pencil column geometry exactly: Role 192, Description 246, Provider 156, Model 174, Thinking 158, Status 152, Actions 106, total 1184 px; row height and border rhythm match the reference.
 - Dirty state reproduces the reference advisor row: amber row background, `待保存` status indicator, amber unsaved marker, and enabled primary save action without changing the normal table skeleton.

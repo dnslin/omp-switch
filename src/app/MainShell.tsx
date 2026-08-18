@@ -14,7 +14,7 @@ const pages = [
   { to: "/settings", label: "设置", icon: Settings },
 ] as const;
 
-export function MainShell({ children, status }: { children: ReactNode; status?: ShellStatus }) {
+export function MainShell({ children, status, contentClassName }: { children: ReactNode; status?: ShellStatus; contentClassName?: string }) {
   const client = useTauriClient();
   const location = useLocation();
   const [detectedStatus, setDetectedStatus] = useState<ShellStatus | null>(null);
@@ -51,7 +51,7 @@ export function MainShell({ children, status }: { children: ReactNode; status?: 
             <span className="sidebar-footer__status">{footer.status}</span>
           </Link>
         </aside>
-        <section className="page-content">{children}</section>
+        <section className={contentClassName ? `page-content ${contentClassName}` : "page-content"}>{children}</section>
       </main>
     </div>
   );

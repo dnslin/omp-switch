@@ -624,7 +624,7 @@ export function ModelRolesPage() {
     ? { ...shellStatus, status: "config.yml 将在保存时自动备份" }
     : shellStatus;
   return (
-    <MainShell status={shell}>
+    <MainShell status={shell} contentClassName="page-content--roles">
       <div className="roles-page" aria-busy={loading}>
         {loading ? <RolesSkeleton /> : error ? (
           <section className="roles-error" role="alert" aria-live="assertive">
