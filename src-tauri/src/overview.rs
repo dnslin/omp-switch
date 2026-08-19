@@ -124,6 +124,8 @@ pub struct ProviderSummaryDto {
     pub classification: ProviderClassification,
     pub editable: bool,
     pub read_only_reason: Option<String>,
+    pub role_reference_paths: Vec<String>,
+    pub other_reference_paths: Vec<String>,
     pub models: Vec<ModelSummaryDto>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -171,6 +173,8 @@ pub struct ModelSummaryDto {
     pub editable: bool,
     pub reference_count: usize,
     pub reference_paths: Vec<String>,
+    pub role_reference_paths: Vec<String>,
+    pub other_reference_paths: Vec<String>,
     pub read_only_reason: Option<String>,
 }
 
@@ -266,9 +270,7 @@ pub(crate) fn read_overview(
     let (mut providers, providers_structure_valid) = models_tree
         .map(|tree| project_providers(tree, catalog))
         .unwrap_or((Vec::new(), false));
-    if let Some(config_tree) = config_tree {
-        annotate_model_references(&mut providers, config_tree);
-    }
+    annotate_model_references(&mut providers, models_tree, config_tree);
     let models = providers
         .iter()
         .flat_map(|provider| provider.models.iter().cloned())
@@ -890,6 +892,8 @@ fn project_provider(
             classification: ProviderClassification::Unsupported,
             editable: false,
             read_only_reason: Some("Provider 配置不是可识别的对象。".to_owned()),
+            role_reference_paths: Vec::new(),
+            other_reference_paths: Vec::new(),
             models: Vec::new(),
         };
     };
@@ -1012,6 +1016,8 @@ fn project_provider(
         classification,
         editable,
         read_only_reason,
+        role_reference_paths: Vec::new(),
+        other_reference_paths: Vec::new(),
         models,
     }
 }
@@ -1041,6 +1047,8 @@ fn project_model(
             editable: false,
             reference_count: 0,
             reference_paths: Vec::new(),
+            role_reference_paths: Vec::new(),
+            other_reference_paths: Vec::new(),
             read_only_reason: Some("Model definition 不是可识别的对象。".to_owned()),
         };
     };
@@ -1167,36 +1175,133 @@ fn project_model(
         editable: read_only_reason.is_none(),
         reference_count: 0,
         reference_paths: Vec::new(),
+        role_reference_paths: Vec::new(),
+        other_reference_paths: Vec::new(),
         read_only_reason,
     }
 }
 
-fn annotate_model_references(providers: &mut [ProviderSummaryDto], config_tree: &Value) {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReferenceScan {
+    pub(crate) role_paths: Vec<String>,
+    pub(crate) other_paths: Vec<String>,
+}
+
+fn annotate_model_references(
+    providers: &mut [ProviderSummaryDto],
+    models_tree: Option<&Value>,
+    config_tree: Option<&Value>,
+) {
     for provider in providers {
+        let provider_scan = scan_model_references(
+            models_tree,
+            config_tree,
+            &provider.id,
+            None,
+            Some(&provider_node_path(&provider.id)),
+        );
+        provider.role_reference_paths = provider_scan.role_paths;
+        provider.other_reference_paths = provider_scan.other_paths;
         for model in &mut provider.models {
-            model.reference_paths = model_reference_paths(config_tree, &provider.id, &model.id);
+            let skip_path =
+                models_tree.and_then(|tree| model_node_path(tree, &provider.id, &model.id));
+            let scan = scan_model_references(
+                models_tree,
+                config_tree,
+                &provider.id,
+                Some(&model.id),
+                skip_path.as_deref(),
+            );
+            model.role_reference_paths = scan.role_paths;
+            model.other_reference_paths = scan.other_paths;
+            model.reference_paths = model
+                .role_reference_paths
+                .iter()
+                .chain(model.other_reference_paths.iter())
+                .cloned()
+                .collect();
             model.reference_count = model.reference_paths.len();
         }
     }
 }
 
-pub(crate) fn model_reference_paths(
-    config_tree: &Value,
+pub(crate) fn scan_model_references(
+    models_tree: Option<&Value>,
+    config_tree: Option<&Value>,
     provider_id: &str,
-    model_id: &str,
-) -> Vec<String> {
-    let mut paths = Vec::new();
-    collect_model_reference_paths(config_tree, "", provider_id, model_id, &mut paths);
-    paths
+    model_id: Option<&str>,
+    skip_models_path: Option<&str>,
+) -> ReferenceScan {
+    let mut scan = ReferenceScan::default();
+    if let Some(tree) = models_tree {
+        collect_reference_paths(
+            tree,
+            "",
+            "models.yml",
+            provider_id,
+            model_id,
+            skip_models_path,
+            false,
+            &mut scan,
+        );
+    }
+    if let Some(tree) = config_tree {
+        collect_reference_paths(
+            tree,
+            "",
+            "config.yml",
+            provider_id,
+            model_id,
+            None,
+            false,
+            &mut scan,
+        );
+    }
+    scan
 }
 
-fn collect_model_reference_paths(
+pub(crate) fn provider_node_path(provider_id: &str) -> String {
+    format!(
+        "providers[\"{}\"]",
+        escape_reference_path_component(provider_id)
+    )
+}
+
+pub(crate) fn model_node_path(tree: &Value, provider_id: &str, model_id: &str) -> Option<String> {
+    let providers = mapping(mapping(tree).and_then(|root| mapping_get(root, "providers"))?)?;
+    let provider = providers.get(Value::String(provider_id.to_owned()))?;
+    let models = mapping(provider)
+        .and_then(|provider| mapping_get(provider, "models"))
+        .and_then(Value::as_sequence)?;
+    for (index, model) in models.iter().enumerate() {
+        if model
+            .as_mapping()
+            .and_then(|model| model.get(Value::String("id".to_owned())))
+            .and_then(Value::as_str)
+            == Some(model_id)
+        {
+            return Some(format!(
+                "{}[\"models\"][{index}]",
+                provider_node_path(provider_id)
+            ));
+        }
+    }
+    None
+}
+
+fn collect_reference_paths(
     value: &Value,
     path: &str,
+    file_name: &'static str,
     provider_id: &str,
-    model_id: &str,
-    paths: &mut Vec<String>,
+    model_id: Option<&str>,
+    skip_path: Option<&str>,
+    role_value: bool,
+    scan: &mut ReferenceScan,
 ) {
+    if skip_path.is_some_and(|candidate| candidate == path) {
+        return;
+    }
     match value {
         Value::Mapping(map) => {
             for (key, child) in map {
@@ -1206,22 +1311,40 @@ fn collect_model_reference_paths(
                 } else {
                     format!("{path}[\"{}\"]", escape_reference_path_component(key))
                 };
-                collect_model_reference_paths(child, &child_path, provider_id, model_id, paths);
+                let child_role_value = file_name == "config.yml" && path == "modelRoles";
+                collect_reference_paths(
+                    child,
+                    &child_path,
+                    file_name,
+                    provider_id,
+                    model_id,
+                    skip_path,
+                    child_role_value,
+                    scan,
+                );
             }
         }
         Value::Sequence(values) => {
             for (index, child) in values.iter().enumerate() {
-                collect_model_reference_paths(
+                collect_reference_paths(
                     child,
                     &format!("{path}[{index}]"),
+                    file_name,
                     provider_id,
                     model_id,
-                    paths,
+                    skip_path,
+                    false,
+                    scan,
                 );
             }
         }
-        Value::String(value) if is_model_selector_reference(value, provider_id, model_id) => {
-            paths.push(path.to_owned());
+        Value::String(value) if selector_matches_target(value, provider_id, model_id) => {
+            let path = format!("{file_name}:{path}");
+            if role_value {
+                scan.role_paths.push(path);
+            } else {
+                scan.other_paths.push(path);
+            }
         }
         _ => {}
     }
@@ -1236,7 +1359,7 @@ fn escape_reference_path_component(value: &str) -> String {
         .replace('\r', "\\r")
 }
 
-fn is_model_selector_reference(value: &str, provider_id: &str, model_id: &str) -> bool {
+fn selector_matches_target(value: &str, provider_id: &str, model_id: Option<&str>) -> bool {
     let Some((candidate_provider, candidate_model)) = value.split_once('/') else {
         return false;
     };
@@ -1245,14 +1368,15 @@ fn is_model_selector_reference(value: &str, provider_id: &str, model_id: &str) -
     {
         return false;
     }
-    if candidate_model == "*" {
+    if model_id.is_none() || candidate_model == "*" {
         return true;
     }
     let candidate_model = candidate_model
         .rsplit_once(':')
         .filter(|(_, thinking)| is_supported_thinking(thinking))
         .map_or(candidate_model, |(model, _)| model);
-    bundled_catalog::normalize_id(candidate_model) == bundled_catalog::normalize_id(model_id)
+    bundled_catalog::normalize_id(candidate_model)
+        == bundled_catalog::normalize_id(model_id.unwrap_or_default())
 }
 
 fn project_roles(

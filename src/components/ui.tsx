@@ -80,25 +80,29 @@ export function ConfirmDialog({
   children,
   cancelLabel = "取消",
   confirmLabel = "确认",
+  confirmDisabled = false,
   onCancel,
   onConfirm,
 }: PropsWithChildren<{
   title: string;
   cancelLabel?: string;
   confirmLabel?: string;
+  confirmDisabled?: boolean;
   onCancel(): void;
   onConfirm(): void;
 }>) {
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onCancel(); }}>
-      <DialogContent aria-describedby="confirm-dialog-description">
+      <DialogContent className="confirm-dialog" aria-describedby="confirm-dialog-description">
         <DialogTitle>{title}</DialogTitle>
-        <DialogDescription id="confirm-dialog-description" className="mt-5 text-base text-[var(--color-text-secondary)]">
-          {children}
+        <DialogDescription asChild>
+          <div id="confirm-dialog-description" className="mt-5 text-base text-[var(--color-text-secondary)]">
+            {children}
+          </div>
         </DialogDescription>
         <footer className="mt-5 flex justify-end gap-3">
           <Button variant="secondary" onClick={onCancel}>{cancelLabel}</Button>
-          <Button onClick={onConfirm}>{confirmLabel}</Button>
+          <Button disabled={confirmDisabled} onClick={onConfirm}>{confirmLabel}</Button>
         </footer>
       </DialogContent>
     </Dialog>
