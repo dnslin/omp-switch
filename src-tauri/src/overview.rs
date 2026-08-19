@@ -1326,13 +1326,15 @@ fn collect_reference_paths(
     match value {
         Value::Mapping(map) => {
             for (key, child) in map {
+                let child_role_value = file_name == "config.yml"
+                    && path == "modelRoles"
+                    && key.as_str().is_some_and(is_valid_role_id);
                 let key = reference_path_component(key);
                 let child_path = if path.is_empty() {
                     key
                 } else {
                     format!("{path}[\"{key}\"]")
                 };
-                let child_role_value = file_name == "config.yml" && path == "modelRoles";
                 collect_reference_paths(
                     child,
                     &child_path,

@@ -4393,6 +4393,53 @@ otherSettings:
 }
 
 #[test]
+fn deletion_reference_scan_treats_invalid_role_keys_as_other_paths() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: second
+        name: Second
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  42: editable/second\n",
+    )
+    .unwrap();
+
+    let dto = serde_json::to_value(
+        service_for_target(&target)
+            .get_overview_load()
+            .overview
+            .unwrap(),
+    )
+    .unwrap();
+    let second = dto["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "second")
+        .unwrap();
+
+    assert_eq!(second["roleReferencePaths"], serde_json::json!([]));
+    assert_eq!(
+        second["otherReferencePaths"],
+        serde_json::json!(["config.yml:modelRoles[\"42\"]"])
+    );
+}
+
+#[test]
 fn model_delete_blocks_reference_under_non_string_yaml_key() {
     let app_data = tempdir().unwrap();
     let target = app_data.path().join("agent");

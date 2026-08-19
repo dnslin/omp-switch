@@ -1615,6 +1615,7 @@ describe("React page seam", () => {
     });
     const createModel = vi.fn(async () => ({ providerId: "dnslin", modelId: "copied-model" }));
     const editModel = vi.fn(async () => ({ providerId: "dnslin", modelId: "incomplete" }));
+    const openTargetConfigurationDirectory = vi.fn(async () => undefined);
     const deleteModel = vi.fn(async () => {
       throw { code: "model-delete-referenced", message: "无法删除 Model：仍有配置引用。", action: "请先处理引用。" };
     });
@@ -1623,6 +1624,7 @@ describe("React page seam", () => {
       getOverviewLoad: async () => overviewLoad(overview, readyState),
       createModel,
       editModel,
+      openTargetConfigurationDirectory,
       deleteModel,
     });
 
@@ -1666,6 +1668,9 @@ describe("React page seam", () => {
     expect(dialog).toHaveTextContent("当前不会部分删除；需要 Configuration transaction 同时更新 models.yml 和 config.yml。");
     expect(dialog).toHaveTextContent('config.yml:modelRoles["default"]');
     expect(within(dialog).getByRole("button", { name: "删除模型" })).toBeDisabled();
+    expect(dialog).toHaveTextContent("不会写入配置，也不会创建备份。");
+    await user.click(within(dialog).getByRole("button", { name: "打开配置目录" }));
+    expect(openTargetConfigurationDirectory).toHaveBeenCalledWith("/usr/local/bin/omp");
     expect(deleteModel).not.toHaveBeenCalled();
   });
   it("shows a complete model deletion impact and refreshes after a safe delete", async () => {
@@ -1699,8 +1704,9 @@ describe("React page seam", () => {
     const referenced = { ...base.models[0], referenceCount: 1, referencePaths: ['config.yml:retry["fallback"]'], roleReferencePaths: [], otherReferencePaths: ['config.yml:retry["fallback"]'] };
     const provider: OverviewProvider = { ...base.providers[0], modelCount: 1, roleReferencePaths: [], otherReferencePaths: ['config.yml:retry["fallback"]'], models: [referenced] };
     const overview = overviewDto({ providers: [provider], models: [referenced], roles: [], counts: { providerCount: 1, modelCount: 1, roleCount: 0 } });
+    const openTargetConfigurationDirectory = vi.fn(async () => undefined);
     const deleteProvider = vi.fn().mockResolvedValue({ providerId: "dnslin", modelCount: 1 });
-    renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview, readyState), deleteProvider });
+    renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview, readyState), openTargetConfigurationDirectory, deleteProvider });
 
     await screen.findByText("Sol");
     await user.click(screen.getByRole("button", { name: "删除 Provider" }));
@@ -1709,6 +1715,9 @@ describe("React page seam", () => {
     expect(dialog).toHaveTextContent("gpt-5.6-sol");
     expect(dialog).toHaveTextContent("config.yml:retry[\"fallback\"]");
     expect(dialog).toHaveTextContent("不会修改");
+    expect(dialog).toHaveTextContent("不会写入配置，也不会创建备份。");
+    await user.click(within(dialog).getByRole("button", { name: "打开配置目录" }));
+    expect(openTargetConfigurationDirectory).toHaveBeenCalledWith("/usr/local/bin/omp");
     expect(within(dialog).getByRole("button", { name: "删除 Provider" })).toBeDisabled();
     expect(deleteProvider).not.toHaveBeenCalled();
   });

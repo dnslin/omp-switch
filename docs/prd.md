@@ -675,8 +675,8 @@ auto
 2. 识别精确选择器、Thinking 后缀、`provider/*` 和选择器数组。
 3. 先按所属 Provider 的现存完整 Model ID 精确解析选择器；仅当完整 ID 不存在时才剥离受支持 Thinking 后缀。未知后缀若命中目标基础 ID，归入疑似非受管引用并阻止删除；现存完整 ID（例如 `second:ultra`）优先于后缀解释。
 4. 无引用时，复用单文件 Safe structured edit 删除 `models.yml` 中明确选中的节点。
-5. 只有受支持 `modelRoles` 引用时，不执行 models-only 部分删除；交给同时更新 `models.yml` 与 `config.yml` 的 Configuration transaction 流程。
-6. `modelRoles` 之外存在相关或疑似引用时阻止删除，并显示安全路径摘要。
+5. 只有受支持 `modelRoles` 引用时，不执行 models-only 部分删除；交给同时更新 `models.yml` 与 `config.yml` 的 Configuration transaction 流程，并提供“打开配置目录”入口。
+6. `modelRoles` 之外存在相关或疑似引用时阻止删除，并显示安全路径摘要；阻止状态说明不会写入配置或创建备份。
 
 ### 12.2 删除 Provider
 

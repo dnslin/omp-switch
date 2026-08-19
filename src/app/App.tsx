@@ -364,12 +364,14 @@ function DeletionImpact({
   roleReferences,
   otherReferences,
   blockedReason,
+  onOpenTargetDirectory,
 }: {
   objectLabel: string;
   includedModels: string[];
   roleReferences: string[];
   otherReferences: string[];
   blockedReason: string | null;
+  onOpenTargetDirectory?: () => Promise<void>;
 }) {
   const renderPaths = (paths: string[]) => paths.length ? (
     <ul className="deletion-impact__list">
@@ -390,7 +392,14 @@ function DeletionImpact({
         <h3>其他引用</h3>
         {renderPaths(otherReferences)}
       </section>
-      {blockedReason ? <section className="deletion-impact__blocked" role="status"><strong>删除已阻止</strong><p>{blockedReason}</p></section> : <p className="deletion-impact__backup">此操作会创建备份。</p>}
+      {blockedReason ? (
+        <section className="deletion-impact__blocked" role="status">
+          <strong>删除已阻止</strong>
+          <p>{blockedReason}</p>
+          <p className="deletion-impact__backup">当前不会写入配置，也不会创建备份。</p>
+          {onOpenTargetDirectory ? <Button type="button" variant="secondary" onClick={() => void onOpenTargetDirectory()}>打开配置目录</Button> : null}
+        </section>
+      ) : <p className="deletion-impact__backup">此操作会创建备份。</p>}
     </div>
   );
 }
@@ -399,7 +408,7 @@ function ProviderDetailPage() {
   const client = useTauriClient();
   const navigate = useNavigate();
   const modelTest = useModelTestRunner();
-  const { data, error, loading, revision, reload, refresh, shellStatus } = useOverviewLoad(providerDetailLoadCopy);
+  const { data, startupState, error, loading, revision, reload, refresh, shellStatus } = useOverviewLoad(providerDetailLoadCopy);
   useRefreshAfterModelTest({ ready: Boolean(data), loading, revision, refresh });
   const [editing, setEditing] = useState(false);
   const [editingModelsHash, setEditingModelsHash] = useState<string | null>(null);
@@ -454,6 +463,22 @@ function ProviderDetailPage() {
         : provider?.modelCount === 0
           ? "Provider 没有可删除的 Model definition，当前配置不符合 Custom Provider 结构。"
           : null;
+  const openTargetDirectory = useCallback(async () => {
+    const executablePath = startupState?.kind === "omp-ready" ? startupState.executablePath : data?.omp.executablePath;
+    if (!executablePath) {
+      toast.error("无法打开配置目录", { description: "当前 OMP 路径不可用，请重新检测。" });
+      return;
+    }
+    try {
+      await client.openTargetConfigurationDirectory(executablePath);
+    } catch (cause: unknown) {
+      const appError = asAppError(cause, "无法打开配置目录");
+      toast.error(appError.message, { description: appError.action });
+    }
+  }, [client, data?.omp.executablePath, startupState]);
+  const canOpenModelTargetDirectory = modelRoleReferences.length > 0 || modelOtherReferences.length > 0;
+  const canOpenProviderTargetDirectory = providerRoleReferences.length > 0 || providerOtherReferences.length > 0;
+
   const openModelEditor = (editor: NonNullable<typeof modelEditor>) => {
     if (!openedModelsHash) return;
     setModelEditorModelsHash(openedModelsHash);
@@ -662,8 +687,8 @@ function ProviderDetailPage() {
               ) : <><StatusIndicator tone="neutral">暂无测试结果</StatusIndicator><span>保存后的 Model 测试结果会显示在这里。</span></>}
             </section>
             {modelTest.costNoticeDialog}
-            {deletingModel ? <ConfirmDialog title="删除模型？" confirmLabel="删除模型" confirmDisabled={Boolean(modelDeleteBlockedReason)} onCancel={() => { setDeletingModel(null); setDeleteHashes(null); }} onConfirm={() => void deleteModel()}><DeletionImpact objectLabel={`${provider.id}/${deletingModel.id}`} includedModels={[deletingModel.id]} roleReferences={modelRoleReferences} otherReferences={modelOtherReferences} blockedReason={modelDeleteBlockedReason} /></ConfirmDialog> : null}
-            {deletingProvider ? <ConfirmDialog title="删除 Provider？" confirmLabel="删除 Provider" confirmDisabled={Boolean(providerDeleteBlockedReason)} onCancel={() => { setDeletingProvider(false); setDeleteHashes(null); }} onConfirm={() => void deleteProvider()}><DeletionImpact objectLabel={provider.id} includedModels={provider.models.map((model) => model.id)} roleReferences={providerRoleReferences} otherReferences={providerOtherReferences} blockedReason={providerDeleteBlockedReason} /></ConfirmDialog> : null}
+            {deletingModel ? <ConfirmDialog title="删除模型？" confirmLabel="删除模型" confirmDisabled={Boolean(modelDeleteBlockedReason)} onCancel={() => { setDeletingModel(null); setDeleteHashes(null); }} onConfirm={() => void deleteModel()}><DeletionImpact objectLabel={`${provider.id}/${deletingModel.id}`} includedModels={[deletingModel.id]} roleReferences={modelRoleReferences} otherReferences={modelOtherReferences} blockedReason={modelDeleteBlockedReason} onOpenTargetDirectory={canOpenModelTargetDirectory ? openTargetDirectory : undefined} /></ConfirmDialog> : null}
+            {deletingProvider ? <ConfirmDialog title="删除 Provider？" confirmLabel="删除 Provider" confirmDisabled={Boolean(providerDeleteBlockedReason)} onCancel={() => { setDeletingProvider(false); setDeleteHashes(null); }} onConfirm={() => void deleteProvider()}><DeletionImpact objectLabel={provider.id} includedModels={provider.models.map((model) => model.id)} roleReferences={providerRoleReferences} otherReferences={providerOtherReferences} blockedReason={providerDeleteBlockedReason} onOpenTargetDirectory={canOpenProviderTargetDirectory ? openTargetDirectory : undefined} /></ConfirmDialog> : null}
             {editing && editingModelsHash ? <ProviderEditDialog provider={provider} openedModelsHash={editingModelsHash} onDismiss={dismissProviderEditor} onReload={reload} onSaved={async () => reload()} /> : null}
             {modelEditor && modelEditorModelsHash ? <ModelCreateSheet key={`${modelEditor.mode}-${modelEditor.model?.id ?? "new"}-${modelEditor.copy ? "copy" : "edit"}`} provider={provider} targetWritable={targetWritable} openedModelsHash={modelEditorModelsHash} mode={modelEditor.mode} model={modelEditor.model} copy={modelEditor.copy} onDismiss={dismissModelEditor} onReload={reload} onSaved={saveModel} /> : null}
           </>
