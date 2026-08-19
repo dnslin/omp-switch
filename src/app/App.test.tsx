@@ -186,6 +186,24 @@ describe("React page seam", () => {
     expect(await screen.findByText("已恢复上次中断操作")).toBeVisible();
     expect(screen.getByText(/已回滚上次中断/)).toBeVisible();
   });
+  it("shows manual handling when transaction recovery is unsafe", async () => {
+    renderRoute("/setup", {
+      ...unavailableClient,
+      getStartupState: async () => ({
+        ...readyState,
+        targetConfiguration: targetConfiguration(undefined, {
+          status: "unsafe",
+          writable: false,
+          recoveryNotice: "Configuration transaction 需要人工处理；安全路径：/safe/recovery/scene。",
+        }),
+      }),
+    });
+
+    expect(await screen.findByText("上次事务需要人工处理")).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("/safe/recovery/scene");
+    expect(screen.getByText(/目标不安全/)).toBeVisible();
+  });
+
 
 
   it("allows selecting a replacement while the current OMP is ready", async () => {
@@ -1616,9 +1634,7 @@ describe("React page seam", () => {
     const createModel = vi.fn(async () => ({ providerId: "dnslin", modelId: "copied-model" }));
     const editModel = vi.fn(async () => ({ providerId: "dnslin", modelId: "incomplete" }));
     const openTargetConfigurationDirectory = vi.fn(async () => undefined);
-    const deleteModel = vi.fn(async () => {
-      throw { code: "model-delete-referenced", message: "无法删除 Model：仍有配置引用。", action: "请先处理引用。" };
-    });
+    const deleteModel = vi.fn().mockResolvedValue({ providerId: "dnslin", modelId: "gpt-5.6-sol" });
     renderRoute("/providers/dnslin", {
       ...unavailableClient,
       getOverviewLoad: async () => overviewLoad(overview, readyState),
@@ -1665,13 +1681,12 @@ describe("React page seam", () => {
     await user.click(screen.getByRole("menuitem", { name: "删除" }));
     const confirmation = await screen.findByRole("heading", { name: "删除模型？" });
     const dialog = confirmation.closest('[role="dialog"]') as HTMLElement;
-    expect(dialog).toHaveTextContent("当前不会部分删除；需要 Configuration transaction 同时更新 models.yml 和 config.yml。");
+    expect(dialog).toHaveTextContent("将清除的受支持 Model role");
     expect(dialog).toHaveTextContent('config.yml:modelRoles["default"]');
-    expect(within(dialog).getByRole("button", { name: "删除模型" })).toBeDisabled();
-    expect(dialog).toHaveTextContent("不会写入配置，也不会创建备份。");
-    await user.click(within(dialog).getByRole("button", { name: "打开配置目录" }));
-    expect(openTargetConfigurationDirectory).toHaveBeenCalledWith("/usr/local/bin/omp");
-    expect(deleteModel).not.toHaveBeenCalled();
+    expect(dialog).toHaveTextContent("将通过同一 Configuration transaction 备份并修改 models.yml 与 config.yml。");
+    expect(within(dialog).getByRole("button", { name: "删除模型" })).toBeEnabled();
+    await user.click(within(dialog).getByRole("button", { name: "删除模型" }));
+    await waitFor(() => expect(deleteModel).toHaveBeenCalledWith(expect.objectContaining({ modelId: "gpt-5.6-sol", openedConfigHash: "config-hash" })));
   });
   it("shows a complete model deletion impact and refreshes after a safe delete", async () => {
     const user = userEvent.setup();
@@ -1679,6 +1694,7 @@ describe("React page seam", () => {
     const second: OverviewModel = { ...base.models[0], id: "second", name: "Second", referenceCount: 0, referencePaths: [], roleReferencePaths: [], otherReferencePaths: [] };
     const provider: OverviewProvider = { ...base.providers[0], modelCount: 2, models: [base.models[0], second] };
     const initial = overviewDto({ providers: [provider], models: [base.models[0], second], counts: { providerCount: 1, modelCount: 2, roleCount: 0 }, roles: [] });
+
     const remainingProvider: OverviewProvider = { ...base.providers[0], modelCount: 1, models: [base.models[0]] };
     const after = overviewDto({ providers: [remainingProvider], models: [base.models[0]], counts: { providerCount: 1, modelCount: 1, roleCount: 0 }, roles: [] });
     const getOverviewLoad = vi.fn().mockResolvedValueOnce(overviewLoad(initial, readyState)).mockResolvedValueOnce(overviewLoad(after, readyState));
@@ -1696,6 +1712,71 @@ describe("React page seam", () => {
     await user.click(within(dialog).getByRole("button", { name: "删除模型" }));
     await waitFor(() => expect(deleteModel).toHaveBeenCalledWith({ openedModelsHash: "models-hash", openedConfigHash: "config-hash", providerId: "dnslin", modelId: "second" }));
     await waitFor(() => expect(screen.queryByText("Second")).not.toBeInTheDocument());
+  });
+  it("shows a reload action when a cross-file deletion conflicts", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const referenced: OverviewModel = {
+      ...base.models[0],
+      referenceCount: 1,
+      referencePaths: ['config.yml:modelRoles["default"]'],
+      roleReferencePaths: ['config.yml:modelRoles["default"]'],
+      otherReferencePaths: [],
+    };
+    const second: OverviewModel = { ...base.models[0], id: "second", name: "Second", referenceCount: 0, referencePaths: [], roleReferencePaths: [], otherReferencePaths: [] };
+    const provider: OverviewProvider = { ...base.providers[0], modelCount: 2, models: [referenced, second] };
+    const overview = overviewDto({ providers: [provider], models: [referenced, second], counts: { providerCount: 1, modelCount: 2, roleCount: 1 } });
+    const getOverviewLoad = vi.fn(async () => overviewLoad(overview, readyState));
+    const deleteModel = vi.fn().mockRejectedValue({ code: "config-hash-conflict", message: "config.yml 在删除提交前已被外部修改。", action: "请重新读取配置。" });
+    renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad, deleteModel });
+
+    await screen.findByText("Sol");
+    await user.click(screen.getByRole("button", { name: "Model 操作 gpt-5.6-sol" }));
+    await user.click(screen.getByRole("menuitem", { name: "删除" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "删除模型" }));
+
+    const conflict = await within(dialog).findByRole("alert");
+    expect(conflict).toHaveTextContent("配置冲突");
+    expect(conflict).toHaveTextContent("config.yml 在删除提交前已被外部修改。");
+    expect(within(dialog).getByRole("button", { name: "重新读取" })).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "取消" })).toBeEnabled();
+    expect(within(dialog).getByRole("button", { name: "删除模型" })).toBeDisabled();
+    expect(dialog).toHaveTextContent("dnslin/gpt-5.6-sol");
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+  });
+  it("keeps Provider deletion confirmation open on Hash conflict", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const provider: OverviewProvider = {
+      ...base.providers[0],
+      roleReferencePaths: ['config.yml:modelRoles["default"]'],
+      otherReferencePaths: [],
+      models: [base.models[0]],
+    };
+    const overview = overviewDto({ providers: [provider], models: [base.models[0]], counts: { providerCount: 1, modelCount: 1, roleCount: 1 } });
+    const getOverviewLoad = vi.fn(async () => overviewLoad(overview, readyState));
+    const deleteProvider = vi.fn().mockRejectedValue({ code: "models-hash-conflict", message: "models.yml 在删除提交前已被外部修改。", action: "请重新读取配置。" });
+    renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad, deleteProvider });
+
+    await screen.findByText("Sol");
+    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "删除 Provider" }));
+
+    const conflict = await within(dialog).findByRole("alert");
+    expect(conflict).toHaveTextContent("配置冲突");
+    expect(conflict).toHaveTextContent("models.yml 在删除提交前已被外部修改。");
+    expect(within(dialog).getByRole("button", { name: "重新读取" })).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "取消" })).toBeEnabled();
+    expect(within(dialog).getByRole("button", { name: "删除 Provider" })).toBeDisabled();
+    expect(dialog).toHaveTextContent("dnslin");
+    const callsBeforeReload = getOverviewLoad.mock.calls.length;
+    await user.click(within(dialog).getByRole("button", { name: "重新读取" }));
+    await waitFor(() => expect(getOverviewLoad).toHaveBeenCalledTimes(callsBeforeReload + 1));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("shows Provider deletion impact and blocks unmanaged references", async () => {

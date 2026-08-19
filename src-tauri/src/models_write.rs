@@ -123,6 +123,7 @@ pub(crate) fn write_models_mutation<M: ModelsMutation>(
         return Err(injected_failure(format!("{verb}当前备份前发生故障。")));
     }
     let _write_lock = acquire_models_write_lock(backup_root, &loaded.expected_target)?;
+    ensure_no_pending_configuration_transaction(backup_root, &loaded.expected_target)?;
     create_current_backup(
         backup_root,
         &loaded.expected_target,
@@ -284,35 +285,107 @@ fn restore_models_directory_permissions_for_test(
     }
     Ok(())
 }
-fn acquire_models_write_lock(
+pub(crate) fn ensure_no_pending_configuration_transaction(
+    backup_root: &Path,
+    resolved_target: &Path,
+) -> Result<(), AppError> {
+    let directory = backup_root
+        .join(target_fingerprint(resolved_target))
+        .join("transactions");
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            tracing::warn!(
+                operation = "inspect_pending_configuration_transaction",
+                cause = io_error_cause(error.kind()),
+                "Configuration transaction directory could not be inspected"
+            );
+            return Err(pending_configuration_transaction_error());
+        }
+    };
+    for entry in entries {
+        let path = entry
+            .map_err(|error| {
+                tracing::warn!(
+                    operation = "inspect_pending_configuration_transaction_entry",
+                    cause = io_error_cause(error.kind()),
+                    "Configuration transaction entry could not be inspected"
+                );
+                pending_configuration_transaction_error()
+            })?
+            .path();
+        if path.extension().and_then(|value| value.to_str()) == Some("json") {
+            return Err(pending_configuration_transaction_error());
+        }
+    }
+    Ok(())
+}
+
+fn pending_configuration_transaction_error() -> AppError {
+    AppError::new(
+        "configuration-transaction-pending",
+        "Target configuration 存在尚未完成的 Configuration transaction。",
+        "请重新检测 OMP，先完成事务清理或整体恢复后再写入；当前操作没有修改配置文件。",
+    )
+}
+
+pub(crate) fn acquire_configuration_lock(
     backup_root: &Path,
     resolved_target: &Path,
 ) -> Result<fs::File, AppError> {
-    let lock_directory = backup_root.join(".locks");
+    acquire_lock(backup_root, resolved_target, "target.lock")
+}
+
+pub(crate) fn acquire_configuration_file_lock(
+    backup_root: &Path,
+    resolved_target: &Path,
+    resolved_file: &Path,
+) -> Result<fs::File, AppError> {
+    let lock_name = format!("{}.lock", target_fingerprint(resolved_file));
+    acquire_lock(backup_root, resolved_target, &lock_name)
+}
+
+fn acquire_lock(
+    backup_root: &Path,
+    resolved_target: &Path,
+    lock_name: &str,
+) -> Result<fs::File, AppError> {
+    let target_id = target_fingerprint(resolved_target);
+    let lock_directory = backup_root
+        .join(target_id)
+        .join("transactions")
+        .join("locks");
     create_private_backup_directory(&lock_directory, None)
-        .map_err(|error| write_error("create_models_lock_directory", error))?;
-    let target_fingerprint = content_hash(resolved_target.to_string_lossy().as_bytes());
-    let lock_path = lock_directory.join(format!("{target_fingerprint}.lock"));
+        .map_err(|error| write_error("create_configuration_lock_directory", error))?;
+    let lock_path = lock_directory.join(lock_name);
     let mut options = fs::OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
     options.mode(0o600);
     let lock = options
         .open(&lock_path)
-        .map_err(|error| write_error("open_models_write_lock", error))?;
+        .map_err(|error| write_error("open_configuration_write_lock", error))?;
     set_private_backup_file_permissions(&lock_path, None)
-        .map_err(|error| write_error("secure_models_write_lock", error))?;
+        .map_err(|error| write_error("secure_configuration_write_lock", error))?;
     match FileExt::try_lock(&lock) {
         Ok(()) => Ok(lock),
         Err(TryLockError::WouldBlock) => Err(models_write_in_progress()),
-        Err(TryLockError::Error(error)) => Err(write_error("lock_models_write", error)),
+        Err(TryLockError::Error(error)) => Err(write_error("lock_configuration_write", error)),
     }
+}
+
+fn acquire_models_write_lock(
+    backup_root: &Path,
+    resolved_target: &Path,
+) -> Result<fs::File, AppError> {
+    acquire_configuration_lock(backup_root, resolved_target)
 }
 
 fn models_write_in_progress() -> AppError {
     AppError::new(
         "models-write-in-progress",
-        "另一项 OMP Switch Provider 创建正在写入 models.yml。",
+        "另一项 OMP Switch 配置写入正在进行。",
         "请等待当前写入完成后重新读取配置，再检查表单并重试。",
     )
 }
@@ -399,6 +472,13 @@ pub(crate) fn ensure_resolved_file_path(
     }
     Ok(())
 }
+fn backup_partition(resolved_file: &Path) -> &'static str {
+    match resolved_file.file_name().and_then(|value| value.to_str()) {
+        Some("models.yml") => "models",
+        Some("config.yml") => "config",
+        _ => "configuration",
+    }
+}
 fn create_current_backup(
     backup_root: &Path,
     target_configuration: &Path,
@@ -406,13 +486,8 @@ fn create_current_backup(
     original_bytes: &[u8],
     failure: Option<ModelsWriteFailurePoint>,
 ) -> Result<(), AppError> {
-    let target_fingerprint = content_hash(target_configuration.to_string_lossy().as_bytes());
-    let target_directory = backup_root.join(target_fingerprint);
-    let file_name = resolved_file
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("configuration.yml");
-    let directory = target_directory.join(file_name);
+    let target_directory = backup_root.join(target_fingerprint(target_configuration));
+    let directory = target_directory.join(backup_partition(resolved_file));
     for path in [backup_root, target_directory.as_path(), directory.as_path()] {
         create_private_backup_directory(path, failure)
             .map_err(|error| write_error("create_backup_directory", error))?;
@@ -449,6 +524,65 @@ fn create_current_backup(
         Err(error) => {
             cleanup_partial_backup(&backup_path);
             Err(write_error("create_models_backup", error))
+        }
+    }
+}
+pub(crate) fn create_transaction_backup(
+    backup_root: &Path,
+    target_configuration: &Path,
+    resolved_file: &Path,
+    original_bytes: &[u8],
+    transaction_id: &str,
+) -> Result<PathBuf, AppError> {
+    if transaction_id.is_empty()
+        || transaction_id.chars().any(|character| {
+            !character.is_ascii_alphanumeric() && character != '-' && character != '_'
+        })
+    {
+        return Err(AppError::internal("Configuration transaction ID 无效"));
+    }
+    let target_directory = backup_root.join(target_fingerprint(target_configuration));
+    let directory = target_directory.join(backup_partition(resolved_file));
+    for path in [backup_root, target_directory.as_path(), directory.as_path()] {
+        create_private_backup_directory(path, None)
+            .map_err(|error| write_error("create_transaction_backup_directory", error))?;
+    }
+    let backup_path = directory.join(format!("tx-{transaction_id}.yml"));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut backup = options
+        .open(&backup_path)
+        .map_err(|error| write_error("open_transaction_backup", error))?;
+    set_private_backup_file_permissions(&backup_path, None)
+        .map_err(|error| write_error("secure_transaction_backup", error))?;
+    let result = (|| -> std::io::Result<()> {
+        backup.write_all(original_bytes)?;
+        backup.sync_all()?;
+        drop(backup);
+        if fs::read(&backup_path)? != original_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "transaction backup contents differ from target",
+            ));
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            if let Err(error) = prune_backup_files(&directory, &backup_path) {
+                tracing::warn!(
+                    operation = "prune_configuration_backups",
+                    cause = io_error_cause(error.kind()),
+                    "Configuration backup retention cleanup failed"
+                );
+            }
+            Ok(backup_path)
+        }
+        Err(error) => {
+            cleanup_partial_backup(&backup_path);
+            Err(write_error("create_transaction_backup", error))
         }
     }
 }
@@ -663,6 +797,9 @@ pub(crate) fn content_hash(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
+pub(crate) fn target_fingerprint(path: &Path) -> String {
+    content_hash(path.to_string_lossy().as_bytes())
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct ModelsWriteErrorCodes {
@@ -770,7 +907,7 @@ mod tests {
             .join(content_hash(
                 target_configuration.to_string_lossy().as_bytes(),
             ))
-            .join("models.yml");
+            .join("models");
         fs::create_dir_all(&directory).unwrap();
         let first_candidate = backup_candidate_path(&directory, 0);
         fs::write(&first_candidate, b"existing backup").unwrap();
@@ -800,7 +937,7 @@ mod tests {
             .join(content_hash(
                 target_configuration.to_string_lossy().as_bytes(),
             ))
-            .join("config.yml");
+            .join("config");
 
         for _ in 0..11 {
             create_current_backup(
@@ -867,6 +1004,57 @@ mod tests {
         expected.insert(format!("{0:020}.yml", 1));
         assert_eq!(actual, expected);
     }
+    struct PendingTestMutation;
+
+    impl ModelsMutation for PendingTestMutation {
+        fn verb(&self) -> &'static str {
+            "测试写入"
+        }
+
+        fn serialization_error(&self) -> (&'static str, &'static str, &'static str) {
+            ("pending_test_serialize", "测试序列化失败", "请重试。")
+        }
+
+        fn apply(&self, _: &mut Value) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        fn validate(&self, _: &Value, _: &Value) -> Result<(), AppError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn pending_transaction_blocks_single_file_write_after_manifest_exists() {
+        let temporary = tempdir().unwrap();
+        let target = temporary.path().join("agent");
+        fs::create_dir_all(&target).unwrap();
+        let target = target.canonicalize().unwrap();
+        let original_bytes = b"providers: {}\n".to_vec();
+        fs::write(target.join("models.yml"), &original_bytes).unwrap();
+        let backup_root = temporary.path().join("backups");
+        let transaction_directory = backup_root
+            .join(target_fingerprint(&target))
+            .join("transactions");
+        fs::create_dir_all(&transaction_directory).unwrap();
+        fs::write(transaction_directory.join("pending.json"), b"{}").unwrap();
+        let loaded = LoadedModels {
+            expected_target: target.clone(),
+            models_path: target.join("models.yml"),
+            original_hash: content_hash(&original_bytes),
+            original_tree: serde_yaml::from_slice(&original_bytes).unwrap(),
+            original_bytes,
+        };
+
+        let error =
+            write_models_mutation(&backup_root, &loaded, &PendingTestMutation, None).unwrap_err();
+        assert_eq!(error.code, "configuration-transaction-pending");
+        assert_eq!(
+            fs::read(target.join("models.yml")).unwrap(),
+            b"providers: {}\n"
+        );
+    }
+
     #[test]
     fn backup_pruning_orders_same_timestamp_sequences_numerically() {
         use std::time::{Duration, SystemTime};

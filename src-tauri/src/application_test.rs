@@ -21,11 +21,11 @@ use std::ffi::CString;
 
 use crate::{
     application::{
-        AppService, AppSettings, CreateCustomProviderInput, CreateModelFields, CreateModelInput,
-        CreateProviderFields, DeleteModelInput, DeleteProviderInput, DirectApiKeyIntent,
-        EditCustomProviderInput, EditModelInput, ModelDefinitionFields, ModelEditFields,
-        ModelsWriteFailurePoint, OverviewLoadDto, ProviderAuthMode, StartupState, SupportedApi,
-        SupportedInput, Theme, UiSettingsUpdate,
+        AppService, AppSettings, ConfigurationTransactionFailurePoint, CreateCustomProviderInput,
+        CreateModelFields, CreateModelInput, CreateProviderFields, DeleteModelInput,
+        DeleteProviderInput, DirectApiKeyIntent, EditCustomProviderInput, EditModelInput,
+        ModelDefinitionFields, ModelEditFields, ModelsWriteFailurePoint, OverviewLoadDto,
+        ProviderAuthMode, StartupState, SupportedApi, SupportedInput, Theme, UiSettingsUpdate,
     },
     omp_environment::{CommandOutput, CommandRunError, OmpEnvironment, SystemOmpEnvironment},
     overview::{ModelTestConfiguration, OverviewAuthMode},
@@ -3257,14 +3257,13 @@ providers:
     );
 
     let backup_root = app_data.path().join("target-configuration-backups");
-    let lock_directory = backup_root.join(".locks");
     let backup_targets = fs::read_dir(&backup_root)
         .unwrap()
         .map(Result::unwrap)
-        .filter(|entry| entry.file_name() != ".locks")
         .collect::<Vec<_>>();
     assert_eq!(backup_targets.len(), 1);
-    let model_backup_directory = backup_targets[0].path().join("models.yml");
+    let lock_directory = backup_targets[0].path().join("transactions").join("locks");
+    let model_backup_directory = backup_targets[0].path().join("models");
     let model_backups = fs::read_dir(&model_backup_directory)
         .unwrap()
         .map(Result::unwrap)
@@ -3429,14 +3428,16 @@ fn custom_provider_creation_stops_when_another_writer_holds_the_target_lock() {
     let lock_directory = app_data
         .path()
         .join("target-configuration-backups")
-        .join(".locks");
+        .join(&fingerprint)
+        .join("transactions")
+        .join("locks");
     fs::create_dir_all(&lock_directory).unwrap();
     let lock = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(lock_directory.join(format!("{fingerprint}.lock")))
+        .open(lock_directory.join("target.lock"))
         .unwrap();
     FileExt::lock(&lock).unwrap();
     let service = provider_mutation_service(&target, app_data.path());
@@ -4615,28 +4616,245 @@ fn model_delete_hands_supported_role_references_to_configuration_transaction() {
     fs::write(target.join("models.yml"), original_models).unwrap();
     fs::write(
         target.join("config.yml"),
-        "modelRoles:\n  default: editable/second\n",
+        "modelRoles:\n  default: editable/second\n  other: editable/first\n",
     )
     .unwrap();
     let service = provider_mutation_service(&target, app_data.path());
     let overview = service.get_overview_load().overview.unwrap();
 
-    let error = service
+    let result = service
         .delete_model(DeleteModelInput {
             opened_models_hash: overview.files.models.content_hash.unwrap(),
             opened_config_hash: overview.files.config.content_hash.unwrap(),
             provider_id: "editable".to_owned(),
             model_id: "second".to_owned(),
         })
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(error.code, "model-delete-role-reference");
-    assert!(error.message.contains("config.yml:modelRoles[\"default\"]"));
-    assert!(error.action.contains("Configuration transaction"));
-    assert_eq!(
-        fs::read(target.join("models.yml")).unwrap(),
-        original_models.as_bytes()
+    assert_eq!(result.model_id, "second");
+    let after_models: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    let after_config: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("config.yml")).unwrap()).unwrap();
+    assert!(
+        after_models["providers"]["editable"]["models"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .all(|model| model["id"] != "second")
     );
+    assert!(after_config["modelRoles"]["default"].is_null());
+    assert_eq!(after_config["modelRoles"]["other"], "editable/first");
+}
+
+#[test]
+fn configuration_transaction_failure_points_commit_or_restore_as_a_unit() {
+    let failure_points = [
+        ConfigurationTransactionFailurePoint::AfterSharedBackup,
+        ConfigurationTransactionFailurePoint::AfterManifest,
+        ConfigurationTransactionFailurePoint::AfterFirstReplacement,
+        ConfigurationTransactionFailurePoint::AfterSecondReplacement,
+        ConfigurationTransactionFailurePoint::DuringCleanup,
+    ];
+    for failure in failure_points {
+        let app_data = tempdir().unwrap();
+        let target = app_data.path().join("agent");
+        fs::create_dir_all(&target).unwrap();
+        let original_models = b"providers:\n  editable:\n    baseUrl: https://example.com/v1\n    api: openai-responses\n    models:\n      - id: first\n        name: First\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n      - id: second\n        name: Second\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n";
+        let original_config = b"modelRoles:\n  default: editable/second\n";
+        fs::write(target.join("models.yml"), original_models).unwrap();
+        fs::write(target.join("config.yml"), original_config).unwrap();
+        let service = service_for_target_with_app_data(&target, app_data.path());
+        let overview = service.get_overview_load().overview.unwrap();
+        let opened_models_hash = overview.files.models.content_hash.clone().unwrap();
+        let opened_config_hash = overview.files.config.content_hash.clone().unwrap();
+        service.set_configuration_transaction_failure_for_test(failure);
+
+        let error = service
+            .delete_model(DeleteModelInput {
+                opened_models_hash: opened_models_hash.clone(),
+                opened_config_hash: opened_config_hash.clone(),
+                provider_id: "editable".to_owned(),
+                model_id: "second".to_owned(),
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "configuration-transaction-interrupted");
+
+        if failure == ConfigurationTransactionFailurePoint::AfterSharedBackup {
+            assert_eq!(
+                fs::read(target.join("models.yml")).unwrap(),
+                original_models
+            );
+            assert_eq!(
+                fs::read(target.join("config.yml")).unwrap(),
+                original_config
+            );
+            continue;
+        }
+
+        if failure == ConfigurationTransactionFailurePoint::AfterManifest {
+            let target_configuration = discover_target_configuration(&target).unwrap();
+            let catalog = crate::bundled_catalog::for_version("17.2.15")
+                .unwrap()
+                .unwrap();
+            let second_error = crate::model_mutation::delete_model(
+                &target_configuration,
+                &app_data.path().join("target-configuration-backups"),
+                catalog,
+                &DeleteModelInput {
+                    opened_models_hash,
+                    opened_config_hash,
+                    provider_id: "editable".to_owned(),
+                    model_id: "second".to_owned(),
+                },
+                None,
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(second_error.code, "configuration-transaction-pending");
+        }
+
+        let state = service.detect_omp();
+        let StartupState::OmpReady {
+            target_configuration,
+            ..
+        } = state
+        else {
+            panic!("failure point {failure:?} did not return OMP ready state");
+        };
+        assert!(target_configuration.recovery_notice.is_some());
+        if matches!(
+            failure,
+            ConfigurationTransactionFailurePoint::AfterManifest
+                | ConfigurationTransactionFailurePoint::AfterFirstReplacement
+        ) {
+            assert_eq!(
+                fs::read(target.join("models.yml")).unwrap(),
+                original_models
+            );
+            assert_eq!(
+                fs::read(target.join("config.yml")).unwrap(),
+                original_config
+            );
+        } else {
+            let after_models: serde_yaml::Value =
+                serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+            let after_config: serde_yaml::Value =
+                serde_yaml::from_slice(&fs::read(target.join("config.yml")).unwrap()).unwrap();
+            assert!(
+                after_models["providers"]["editable"]["models"]
+                    .as_sequence()
+                    .unwrap()
+                    .iter()
+                    .all(|model| model["id"] != "second")
+            );
+            assert!(after_config["modelRoles"]["default"].is_null());
+        }
+    }
+}
+
+#[test]
+fn configuration_transaction_recovery_distinguishes_final_commit_without_backups_from_non_final_recovery()
+ {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let models = b"providers: {}\n";
+    let config = b"modelRoles: {}\n";
+    fs::write(target.join("models.yml"), models).unwrap();
+    fs::write(target.join("config.yml"), config).unwrap();
+    let backup_root = app_data.path().join("target-configuration-backups");
+    let resolved_target = target.canonicalize().unwrap();
+    let fingerprint = crate::models_write::target_fingerprint(&resolved_target);
+    let models_hash = crate::models_write::content_hash(models);
+    let config_hash = crate::models_write::content_hash(config);
+    let write_manifest = |transaction_id: &str,
+                          final_models_hash: &str,
+                          final_config_hash: &str| {
+        let target_root = backup_root.join(&fingerprint);
+        let transactions = target_root.join("transactions");
+        fs::create_dir_all(&transactions).unwrap();
+        let manifest_path = transactions.join(format!("{transaction_id}.json"));
+        let manifest = serde_json::json!({
+            "version": 1,
+            "transactionId": transaction_id,
+            "targetFingerprint": fingerprint,
+            "targetConfiguration": resolved_target,
+            "entries": [
+                {
+                    "name": "models.yml",
+                    "targetPath": resolved_target.join("models.yml"),
+                    "backupPath": target_root.join("models").join(format!("tx-{transaction_id}.yml")),
+                    "originalHash": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "finalHash": final_models_hash,
+                },
+                {
+                    "name": "config.yml",
+                    "targetPath": resolved_target.join("config.yml"),
+                    "backupPath": target_root.join("config").join(format!("tx-{transaction_id}.yml")),
+                    "originalHash": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "finalHash": final_config_hash,
+                },
+            ],
+        });
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        manifest_path
+    };
+
+    let final_manifest = write_manifest("final-without-backups", &models_hash, &config_hash);
+    let service = service_for_target_with_app_data(&target, app_data.path());
+    let StartupState::OmpReady {
+        target_configuration,
+        ..
+    } = service.detect_omp()
+    else {
+        panic!("final transaction recovery did not return OMP ready state");
+    };
+    assert!(
+        target_configuration
+            .recovery_notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("完整提交"))
+    );
+    assert!(target_configuration.writable);
+    assert!(!final_manifest.exists());
+
+    let manual_manifest = write_manifest(
+        "non-final-without-backups",
+        &"f".repeat(64),
+        &"e".repeat(64),
+    );
+    let second_manual_manifest = write_manifest(
+        "non-final-without-backups-2",
+        &"f".repeat(64),
+        &"e".repeat(64),
+    );
+    let StartupState::OmpReady {
+        target_configuration,
+        ..
+    } = service.detect_omp()
+    else {
+        panic!("non-final transaction recovery did not return OMP ready state");
+    };
+    assert_eq!(
+        target_configuration.status,
+        TargetConfigurationStatus::Unsafe
+    );
+    assert!(!target_configuration.writable);
+    assert!(
+        target_configuration
+            .recovery_notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("人工处理"))
+    );
+    assert!(
+        target_configuration
+            .recovery_notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("发现 2 份"))
+    );
+    assert!(manual_manifest.exists());
+    assert!(second_manual_manifest.exists());
 }
 
 #[test]
@@ -4767,21 +4985,21 @@ fn provider_delete_hands_supported_role_references_to_configuration_transaction(
     let service = provider_mutation_service(&target, app_data.path());
     let overview = service.get_overview_load().overview.unwrap();
 
-    let error = service
+    let result = service
         .delete_provider(DeleteProviderInput {
             opened_models_hash: overview.files.models.content_hash.unwrap(),
             opened_config_hash: overview.files.config.content_hash.unwrap(),
             provider_id: "editable".to_owned(),
         })
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(error.code, "provider-delete-role-reference");
-    assert!(error.message.contains("config.yml:modelRoles[\"default\"]"));
-    assert!(error.action.contains("Configuration transaction"));
-    assert_eq!(
-        fs::read(target.join("models.yml")).unwrap(),
-        original_models.as_bytes()
-    );
+    assert_eq!(result.provider_id, "editable");
+    let after_models: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    let after_config: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("config.yml")).unwrap()).unwrap();
+    assert!(after_models["providers"]["editable"].is_null());
+    assert!(after_config["modelRoles"]["default"].is_null());
 }
 #[test]
 fn provider_delete_rejects_provider_with_read_only_model_without_bypass() {
@@ -5009,7 +5227,7 @@ fn model_roles_save_sets_and_clears_one_key_without_touching_unknown_config() {
         .join(crate::models_write::content_hash(
             target.canonicalize().unwrap().to_string_lossy().as_bytes(),
         ))
-        .join("config.yml");
+        .join("config");
     assert_eq!(fs::read_dir(backup_directory).unwrap().count(), 1);
     let changed = fs::read_to_string(target.join("config.yml")).unwrap();
     assert!(changed.contains("default: dnslin/gpt-5.6-luna:max"));

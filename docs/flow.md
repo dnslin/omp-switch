@@ -524,10 +524,10 @@ API Key
 删除 Provider？
 
 将删除 `dnslin` 和它下面的 4 个模型。
-受影响 Model role：default、plan、advisor
+将清除受支持 Model role：default、plan、advisor
 其他引用：正在检查完整配置树…
 
-无引用时会创建备份并删除完整 Provider 节点；受支持角色引用需要同时更新 `models.yml` 和 `config.yml` 的 Configuration transaction，其他路径引用会阻止删除。
+无引用时会备份并删除完整 Provider 节点；存在受支持角色引用时，会使用同一 Configuration transaction 同时备份并修改 `models.yml` 与 `config.yml`，其他路径引用会阻止删除。
 如果 Provider 包含任一高级、不支持或只读 Model definition，即使 Provider 顶层看似普通，也阻止整节点删除并说明需要先处理该模型。
 
 [取消] [删除 Provider]
@@ -940,6 +940,7 @@ models.yml 在当前表单打开后被其他程序修改。
 
 取消：保留表单，不保存。  
 重新加载：关闭编辑器、读取最新配置、刷新页面并提示“配置已重新加载”。
+删除确认发生 `models.yml` 或 `config.yml` Hash 冲突时，Dialog 不关闭，继续显示删除对象、角色清单和备份范围；“删除”按钮禁用，并在 Dialog 内提供“重新读取”和“取消”。重新读取成功后关闭确认并刷新最新配置；取消则保留最新读取前的页面上下文但不写入。
 
 ## 16. 写入和事务失败
 

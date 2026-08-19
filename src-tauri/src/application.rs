@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
-    io::Write,
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tauri_plugin_opener::OpenerExt;
 use tokio_util::sync::CancellationToken;
 
+pub(crate) use crate::configuration_transaction::ConfigurationTransactionFailurePoint;
 pub(crate) use crate::model_mutation::{
     CreateModelInput, DeleteModelInput, EditModelInput, ModelMutationResult,
 };
@@ -30,9 +31,8 @@ pub(crate) use crate::provider_mutation::{
     CreateModelFields, CreateProviderFields, DirectApiKeyIntent, ProviderAuthMode, SupportedApi,
     SupportedInput,
 };
-
 use crate::{
-    bundled_catalog,
+    bundled_catalog, configuration_transaction,
     error::{AppError, io_error_cause},
     model_mutation,
     model_test::{self, ModelTestBinding, ModelTestCoordinator},
@@ -246,6 +246,8 @@ pub struct AppService {
     model_test_timeout: Arc<RwLock<std::time::Duration>>,
     #[cfg(test)]
     models_write_failure: Arc<Mutex<Option<ModelsWriteFailurePoint>>>,
+    #[cfg(test)]
+    configuration_transaction_failure: Arc<Mutex<Option<ConfigurationTransactionFailurePoint>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -421,6 +423,8 @@ impl AppService {
             model_test_timeout: Arc::new(RwLock::new(model_test::DEFAULT_TIMEOUT)),
             #[cfg(test)]
             models_write_failure: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            configuration_transaction_failure: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -744,6 +748,27 @@ impl AppService {
         }
     }
 
+    fn inspect_target_with_configuration_recovery(
+        &self,
+        target: &Path,
+        inspect: impl FnOnce(&Path) -> io::Result<TargetConfigurationDiscovery>,
+    ) -> io::Result<TargetConfigurationDiscovery> {
+        let recovery = configuration_transaction::recover_for_target(&self.backup_root, target)?;
+        let mut discovery = inspect(target)?;
+        if let Some(recovery) = recovery {
+            let notice = match discovery.recovery_notice.take() {
+                Some(existing) => format!("{} {}", existing, recovery.notice),
+                None => recovery.notice,
+            };
+            discovery.recovery_notice = Some(notice);
+            if recovery.manual {
+                discovery.status = TargetConfigurationStatus::Unsafe;
+                discovery.writable = false;
+            }
+        }
+        Ok(discovery)
+    }
+
     fn validate_omp(
         &self,
         executable: PathBuf,
@@ -761,9 +786,10 @@ impl AppService {
                     .map_err(CommandRunError::Io)
             },
             |target| {
-                self.environment
-                    .inspect_target(target)
-                    .map_err(CommandRunError::Io)
+                self.inspect_target_with_configuration_recovery(target, |target| {
+                    self.environment.inspect_target(target)
+                })
+                .map_err(CommandRunError::Io)
             },
         ) {
             Ok(state) => state,
@@ -797,8 +823,26 @@ impl AppService {
                     .run_with_deadline(executable, arguments, cancellation, deadline)
             },
             |target| {
-                self.environment
-                    .inspect_target_with_deadline(target, cancellation, deadline)
+                let recovery =
+                    configuration_transaction::recover_for_target(&self.backup_root, target)
+                        .map_err(CommandRunError::Io)?;
+                let mut discovery = self.environment.inspect_target_with_deadline(
+                    target,
+                    cancellation,
+                    deadline,
+                )?;
+                if let Some(recovery) = recovery {
+                    let notice = match discovery.recovery_notice.take() {
+                        Some(existing) => format!("{} {}", existing, recovery.notice),
+                        None => recovery.notice,
+                    };
+                    discovery.recovery_notice = Some(notice);
+                    if recovery.manual {
+                        discovery.status = TargetConfigurationStatus::Unsafe;
+                        discovery.writable = false;
+                    }
+                }
+                Ok(discovery)
             },
         )
         .map_err(|error| match error {
@@ -1114,6 +1158,7 @@ impl AppService {
             context.catalog,
             &input,
             self.take_models_write_failure(),
+            self.take_configuration_transaction_failure(),
         );
         if result.is_ok() {
             self.model_tests.invalidate();
@@ -1165,6 +1210,7 @@ impl AppService {
             context.catalog,
             &input,
             self.take_models_write_failure(),
+            self.take_configuration_transaction_failure(),
         );
         if result.is_ok() {
             self.model_tests.invalidate();
@@ -1542,6 +1588,26 @@ impl AppService {
     #[cfg(test)]
     pub(crate) fn set_models_write_failure_for_test(&self, failure: ModelsWriteFailurePoint) {
         *self.models_write_failure.lock() = Some(failure);
+    }
+    fn take_configuration_transaction_failure(
+        &self,
+    ) -> Option<ConfigurationTransactionFailurePoint> {
+        #[cfg(test)]
+        {
+            self.configuration_transaction_failure.lock().take()
+        }
+        #[cfg(not(test))]
+        {
+            None
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_configuration_transaction_failure_for_test(
+        &self,
+        failure: ConfigurationTransactionFailurePoint,
+    ) {
+        *self.configuration_transaction_failure.lock() = Some(failure);
     }
 
     fn update_settings(

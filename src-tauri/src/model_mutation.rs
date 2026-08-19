@@ -9,6 +9,7 @@ use serde_yaml::{Mapping, Value};
 
 use crate::{
     bundled_catalog::BundledCatalog,
+    configuration_transaction,
     error::AppError,
     models_write::{self, LoadedModels, ModelsMutation, ModelsWriteFailurePoint},
     overview,
@@ -95,6 +96,7 @@ struct ValidatedDelete {
     config_path: PathBuf,
     expected_target: PathBuf,
     expected_config_hash: String,
+    role_reference_ids: Vec<String>,
 }
 
 impl ModelsMutation for ValidatedCreate {
@@ -284,24 +286,46 @@ pub(crate) fn edit_model(
         .map_err(|error| remap_model_error(error, ModelOperation::Edit))?;
     Ok(result)
 }
-
 pub(crate) fn delete_model(
     target: &TargetConfigurationDiscovery,
     backup_root: &Path,
     catalog: &BundledCatalog,
     input: &DeleteModelInput,
     failure: Option<ModelsWriteFailurePoint>,
+    transaction_failure: Option<configuration_transaction::ConfigurationTransactionFailurePoint>,
 ) -> Result<ModelMutationResult, AppError> {
     let loaded = models_write::load_models_for_write(target, &input.opened_models_hash)
         .map_err(|error| remap_model_error(error, ModelOperation::Delete))?;
     let config = load_config_for_reference_check(target, &input.opened_config_hash)?;
-    let validated = validate_delete_input(input, &loaded.original_tree, &config, catalog)?;
+    let validated = validate_delete_input(input, &loaded.original_tree, &config, catalog, true)?;
     let result = ModelMutationResult {
         provider_id: validated.provider_id.clone(),
         model_id: validated.model_id.clone(),
     };
-    models_write::write_models_mutation(backup_root, &loaded, &validated, failure)
-        .map_err(|error| remap_model_error(error, ModelOperation::Delete))?;
+    if validated.role_reference_ids.is_empty() {
+        models_write::write_models_mutation(backup_root, &loaded, &validated, failure)
+            .map_err(|error| remap_model_error(error, ModelOperation::Delete))?;
+        return Ok(result);
+    }
+    configuration_transaction::execute(
+        backup_root,
+        target,
+        &input.opened_models_hash,
+        &input.opened_config_hash,
+        transaction_failure,
+        "删除 Model",
+        |models, config| prepare_model_delete_transaction(input, catalog, models, config),
+        |models, config, candidate_models, candidate_config| {
+            validate_model_delete_transaction(
+                input,
+                catalog,
+                models,
+                config,
+                candidate_models,
+                candidate_config,
+            )
+        },
+    )?;
     Ok(result)
 }
 
@@ -356,6 +380,68 @@ fn load_config_for_reference_check(
         expected_target,
         original_hash: models_write::content_hash(&bytes),
     })
+}
+fn loaded_config_from_transaction(
+    file: &configuration_transaction::TransactionFile,
+) -> LoadedConfig {
+    LoadedConfig {
+        tree: file.original_tree.clone(),
+        config_path: file.path.clone(),
+        expected_target: file
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default(),
+        original_hash: file.original_hash.clone(),
+    }
+}
+
+fn prepare_model_delete_transaction(
+    input: &DeleteModelInput,
+    catalog: &BundledCatalog,
+    models: &configuration_transaction::TransactionFile,
+    config: &configuration_transaction::TransactionFile,
+) -> Result<configuration_transaction::TransactionCandidates, AppError> {
+    let loaded_config = loaded_config_from_transaction(config);
+    let validated =
+        validate_delete_input(input, &models.original_tree, &loaded_config, catalog, true)?;
+    if validated.role_reference_ids.is_empty() {
+        return Err(AppError::new(
+            "model-delete-role-reference-changed",
+            "受支持 Model role 引用在事务锁定后已变化。",
+            "请重新读取配置并重新打开删除确认。",
+        ));
+    }
+    let mut candidate_models = models.original_tree.clone();
+    validated.apply(&mut candidate_models)?;
+    let mut candidate_config = config.original_tree.clone();
+    configuration_transaction::remove_model_role_ids(
+        &mut candidate_config,
+        &validated.role_reference_ids,
+    )?;
+    Ok(configuration_transaction::TransactionCandidates {
+        models: candidate_models,
+        config: candidate_config,
+    })
+}
+
+fn validate_model_delete_transaction(
+    input: &DeleteModelInput,
+    catalog: &BundledCatalog,
+    models: &configuration_transaction::TransactionFile,
+    config: &configuration_transaction::TransactionFile,
+    candidate_models: &Value,
+    candidate_config: &Value,
+) -> Result<(), AppError> {
+    let loaded_config = loaded_config_from_transaction(config);
+    let validated =
+        validate_delete_input(input, &models.original_tree, &loaded_config, catalog, true)?;
+    validated.validate(candidate_models, &models.original_tree)?;
+    configuration_transaction::validate_model_role_ids_removed(
+        &config.original_tree,
+        candidate_config,
+        &validated.role_reference_ids,
+    )
 }
 
 fn config_parse_error_from_yaml(error: serde_yaml::Error) -> AppError {
@@ -455,6 +541,7 @@ fn validate_delete_input(
     original_tree: &Value,
     config: &LoadedConfig,
     catalog: &BundledCatalog,
+    allow_role_references: bool,
 ) -> Result<ValidatedDelete, AppError> {
     let provider_id = validate_provider_id(&input.provider_id)?;
     ensure_editable_provider(original_tree, &provider_id, catalog, ModelOperation::Delete)?;
@@ -509,7 +596,13 @@ fn validate_delete_input(
             "请先在 OMP 或外部编辑器中处理这些路径；OMP Switch 不会自动修改非受管配置。",
         ));
     }
-    if !references.role_paths.is_empty() {
+    let role_reference_ids = overview::supported_model_role_ids(
+        &config.tree,
+        &provider_id,
+        Some(&input.model_id),
+        &known_model_ids,
+    );
+    if !references.role_paths.is_empty() && !allow_role_references {
         return Err(AppError::new(
             "model-delete-role-reference",
             format!(
@@ -521,6 +614,16 @@ fn validate_delete_input(
             "请转入 Configuration transaction，同时更新 models.yml 和 config.yml；当前不会部分删除。",
         ));
     }
+    if !references.role_paths.is_empty() && role_reference_ids.is_empty() {
+        return Err(AppError::new(
+            "model-delete-role-reference",
+            format!(
+                "无法安全识别 {}/{} 的受支持 Model role 引用。",
+                provider_id, input.model_id
+            ),
+            "请重新读取配置；OMP Switch 不会删除可能仍被引用的 Model definition。",
+        ));
+    }
     if models.len() <= 1 {
         return Err(last_model_error());
     }
@@ -530,6 +633,7 @@ fn validate_delete_input(
         config_path: config.config_path.clone(),
         expected_target: config.expected_target.clone(),
         expected_config_hash: config.original_hash.clone(),
+        role_reference_ids,
     })
 }
 
