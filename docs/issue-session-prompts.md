@@ -3,18 +3,6 @@
 使用方式：完成一个工单并关闭后，执行 `/clear`，开启新会话，复制下一条已解除阻塞的提示词。每条提示词均以 GitHub 工单为实施范围；不得从本文件推断或缩减验收标准。
 ```
 
-## #14 — 通过 Configuration transaction 删除受角色引用对象
-
-```text
-使用 /implement 完整实施 issue://14。先确认其 GitHub blockers 已关闭。
-
-读取 issue://1、issue://14、CONTEXT.md、docs/mvp.md、docs/prd.md、docs/flow.md、docs/adr/0001-preserve-unknown-configuration-by-path.md、docs/adr/0002-recover-cross-file-configuration-transactions.md、docs/adr/0003-keep-provider-and-model-ids-stable.md、docs/agents/issue-tracker.md，以及 designs/omp-switch.pen。UI 使用 /ui-design-guided 与 /vercel-react-best-practices；测试使用 /tdd；完成后运行 /code-review。
-
-按两个既定 seam 做 red→green 纵向切片。实现双文件锁定/重读/Hash、共享备份、全部临时文件验证、持久事务清单、依次替换与确定性启动恢复；任何非完整最终状态都先保存现场并整体恢复，禁止部分恢复。确认和恢复状态复用 .pen Dialog、状态、卡片与页面视觉；运行真实 Tauri 状态截图核验。
-
-满足 issue://14 全部验收标准，在关键故障点注入崩溃并证明完整提交清理或整体恢复；运行针对性测试、类型检查、恢复 smoke、最终完整测试和双轴 review；更新文档，提交并关闭 #14。
-```
-
 ## #15 — 完成设置、OMP 切换与全局桌面交互
 
 ```text
