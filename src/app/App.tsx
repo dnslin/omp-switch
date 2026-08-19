@@ -586,7 +586,7 @@ function ProviderDetailPage() {
         setDeleteHashes(null);
         setDeleteError(reloadError);
         if (reloadError) return;
-        toast.success("Model 已删除；事务清单已清理");
+        toast.success("Model 已删除；已重新读取事务状态");
         return;
       }
       if (isHashConflict(appError)) {
@@ -624,7 +624,7 @@ function ProviderDetailPage() {
         setDeleteHashes(null);
         setProviderDeleteError(reloadError);
         if (reloadError) return;
-        toast.success("Provider 已删除；事务清单已清理");
+        toast.success("Provider 已删除；已重新读取事务状态");
         navigate("/providers");
         return;
       }

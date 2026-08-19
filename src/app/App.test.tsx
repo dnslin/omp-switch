@@ -1733,6 +1733,7 @@ describe("React page seam", () => {
     await waitFor(() => expect(getOverviewLoad).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(screen.queryByText("Second")).not.toBeInTheDocument();
+    expect(await screen.findByText("Model 已删除；已重新读取事务状态")).toBeVisible();
   });
   it("reloads after a committed Provider deletion cleanup failure", async () => {
     const user = userEvent.setup();
@@ -1751,6 +1752,7 @@ describe("React page seam", () => {
 
     await waitFor(() => expect(getOverviewLoad).toHaveBeenCalledTimes(2));
     expect(await screen.findByText("尚未配置 Provider。")).toBeVisible();
+    expect(await screen.findByText("Provider 已删除；已重新读取事务状态")).toBeVisible();
   });
   it("shows a reload action when a cross-file deletion conflicts", async () => {
     const user = userEvent.setup();
