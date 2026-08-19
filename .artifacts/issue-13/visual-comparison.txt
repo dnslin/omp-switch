@@ -7,7 +7,7 @@ Pencil exports:
 Real Tauri captures:
 - model-delete-confirm-tauri-1536x961.png
 - provider-delete-confirm-tauri-1536x961.png
-- deletion-blocked-tauri-1536x961.png
+- provider-delete-blocked-tauri-1536x961.png
 
 Checks:
 - Native Tauri window title is "OMP Switch"; the page does not draw a second title bar.

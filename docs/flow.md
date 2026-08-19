@@ -528,6 +528,7 @@ API Key
 其他引用：正在检查完整配置树…
 
 无引用时会创建备份并删除完整 Provider 节点；受支持角色引用需要同时更新 `models.yml` 和 `config.yml` 的 Configuration transaction，其他路径引用会阻止删除。
+如果 Provider 包含任一高级、不支持或只读 Model definition，即使 Provider 顶层看似普通，也阻止整节点删除并说明需要先处理该模型。
 
 [取消] [删除 Provider]
 ```
@@ -648,6 +649,7 @@ Max Tokens 不能大于 Context Window。
 [取消] [删除模型]
 
 有角色或其他引用时确认按钮禁用；界面列出安全配置路径和下一步。只有受支持角色引用时，提示转入 Configuration transaction，不执行 models-only 部分删除。
+未知 Thinking 后缀先按现存完整 Model ID 消歧；没有对应完整 ID 时按其他疑似引用阻止，不进入受支持 Model role 的事务入口。扫描也递归非字符串 YAML key 下的值，路径摘要安全序列化并脱敏。
 
 实现状态（issue #10）：Provider 详情模型表格在既定九列布局中显示可见状态标签、协议来源和引用数量；搜索、创建 Sheet、编辑、复制和删除确认共用同一表单组件体系。普通模型以右侧 Sheet 保存，缺失字段在修复时保持空值；高级、不支持、内置覆盖和其他只读模型不提供编辑、复制、删除或测试入口。
 

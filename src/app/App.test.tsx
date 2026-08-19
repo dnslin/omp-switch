@@ -1712,6 +1712,40 @@ describe("React page seam", () => {
     expect(within(dialog).getByRole("button", { name: "删除 Provider" })).toBeDisabled();
     expect(deleteProvider).not.toHaveBeenCalled();
   });
+  it("blocks Provider deletion when an included Model is read-only", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const readOnlyModel: OverviewModel = {
+      ...base.models[0],
+      id: "advanced-model",
+      name: "Advanced model",
+      editable: false,
+      status: "read-only",
+      readOnlyReason: "Model definition 包含当前版本不支持的配置，只能查看。",
+      referenceCount: 0,
+      referencePaths: [],
+      roleReferencePaths: [],
+      otherReferencePaths: [],
+    };
+    const provider: OverviewProvider = {
+      ...base.providers[0],
+      modelCount: 1,
+      models: [readOnlyModel],
+      roleReferencePaths: [],
+      otherReferencePaths: [],
+    };
+    const overview = overviewDto({ providers: [provider], models: [readOnlyModel], roles: [], counts: { providerCount: 1, modelCount: 1, roleCount: 0 } });
+    const deleteProvider = vi.fn().mockResolvedValue({ providerId: "dnslin", modelCount: 1 });
+    renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview, readyState), deleteProvider });
+
+    await screen.findByText("Advanced model");
+    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Provider 包含只读 Model definition advanced-model");
+    expect(within(dialog).getByRole("button", { name: "删除 Provider" })).toBeDisabled();
+    expect(deleteProvider).not.toHaveBeenCalled();
+  });
+
   it("deletes an unreferenced Provider and returns to the Provider list", async () => {
     const user = userEvent.setup();
     const base = overviewDto();

@@ -386,12 +386,43 @@ fn validate_delete_input(
         .and_then(|provider| provider.get(Value::String("models".to_owned())))
         .and_then(Value::as_sequence)
         .map_or(0, Vec::len);
+    let known_model_ids: Vec<String> = provider
+        .as_mapping()
+        .and_then(|provider| provider.get(Value::String("models".to_owned())))
+        .and_then(Value::as_sequence)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|model| {
+                    model
+                        .as_mapping()
+                        .and_then(|model| model.get(Value::String("id".to_owned())))
+                        .and_then(Value::as_str)
+                })
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(blocked_model_id) = known_model_ids.iter().find(|model_id| {
+        !overview::is_editable_model_definition(original_tree, &provider_id, model_id, catalog)
+    }) {
+        return Err(AppError::new(
+            "provider-delete-unavailable",
+            format!(
+                "无法删除 Provider {}：Model definition {} 含有高级或不受支持配置。",
+                provider_id, blocked_model_id
+            ),
+            "请先在 Provider 详情中处理该 Model definition；OMP Switch 不会通过删除 Provider 绕过只读边界。",
+        ));
+    }
+
     let skip_path = overview::provider_node_path(&provider_id);
     let references = overview::scan_model_references(
         Some(original_tree),
         Some(&config.original_tree),
         &provider_id,
         None,
+        &known_model_ids,
         Some(&skip_path),
     );
     if !references.other_paths.is_empty() {

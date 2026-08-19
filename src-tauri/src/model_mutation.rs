@@ -482,12 +482,19 @@ fn validate_delete_input(
     ) {
         return Err(read_only_model_error());
     }
+    let known_model_ids: Vec<String> = models
+        .iter()
+        .filter_map(model_id_value)
+        .map(str::to_owned)
+        .collect();
+
     let skip_path = overview::model_node_path(original_tree, &provider_id, &input.model_id);
     let references = overview::scan_model_references(
         Some(original_tree),
         Some(&config.tree),
         &provider_id,
         Some(&input.model_id),
+        &known_model_ids,
         skip_path.as_deref(),
     );
     if !references.other_paths.is_empty() {

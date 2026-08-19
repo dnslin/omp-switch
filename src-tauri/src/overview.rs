@@ -1186,6 +1186,11 @@ pub(crate) struct ReferenceScan {
     pub(crate) role_paths: Vec<String>,
     pub(crate) other_paths: Vec<String>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectorReferenceKind {
+    SupportedRole,
+    Other,
+}
 
 fn annotate_model_references(
     providers: &mut [ProviderSummaryDto],
@@ -1193,13 +1198,21 @@ fn annotate_model_references(
     config_tree: Option<&Value>,
 ) {
     for provider in providers {
+        let known_model_ids: Vec<String> = provider
+            .models
+            .iter()
+            .map(|model| model.id.clone())
+            .collect();
+
         let provider_scan = scan_model_references(
             models_tree,
             config_tree,
             &provider.id,
             None,
+            &known_model_ids,
             Some(&provider_node_path(&provider.id)),
         );
+
         provider.role_reference_paths = provider_scan.role_paths;
         provider.other_reference_paths = provider_scan.other_paths;
         for model in &mut provider.models {
@@ -1210,8 +1223,10 @@ fn annotate_model_references(
                 config_tree,
                 &provider.id,
                 Some(&model.id),
+                &known_model_ids,
                 skip_path.as_deref(),
             );
+
             model.role_reference_paths = scan.role_paths;
             model.other_reference_paths = scan.other_paths;
             model.reference_paths = model
@@ -1230,6 +1245,8 @@ pub(crate) fn scan_model_references(
     config_tree: Option<&Value>,
     provider_id: &str,
     model_id: Option<&str>,
+    known_model_ids: &[String],
+
     skip_models_path: Option<&str>,
 ) -> ReferenceScan {
     let mut scan = ReferenceScan::default();
@@ -1240,6 +1257,7 @@ pub(crate) fn scan_model_references(
             "models.yml",
             provider_id,
             model_id,
+            known_model_ids,
             skip_models_path,
             false,
             &mut scan,
@@ -1252,6 +1270,7 @@ pub(crate) fn scan_model_references(
             "config.yml",
             provider_id,
             model_id,
+            known_model_ids,
             None,
             false,
             &mut scan,
@@ -1295,6 +1314,8 @@ fn collect_reference_paths(
     file_name: &'static str,
     provider_id: &str,
     model_id: Option<&str>,
+    known_model_ids: &[String],
+
     skip_path: Option<&str>,
     role_value: bool,
     scan: &mut ReferenceScan,
@@ -1305,11 +1326,11 @@ fn collect_reference_paths(
     match value {
         Value::Mapping(map) => {
             for (key, child) in map {
-                let Some(key) = key.as_str() else { continue };
+                let key = reference_path_component(key);
                 let child_path = if path.is_empty() {
-                    escape_reference_path_component(key)
+                    key
                 } else {
-                    format!("{path}[\"{}\"]", escape_reference_path_component(key))
+                    format!("{path}[\"{key}\"]")
                 };
                 let child_role_value = file_name == "config.yml" && path == "modelRoles";
                 collect_reference_paths(
@@ -1318,6 +1339,7 @@ fn collect_reference_paths(
                     file_name,
                     provider_id,
                     model_id,
+                    known_model_ids,
                     skip_path,
                     child_role_value,
                     scan,
@@ -1332,22 +1354,50 @@ fn collect_reference_paths(
                     file_name,
                     provider_id,
                     model_id,
+                    known_model_ids,
                     skip_path,
                     false,
                     scan,
                 );
             }
         }
-        Value::String(value) if selector_matches_target(value, provider_id, model_id) => {
-            let path = format!("{file_name}:{path}");
-            if role_value {
-                scan.role_paths.push(path);
-            } else {
-                scan.other_paths.push(path);
+        Value::String(value) => {
+            if let Some(kind) =
+                selector_reference_kind(value, provider_id, model_id, known_model_ids)
+            {
+                let path = format!("{file_name}:{path}");
+                if role_value && kind == SelectorReferenceKind::SupportedRole {
+                    scan.role_paths.push(path);
+                } else {
+                    scan.other_paths.push(path);
+                }
             }
         }
+        Value::Tagged(tagged) => {
+            collect_reference_paths(
+                &tagged.value,
+                path,
+                file_name,
+                provider_id,
+                model_id,
+                known_model_ids,
+                skip_path,
+                false,
+                scan,
+            );
+        }
+
         _ => {}
     }
+}
+
+fn reference_path_component(value: &Value) -> String {
+    let serialized = value.as_str().map(str::to_owned).unwrap_or_else(|| {
+        serde_yaml::to_string(value)
+            .map(|serialized| serialized.trim().to_owned())
+            .unwrap_or_else(|_| format!("<unserializable YAML key: {value:?}>"))
+    });
+    escape_reference_path_component(&serialized)
 }
 
 fn escape_reference_path_component(value: &str) -> String {
@@ -1359,24 +1409,82 @@ fn escape_reference_path_component(value: &str) -> String {
         .replace('\r', "\\r")
 }
 
-fn selector_matches_target(value: &str, provider_id: &str, model_id: Option<&str>) -> bool {
-    let Some((candidate_provider, candidate_model)) = value.split_once('/') else {
-        return false;
+fn selector_reference_kind(
+    value: &str,
+    provider_id: &str,
+    model_id: Option<&str>,
+    known_model_ids: &[String],
+) -> Option<SelectorReferenceKind> {
+    if value.contains(',') {
+        return value
+            .split(',')
+            .map(str::trim)
+            .filter(|candidate| !candidate.is_empty())
+            .any(|candidate| {
+                selector_reference_kind_simple(candidate, provider_id, model_id, known_model_ids)
+                    .is_some()
+            })
+            .then_some(SelectorReferenceKind::Other);
+    }
+    selector_reference_kind_simple(value, provider_id, model_id, known_model_ids)
+}
+
+fn selector_reference_kind_simple(
+    value: &str,
+    provider_id: &str,
+    model_id: Option<&str>,
+    known_model_ids: &[String],
+) -> Option<SelectorReferenceKind> {
+    let Some((candidate_provider, raw_candidate_model)) = value.split_once('/') else {
+        return None;
     };
     if bundled_catalog::normalize_id(candidate_provider)
         != bundled_catalog::normalize_id(provider_id)
     {
-        return false;
+        return None;
     }
-    if model_id.is_none() || candidate_model == "*" {
-        return true;
+    if raw_candidate_model == "*" {
+        return Some(SelectorReferenceKind::Other);
     }
-    let candidate_model = candidate_model
-        .rsplit_once(':')
-        .filter(|(_, thinking)| is_supported_thinking(thinking))
-        .map_or(candidate_model, |(model, _)| model);
-    bundled_catalog::normalize_id(candidate_model)
-        == bundled_catalog::normalize_id(model_id.unwrap_or_default())
+
+    let exact_model = known_model_ids
+        .iter()
+        .find(|known_model_id| (*known_model_id).eq_ignore_ascii_case(raw_candidate_model))
+        .map(String::as_str);
+    if let Some(exact_model) = exact_model {
+        return match model_id {
+            None => Some(SelectorReferenceKind::SupportedRole),
+            Some(target) if exact_model.eq_ignore_ascii_case(target) => {
+                Some(SelectorReferenceKind::SupportedRole)
+            }
+            Some(_) => None,
+        };
+    }
+    let (candidate_model, simple_suffix) = match raw_candidate_model.rsplit_once(':') {
+        Some((model, thinking)) if is_supported_thinking(thinking) => (model, true),
+        Some((model, _)) => (model, false),
+        None => (raw_candidate_model, true),
+    };
+    let matches_target = match model_id {
+        None => true,
+        Some(_) if candidate_model == "*" => true,
+        Some(model_id) => {
+            bundled_catalog::normalize_id(candidate_model)
+                == bundled_catalog::normalize_id(model_id)
+        }
+    };
+    if !matches_target {
+        return None;
+    }
+    if simple_suffix
+        && !candidate_model.is_empty()
+        && candidate_model != "*"
+        && !candidate_model.contains('/')
+    {
+        Some(SelectorReferenceKind::SupportedRole)
+    } else {
+        Some(SelectorReferenceKind::Other)
+    }
 }
 
 fn project_roles(

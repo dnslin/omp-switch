@@ -434,6 +434,8 @@ function ProviderDetailPage() {
   const providerOtherReferences = uniqueReferences(provider?.otherReferencePaths ?? []);
   const modelRoleReferences = uniqueReferences(deletingModel?.roleReferencePaths ?? []);
   const modelOtherReferences = uniqueReferences(deletingModel?.otherReferencePaths ?? []);
+  const providerReadOnlyModelId = provider?.models.find((model) => !model.editable)?.id ?? null;
+
   const modelDeleteBlockedReason = deletingModel && provider
     ? modelOtherReferences.length > 0
       ? "OMP Switch 不会修改非受管配置路径；请先在 OMP 或外部编辑器中处理这些引用。"
@@ -447,9 +449,11 @@ function ProviderDetailPage() {
     ? "OMP Switch 不会修改非受管配置路径；请先在 OMP 或外部编辑器中处理这些引用。"
     : providerRoleReferences.length > 0
       ? "当前不会部分删除；需要 Configuration transaction 同时更新 models.yml 和 config.yml。"
-      : provider?.modelCount === 0
-        ? "Provider 没有可删除的 Model definition，当前配置不符合 Custom Provider 结构。"
-        : null;
+      : providerReadOnlyModelId
+        ? `Provider 包含只读 Model definition ${providerReadOnlyModelId}；请先处理该模型，OMP Switch 不会通过删除 Provider 绕过只读边界。`
+        : provider?.modelCount === 0
+          ? "Provider 没有可删除的 Model definition，当前配置不符合 Custom Provider 结构。"
+          : null;
   const openModelEditor = (editor: NonNullable<typeof modelEditor>) => {
     if (!openedModelsHash) return;
     setModelEditorModelsHash(openedModelsHash);

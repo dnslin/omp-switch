@@ -549,13 +549,16 @@ auto
 
 删除 Provider 或模型时：
 
-- 删除前扫描 `models.yml` 与 `config.yml` 的完整解析树，识别精确选择器、Thinking 后缀、Provider 通配符和选择器数组。
+- 删除前扫描 `models.yml` 与 `config.yml` 的完整解析树，递归所有映射值（包括非字符串 YAML key 下的值），识别精确选择器、Thinking 后缀、Provider 通配符和选择器数组；路径摘要对 key 做安全序列化并脱敏。
+- 先按所属 Provider 中现存的完整 Model ID 精确匹配 selector；只有不存在完整 ID 时才解析 Thinking suffix。未知 suffix（如 `:ultra`）未匹配完整 ID 时按疑似引用阻止；已存在的完整 ID（如 `second:ultra`）优先，避免误报 `second`。
+- Provider 删除还必须确认其全部 Model definition 都是可编辑、非高级对象；普通 Provider 顶层字段不能绕过只读子模型。
 - 无引用时，只对 `models.yml` 中明确选中的完整节点执行单文件 Safe structured edit。
 - 受支持 `modelRoles` 引用不会在本工单执行部分删除；界面明确交给同时修改两个文件的 Configuration transaction 流程。
 - `modelRoles` 之外发现相关或疑似引用时阻止删除并显示安全路径摘要。
 - 不自动修改 `retry.fallbackChains`、`task.agentModelOverrides` 或其他非受管路径。
 
 实现状态（issue #13）：Rust application service 在最新完整树上完成 Model/Provider 引用扫描；普通无引用删除复用 Hash、当前备份、临时文件重解析、未触及路径比较和原子替换。Provider 删除先合并检查其全部模型引用；非受管引用阻止写入，受支持角色引用明确停在跨文件事务入口。React 确认 Dialog 展示删除对象、包含模型、角色路径、其他引用和备份行为；确认按钮在阻止状态禁用。
+实现状态补充（issue #13）：扫描器按现存完整 Model ID 先消歧，未知 Thinking 后缀只有在不存在对应完整 ID 时才归入其他疑似引用；递归扫描非字符串 YAML key 下的值并对路径组件安全序列化、脱敏；Provider 整体删除会逐一复核其 Model definition 的可编辑边界。
 
 ## 11. 模型连接测试
 
