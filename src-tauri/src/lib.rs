@@ -1,5 +1,6 @@
 mod application;
 mod bundled_catalog;
+mod configuration_transaction;
 mod error;
 mod logging;
 mod model_mutation;

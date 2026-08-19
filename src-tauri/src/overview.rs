@@ -1278,6 +1278,32 @@ pub(crate) fn scan_model_references(
     }
     scan
 }
+pub(crate) fn supported_model_role_ids(
+    config_tree: &Value,
+    provider_id: &str,
+    model_id: Option<&str>,
+    known_model_ids: &[String],
+) -> Vec<String> {
+    let Some(root) = mapping(config_tree) else {
+        return Vec::new();
+    };
+    let Some(roles) = mapping(mapping_get(root, "modelRoles").unwrap_or(&Value::Null)) else {
+        return Vec::new();
+    };
+    roles
+        .iter()
+        .filter_map(|(key, value)| {
+            let role_id = key.as_str()?;
+            if !is_valid_role_id(role_id) {
+                return None;
+            }
+            let selector = value.as_str()?;
+            (selector_reference_kind(selector, provider_id, model_id, known_model_ids)
+                == Some(SelectorReferenceKind::SupportedRole))
+            .then_some(role_id.to_owned())
+        })
+        .collect()
+}
 
 pub(crate) fn provider_node_path(provider_id: &str) -> String {
     format!(
