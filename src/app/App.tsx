@@ -365,6 +365,9 @@ function isHashConflict(error: AppError | null): boolean {
     || error?.code === "config-hash-conflict"
     || error?.code === "configuration-transaction-target-changed";
 }
+function isCommittedCleanupFailure(error: AppError | null): boolean {
+  return error?.code === "configuration-transaction-cleanup-failed";
+}
 
 function DeletionImpact({
   objectLabel,
@@ -577,6 +580,15 @@ function ProviderDetailPage() {
       toast.success("Model 已删除");
     } catch (cause: unknown) {
       const appError = asAppError(cause, "删除 Model 失败");
+      if (isCommittedCleanupFailure(appError)) {
+        const reloadError = await reload();
+        setDeletingModel(null);
+        setDeleteHashes(null);
+        setDeleteError(reloadError);
+        if (reloadError) return;
+        toast.success("Model 已删除；事务清单已清理");
+        return;
+      }
       if (isHashConflict(appError)) {
         setDeleteError(appError);
         return;
@@ -606,6 +618,16 @@ function ProviderDetailPage() {
       navigate("/providers");
     } catch (cause: unknown) {
       const appError = asAppError(cause, "删除 Provider 失败");
+      if (isCommittedCleanupFailure(appError)) {
+        const reloadError = await reload();
+        setDeletingProvider(false);
+        setDeleteHashes(null);
+        setProviderDeleteError(reloadError);
+        if (reloadError) return;
+        toast.success("Provider 已删除；事务清单已清理");
+        navigate("/providers");
+        return;
+      }
       if (isHashConflict(appError)) {
         setProviderDeleteError(appError);
         return;

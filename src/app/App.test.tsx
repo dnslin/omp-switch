@@ -1713,6 +1713,45 @@ describe("React page seam", () => {
     await waitFor(() => expect(deleteModel).toHaveBeenCalledWith({ openedModelsHash: "models-hash", openedConfigHash: "config-hash", providerId: "dnslin", modelId: "second" }));
     await waitFor(() => expect(screen.queryByText("Second")).not.toBeInTheDocument());
   });
+  it("reloads after a committed Model deletion cleanup failure", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const second: OverviewModel = { ...base.models[0], id: "second", name: "Second", referenceCount: 0, referencePaths: [], roleReferencePaths: [], otherReferencePaths: [] };
+    const provider: OverviewProvider = { ...base.providers[0], modelCount: 2, models: [base.models[0], second] };
+    const initial = overviewDto({ providers: [provider], models: [base.models[0], second], counts: { providerCount: 1, modelCount: 2, roleCount: 0 }, roles: [] });
+    const after = overviewDto({ providers: [{ ...provider, modelCount: 1, models: [base.models[0]] }], models: [base.models[0]], counts: { providerCount: 1, modelCount: 1, roleCount: 0 }, roles: [] });
+    const getOverviewLoad = vi.fn().mockResolvedValueOnce(overviewLoad(initial, readyState)).mockResolvedValueOnce(overviewLoad(after, readyState));
+    const deleteModel = vi.fn().mockRejectedValue({ code: "configuration-transaction-cleanup-failed", message: "models.yml 与 config.yml 已完成替换，但事务清单清理失败。", action: "请重新检测 OMP。" });
+    renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad, deleteModel });
+
+    await screen.findByText("Second");
+    await user.click(screen.getByRole("button", { name: "Model 操作 second" }));
+    await user.click(screen.getByRole("menuitem", { name: "删除" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "删除模型" }));
+
+    await waitFor(() => expect(getOverviewLoad).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByText("Second")).not.toBeInTheDocument();
+  });
+  it("reloads after a committed Provider deletion cleanup failure", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const provider: OverviewProvider = { ...base.providers[0], roleReferencePaths: [], otherReferencePaths: [], models: [base.models[0]] };
+    const initial = overviewDto({ providers: [provider], models: [base.models[0]], counts: { providerCount: 1, modelCount: 1, roleCount: 0 }, roles: [] });
+    const after = overviewDto({ state: "empty", providers: [], models: [], counts: { providerCount: 0, modelCount: 0, roleCount: 0 }, roles: [] });
+    const getOverviewLoad = vi.fn().mockResolvedValueOnce(overviewLoad(initial, readyState)).mockResolvedValue(overviewLoad(after, readyState));
+    const deleteProvider = vi.fn().mockRejectedValue({ code: "configuration-transaction-cleanup-failed", message: "models.yml 与 config.yml 已完成替换，但事务清单清理失败。", action: "请重新检测 OMP。" });
+    renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad, deleteProvider });
+
+    await screen.findByText("Sol");
+    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "删除 Provider" }));
+
+    await waitFor(() => expect(getOverviewLoad).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("尚未配置 Provider。")).toBeVisible();
+  });
   it("shows a reload action when a cross-file deletion conflicts", async () => {
     const user = userEvent.setup();
     const base = overviewDto();
