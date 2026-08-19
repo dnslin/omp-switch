@@ -550,14 +550,14 @@ export function ModelRolesPage() {
   const openTargetDirectory = useCallback(async () => {
     const executablePath = startupState?.kind === "omp-ready" ? startupState.executablePath : data?.omp.executablePath;
     if (!executablePath) {
-      toast.error("无法打开配置目录", { description: "当前 OMP 路径不可用，请重新检测。" });
+      toast.error("无法打开配置目录");
       return;
     }
     try {
       await client.openTargetConfigurationDirectory(executablePath);
     } catch (cause: unknown) {
       const appError = asAppError(cause, "无法打开配置目录");
-      toast.error(appError.message, { description: appError.action });
+      toast.error(appError.message);
     }
   }, [client, data?.omp.executablePath, startupState]);
   const requestReload = useCallback(() => {

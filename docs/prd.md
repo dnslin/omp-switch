@@ -180,6 +180,8 @@ OMP 版本只用于诊断和兼容报告，不作为单独的写入许可。每�
 → 重新读取配置
 ```
 
+验证失败或取消时保留当前可用 OMP、Target configuration 和轻量选择。只有确认成功后才持久化新路径，并清除不适用于新 Target 的 Provider/Model 轻量选择，再重新执行发现和读取。设置页目录入口只接受后端解析的固定意图，不接受前端任意路径；恢复默认设置不删除 OMP 配置、备份或事务现场副本。
+
 ### 6.6 Bundled Provider 清单
 
 创建或编辑普通 Custom Provider 前，Rust 必须加载与 `omp --version` 精确对应的 bundled Provider ID 清单。

@@ -49,12 +49,25 @@ const unavailableClient: TauriClient = {
   testModel: async () => ({ success: true, providerId: "dnslin", modelId: "gpt-5.6-sol", protocol: "openai-responses" as const, latencyMs: 12, status: 200, message: "模型连接成功" }),
   cancelModelTest: async () => true,
   getModelTestState: async () => ({ running: false, providerId: null, modelId: null, result: null, terminal: null }),
+  getRuntimeInfo: async () => ({ platform: "macOS", architecture: "arm64" }),
   detectOmp: async () => ({ kind: "omp-unavailable", message: "仍未找到 OMP" }),
   selectOmpExecutable: async () => null,
   validateSelectedOmp: async () => ({ kind: "invalid-executable", executablePath: "/tmp/not-omp", message: "无法运行", diagnosticCode: "io-not-found" }),
+  validatePathOmp: async () => ({ kind: "invalid-executable", executablePath: "/tmp/not-omp", message: "无法运行", diagnosticCode: "io-not-found" }),
   confirmSelectedOmp: async () => undefined,
+  confirmPathOmp: async () => ({ ompExecutablePath: null, theme: "system", selectedProviderId: null, selectedModelId: null, modelTestCostNoticeAccepted: false }),
   initializeTargetConfiguration: async () => readyState,
   openTargetConfigurationDirectory: async () => undefined,
+  openCurrentTargetConfigurationDirectory: async () => undefined,
+  openApplicationConfigurationDirectory: async () => undefined,
+  openApplicationLogDirectory: async () => undefined,
+  openTargetBackupDirectory: async () => undefined,
+  getSettingsDirectories: async () => ({
+    targetConfiguration: "/Users/username/.omp/agent",
+    applicationConfiguration: "/Users/username/Library/Application Support/OMP Switch",
+    applicationLog: "/Users/username/Library/Logs/OMP Switch",
+    targetBackup: "/Users/username/.omp/agent/backups",
+  }),
   getUiSettings: async () => ({
     ompExecutablePath: null,
     theme: "system",
@@ -63,6 +76,7 @@ const unavailableClient: TauriClient = {
     modelTestCostNoticeAccepted: false,
   }),
   saveUiSettings: async (settings) => ({ ompExecutablePath: null, modelTestCostNoticeAccepted: false, ...settings }),
+  resetUiSettings: async () => ({ ompExecutablePath: null, theme: "system", selectedProviderId: null, selectedModelId: null, modelTestCostNoticeAccepted: false }),
   acceptModelTestCostNotice: async () => ({ ompExecutablePath: null, theme: "system", selectedProviderId: null, selectedModelId: null, modelTestCostNoticeAccepted: true }),
 };
 const readyState: StartupState = {
@@ -1256,6 +1270,21 @@ describe("React page seam", () => {
     expect(screen.getByText("清单缺失 · 只读")).toBeVisible();
     expect(screen.getByRole("button", { name: "新增 Provider" })).toBeDisabled();
   });
+  it("focuses Provider search with Cmd/Ctrl+F without stealing Dialog focus", async () => {
+    const user = userEvent.setup();
+    renderRoute("/providers", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overviewDto(), readyState) });
+    const search = await screen.findByRole("searchbox", { name: "搜索 Provider" });
+
+    fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+    expect(document.activeElement).toBe(search);
+
+    await user.click(screen.getByRole("button", { name: "新增 Provider" }));
+    const dialog = await screen.findByRole("dialog");
+    const providerId = within(dialog).getByLabelText("Provider ID");
+    expect(document.activeElement).toBe(providerId);
+    fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+    expect(document.activeElement).toBe(providerId);
+  });
   it("marks an otherwise Custom Provider with an incomplete model", async () => {
     const base = overviewDto();
     const incompleteModel: OverviewModel = {
@@ -1644,6 +1673,21 @@ describe("React page seam", () => {
 
     await waitFor(() => expect(createModel).toHaveBeenCalledWith(expect.objectContaining({ providerId: "dnslin", model: expect.objectContaining({ id: "new-model", name: "New Model", input: ["text", "image"] }) })));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+  it("focuses Model search with Cmd/Ctrl+F without stealing Sheet focus", async () => {
+    const user = userEvent.setup();
+    renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overviewDto(), readyState) });
+    const search = await screen.findByLabelText("搜索 Model ID");
+
+    fireEvent.keyDown(window, { key: "f", metaKey: true });
+    expect(document.activeElement).toBe(search);
+
+    await user.click(screen.getByRole("button", { name: "新增模型" }));
+    const sheet = await screen.findByRole("dialog");
+    const modelId = within(sheet).getByLabelText("Model ID");
+    expect(document.activeElement).toBe(modelId);
+    fireEvent.keyDown(window, { key: "f", metaKey: true });
+    expect(document.activeElement).toBe(modelId);
   });
 
   it("keeps incomplete models repairable, locks read-only models, and confirms deletion", async () => {
@@ -2493,6 +2537,307 @@ describe("React page seam", () => {
   });
 
 
+  it("renders the approved Settings sections and persists theme changes", async () => {
+    const user = userEvent.setup();
+    const saveUiSettings = vi.fn(async (settings: Parameters<TauriClient["saveUiSettings"]>[0]) => ({
+      ompExecutablePath: "/usr/local/bin/omp",
+      theme: settings.theme,
+      selectedProviderId: settings.selectedProviderId,
+      selectedModelId: settings.selectedModelId,
+      modelTestCostNoticeAccepted: false,
+    }));
+    renderRoute("/settings", {
+      ...unavailableClient,
+      getStartupState: async () => readyState,
+      saveUiSettings,
+    });
+
+    expect(await screen.findByRole("heading", { name: "设置" })).toBeVisible();
+    expect(screen.getByText("管理 OMP 路径、外观和应用目录。".replace("，", "、"))).toBeVisible();
+    expect(screen.getByRole("heading", { name: "OMP" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "外观" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "目录" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "应用信息" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "深色" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "深色" }));
+
+    await waitFor(() => expect(saveUiSettings).toHaveBeenCalledWith({
+      theme: "dark",
+      selectedProviderId: null,
+      selectedModelId: null,
+    }));
+    expect(document.documentElement.dataset.theme).toBe("dark");
+  });
+  it("does not persist a theme after settings hydration fails", async () => {
+    const user = userEvent.setup();
+    const saveUiSettings = vi.fn(unavailableClient.saveUiSettings);
+    renderRoute("/settings", {
+      ...unavailableClient,
+      getStartupState: async () => readyState,
+      getUiSettings: async () => { throw { code: "settings-read-failed", message: "无法读取界面设置。", action: "请修复设置文件后重试。" }; },
+      saveUiSettings,
+    });
+
+    await screen.findByRole("heading", { name: "设置" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("请修复设置文件后重试");
+    const darkTheme = screen.getByRole("button", { name: "深色" });
+    await waitFor(() => expect(darkTheme).toBeDisabled());
+    await user.click(darkTheme);
+    expect(saveUiSettings).not.toHaveBeenCalled();
+  });
+
+  it("keeps the current OMP when replacement validation fails or is cancelled", async () => {
+    const user = userEvent.setup();
+    const confirmSelectedOmp = vi.fn(unavailableClient.confirmSelectedOmp);
+    const validateSelectedOmp = vi.fn(async () => ({
+      kind: "version-failed" as const,
+      executablePath: "/opt/new/bin/omp",
+      message: "新 OMP 无法运行。",
+      diagnosticCode: "process-exit",
+      exitCode: 7,
+      stderr: "技术详情已脱敏",
+    }));
+    renderRoute("/settings", {
+      ...unavailableClient,
+      getStartupState: async () => readyState,
+      selectOmpExecutable: async () => "/opt/new/bin/omp",
+      validateSelectedOmp,
+      confirmSelectedOmp,
+    });
+
+    await screen.findByRole("heading", { name: "设置" });
+    await user.click(screen.getByRole("button", { name: "重新选择" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("新 OMP 无法运行");
+    expect(screen.getByText("/usr/local/bin/omp")).toBeVisible();
+    expect(confirmSelectedOmp).not.toHaveBeenCalled();
+  });
+
+  it("requires confirmation before committing a validated OMP target change", async () => {
+    const user = userEvent.setup();
+    const confirmSelectedOmp = vi.fn(unavailableClient.confirmSelectedOmp);
+    const candidate: StartupState = {
+      kind: "omp-ready",
+      executablePath: "/opt/new/bin/omp",
+      version: "18.0.0",
+      targetConfiguration: targetConfiguration("/Users/username/.omp/new-agent"),
+      previousTargetConfiguration: "/Users/username/.omp/agent",
+      requiresConfirmation: true,
+    };
+    renderRoute("/settings", {
+      ...unavailableClient,
+      getStartupState: async () => readyState,
+      selectOmpExecutable: async () => "/opt/new/bin/omp",
+      validateSelectedOmp: async () => candidate,
+      confirmSelectedOmp,
+    });
+
+    await screen.findByRole("heading", { name: "设置" });
+    await user.click(screen.getByRole("button", { name: "重新选择" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("确认切换 OMP");
+    expect(dialog).toHaveTextContent("/Users/username/.omp/new-agent");
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(screen.getByText("/usr/local/bin/omp")).toBeVisible();
+    expect(confirmSelectedOmp).not.toHaveBeenCalled();
+  });
+  it("initializes a creation-required Target before committing an OMP switch", async () => {
+    const user = userEvent.setup();
+    const candidate: StartupState = {
+      kind: "omp-ready",
+      executablePath: "/opt/new/bin/omp",
+      version: "18.0.0",
+      targetConfiguration: targetConfiguration("/Users/username/.omp/new-agent", {
+        status: "creation-required",
+        writable: false,
+        createPaths: ["/Users/username/.omp/new-agent/models.yml", "/Users/username/.omp/new-agent/config.yml"],
+        discoveryToken: "new-discovery-token",
+      }),
+      previousTargetConfiguration: "/Users/username/.omp/agent",
+      requiresConfirmation: true,
+    };
+    const initialized: StartupState = {
+      ...candidate,
+      targetConfiguration: targetConfiguration("/Users/username/.omp/new-agent"),
+      requiresConfirmation: false,
+    };
+    const initializeTargetConfiguration = vi.fn(async (_executablePath: string, expectation: { createPaths: string[]; discoveryToken: string }) => {
+      expect(expectation).toEqual({
+        createPaths: ["/Users/username/.omp/new-agent/models.yml", "/Users/username/.omp/new-agent/config.yml"],
+        discoveryToken: "new-discovery-token",
+      });
+      return initialized;
+    });
+    const getStartupState = vi.fn().mockResolvedValueOnce(readyState).mockResolvedValue(initialized);
+    const confirmSelectedOmp = vi.fn(unavailableClient.confirmSelectedOmp);
+    renderRoute("/settings", {
+      ...unavailableClient,
+      getStartupState,
+      selectOmpExecutable: async () => "/opt/new/bin/omp",
+      validateSelectedOmp: async () => candidate,
+      initializeTargetConfiguration,
+      confirmSelectedOmp,
+    });
+
+    await screen.findByRole("heading", { name: "设置" });
+    await user.click(screen.getByRole("button", { name: "重新选择" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toBeVisible();
+    expect(dialog).toHaveTextContent("/Users/username/.omp/new-agent/config.yml");
+    await user.click(within(dialog).getByRole("button", { name: "确认创建并切换" }));
+
+    await waitFor(() => expect(initializeTargetConfiguration).toHaveBeenCalledTimes(1));
+    expect(confirmSelectedOmp).not.toHaveBeenCalled();
+    expect(await screen.findByText("/opt/new/bin/omp")).toBeVisible();
+  });
+
+  it("allows a read-only Target switch without writing configuration", async () => {
+    const user = userEvent.setup();
+    const confirmSelectedOmp = vi.fn(unavailableClient.confirmSelectedOmp);
+    const candidate: StartupState = {
+      kind: "omp-ready",
+      executablePath: "/opt/readonly/bin/omp",
+      version: "18.0.0",
+      targetConfiguration: targetConfiguration("/Users/username/.omp/readonly-agent", { status: "read-only", writable: false }),
+      previousTargetConfiguration: "/Users/username/.omp/agent",
+      requiresConfirmation: true,
+    };
+    renderRoute("/settings", {
+      ...unavailableClient,
+      getStartupState: async () => readyState,
+      selectOmpExecutable: async () => "/opt/readonly/bin/omp",
+      validateSelectedOmp: async () => candidate,
+      confirmSelectedOmp,
+    });
+
+    await screen.findByRole("heading", { name: "设置" });
+    await user.click(screen.getByRole("button", { name: "重新选择" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("新 Target configuration 只读");
+    await user.click(within(dialog).getByRole("button", { name: "确认切换" }));
+    await waitFor(() => expect(confirmSelectedOmp).toHaveBeenCalledWith("/opt/readonly/bin/omp"));
+  });
+
+  it.each([
+    ["migration-required", targetConfiguration("/Users/username/.omp/migrate-agent", { status: "migration-required", writable: false }), "需要先由 OMP 迁移配置"],
+    ["parse-error", targetConfiguration("/Users/username/.omp/parse-agent", { status: "parse-error", writable: false, issue: { filePath: "/Users/username/.omp/parse-agent/models.yml", line: 3, column: 2, message: "YAML 解析失败" } }), "无法读取 models.yml"],
+    ["unsafe", targetConfiguration("/Users/username/.omp/unsafe-agent", { status: "unsafe", writable: false, recoveryNotice: "需要人工处理" }), "无法安全访问 Target configuration"],
+  ] as const)("keeps the current OMP for %s Target state", async (_status, blockedTarget, message) => {
+    const user = userEvent.setup();
+    const confirmSelectedOmp = vi.fn(unavailableClient.confirmSelectedOmp);
+    const candidate: StartupState = {
+      kind: "omp-ready",
+      executablePath: "/opt/blocked/bin/omp",
+      version: "18.0.0",
+      targetConfiguration: blockedTarget,
+      previousTargetConfiguration: "/Users/username/.omp/agent",
+      requiresConfirmation: true,
+    };
+    renderRoute("/settings", {
+      ...unavailableClient,
+      getStartupState: async () => readyState,
+      selectOmpExecutable: async () => "/opt/blocked/bin/omp",
+      validateSelectedOmp: async () => candidate,
+      confirmSelectedOmp,
+    });
+
+    await screen.findByRole("heading", { name: "设置" });
+    await user.click(screen.getByRole("button", { name: "重新选择" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(screen.getByText("/usr/local/bin/omp")).toBeVisible();
+    expect(confirmSelectedOmp).not.toHaveBeenCalled();
+  });
+
+  it("uses approved native directory intents and confirms resetting app settings", async () => {
+    const user = userEvent.setup();
+    const openCurrentTargetConfigurationDirectory = vi.fn(unavailableClient.openCurrentTargetConfigurationDirectory);
+    const openApplicationConfigurationDirectory = vi.fn(unavailableClient.openApplicationConfigurationDirectory);
+    const openApplicationLogDirectory = vi.fn(unavailableClient.openApplicationLogDirectory);
+    const openTargetBackupDirectory = vi.fn(unavailableClient.openTargetBackupDirectory);
+    const resetUiSettings = vi.fn(async () => ({
+      ompExecutablePath: null,
+      theme: "system" as const,
+      selectedProviderId: null,
+      selectedModelId: null,
+      modelTestCostNoticeAccepted: false,
+    }));
+    renderRoute("/settings", {
+      ...unavailableClient,
+      getStartupState: async () => readyState,
+      openCurrentTargetConfigurationDirectory,
+      openApplicationConfigurationDirectory,
+      openApplicationLogDirectory,
+      openTargetBackupDirectory,
+      resetUiSettings,
+    });
+
+    await screen.findByRole("heading", { name: "设置" });
+    await user.click(screen.getByRole("button", { name: "打开 OMP 配置目录" }));
+    await user.click(screen.getByRole("button", { name: "打开应用配置目录" }));
+    await user.click(screen.getByRole("button", { name: "打开应用日志目录" }));
+    await user.click(screen.getByRole("button", { name: "打开备份目录" }));
+    expect(openCurrentTargetConfigurationDirectory).toHaveBeenCalledTimes(1);
+    expect(openApplicationConfigurationDirectory).toHaveBeenCalledTimes(1);
+    expect(openApplicationLogDirectory).toHaveBeenCalledTimes(1);
+    expect(openTargetBackupDirectory).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "恢复默认设置" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("不会删除 OMP Provider、模型、角色、API Key 或备份");
+    await user.click(within(dialog).getByRole("button", { name: "恢复默认" }));
+    expect(resetUiSettings).toHaveBeenCalledTimes(1);
+  });
+  it("shows config-path failure details while keeping application directories", async () => {
+    renderRoute("/settings", {
+      ...unavailableClient,
+      getStartupState: async () => ({
+        kind: "config-path-failed",
+        executablePath: "/usr/local/bin/omp",
+        version: "17.4.1",
+        message: "OMP 没有成功返回配置路径；不会猜测目录。",
+        diagnosticCode: "process-exit",
+        exitCode: 9,
+        stderr: "技术详情已脱敏",
+      }),
+    });
+
+    await screen.findByRole("heading", { name: "设置" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("不会猜测目录");
+    expect(screen.getByRole("alert")).toHaveTextContent("请检查 OMP 配置路径和权限后重试");
+    expect(screen.getByText("/Users/username/Library/Application Support/OMP Switch")).toBeVisible();
+  });
+
+  it("refreshes to OMP unavailable after resetting with no PATH fallback", async () => {
+    const user = userEvent.setup();
+    const getStartupState = vi.fn()
+      .mockResolvedValueOnce(readyState)
+      .mockResolvedValue({ kind: "omp-unavailable", message: "未在已保存路径或系统 PATH 中找到可用的 OMP。" });
+    const getSettingsDirectories = vi.fn()
+      .mockResolvedValueOnce({
+        targetConfiguration: "/Users/username/.omp/agent",
+        applicationConfiguration: "/Users/username/Library/Application Support/OMP Switch",
+        applicationLog: "/Users/username/Library/Logs/OMP Switch",
+        targetBackup: "/Users/username/.omp/agent/backups",
+      })
+      .mockResolvedValue({
+        targetConfiguration: null,
+        applicationConfiguration: "/Users/username/Library/Application Support/OMP Switch",
+        applicationLog: "/Users/username/Library/Logs/OMP Switch",
+        targetBackup: null,
+      });
+    const resetUiSettings = vi.fn(unavailableClient.resetUiSettings);
+    renderRoute("/settings", { ...unavailableClient, getStartupState, getSettingsDirectories, resetUiSettings });
+
+    await screen.findByRole("heading", { name: "设置" });
+    await user.click(screen.getByRole("button", { name: "恢复默认设置" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "恢复默认" }));
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("未在已保存路径或系统 PATH 中找到可用的 OMP"));
+    expect(screen.getByText("/Users/username/Library/Application Support/OMP Switch")).toBeVisible();
+    expect(resetUiSettings).toHaveBeenCalledTimes(1);
+  });
+
 });
 
 function overviewDto(overrides: Partial<OverviewDto> = {}): OverviewDto {
@@ -3249,7 +3594,8 @@ describe("Overview page seam", () => {
     expect(footer).toHaveAttribute("href", "/settings#omp-settings");
     await user.click(footer);
     expect(await screen.findByRole("heading", { name: "设置" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "OMP 与 Target configuration" })).toBeVisible();
+    expect(document.getElementById("omp-settings")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "OMP" })).toBeVisible();
   });
 });
 

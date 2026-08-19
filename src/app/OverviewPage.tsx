@@ -38,7 +38,7 @@ function enqueueOverviewSettingsSave(client: TauriClient, settings: UiSettingsUp
     } catch (cause: unknown) {
       if (!isActive()) return;
       const appError = asAppError(cause, "无法保存快速测试选择");
-      toast.error(appError.message, { description: appError.action });
+      toast.error(appError.message);
     }
   });
   overviewSettingsSaveQueues.set(client, queued);
@@ -107,6 +107,7 @@ function sameModelSelection(left: ModelSelection, right: ModelSelection) {
 export function OverviewPage() {
   const client = useTauriClient();
   const hydrationState = useUiSettings((state) => state.hydrationState);
+  const hydrationError = useUiSettings((state) => state.hydrationError);
   const { data, startupState, error, loading, revision, reload, refresh, shellStatus } = useOverviewLoad(overviewLoadCopy);
   const modelTest = useModelTestRunner();
   useRefreshAfterModelTest({ ready: Boolean(data), loading, revision, refresh });
@@ -117,7 +118,7 @@ export function OverviewPage() {
       await client.openTargetConfigurationDirectory(startupState.executablePath);
     } catch (cause: unknown) {
       const appError = asAppError(cause, "无法打开配置目录");
-      toast.error(appError.message, { description: appError.action });
+      toast.error(appError.message);
     }
   }
 
@@ -128,6 +129,12 @@ export function OverviewPage() {
     <MainShell status={shellStatus}>
       <div className={`overview-page ${pageClass}`} aria-busy={pageLoading}>
         <OverviewPageHeader />
+        {hydrationError ? (
+          <section className="overview-state-banner overview-state-banner--readonly" role="alert" aria-live="assertive">
+            <CircleAlert aria-hidden="true" />
+            <div><strong>无法读取界面设置</strong><p>{hydrationError.message}</p><p>{hydrationError.action}</p></div>
+          </section>
+        ) : null}
         {pageLoading ? <OverviewLoadingBody /> : error ? <OverviewErrorBody error={error} onReload={reload} onOpenTargetDirectory={openDirectory} /> : data ? <OverviewContentBody data={data} modelTest={modelTest} /> : <OverviewErrorBody error={overviewLoadCopy.missingOverview} onReload={reload} onOpenTargetDirectory={openDirectory} />}
       </div>
     </MainShell>

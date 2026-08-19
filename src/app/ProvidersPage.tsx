@@ -7,9 +7,9 @@ import { Button, SearchInput, StatusIndicator } from "../components/ui";
 import { type AppError, type OverviewDto, type OverviewProvider } from "../lib/tauri-client";
 import { MainShell } from "./MainShell";
 import { ProviderCreateDialog } from "./ProviderCreateDialog";
+import { usePageSearchFocus } from "./use-page-search-focus";
 import { useOverviewLoad } from "./overview-load";
 import { providerAuthSummary } from "./omp-presentation";
-
 type ProviderStatus = {
   label: string;
   tone: "success" | "warning" | "danger";
@@ -106,7 +106,7 @@ export function ProvidersPage() {
             新增 Provider
           </Button>
         </header>
-        {loading ? <ProvidersLoading /> : error ? <ProvidersError error={error} onReload={reload} /> : data ? <ProvidersTable data={data} /> : <ProvidersError error={providersLoadCopy.missingOverview} onReload={reload} />}
+        {loading ? <ProvidersLoading /> : error ? <ProvidersError error={error} onReload={reload} /> : data ? <ProvidersTable data={data} searchFocusDisabled={Boolean(openedModelsHash)} /> : <ProvidersError error={providersLoadCopy.missingOverview} onReload={reload} />}
       </main>
       {openedModelsHash ? (
         <ProviderCreateDialog
@@ -144,7 +144,8 @@ function ProvidersError({ error, onReload }: { error: AppError; onReload: () => 
   );
 }
 
-function ProvidersTable({ data }: { data: OverviewDto }) {
+function ProvidersTable({ data, searchFocusDisabled }: { data: OverviewDto; searchFocusDisabled: boolean }) {
+  const searchRef = usePageSearchFocus(searchFocusDisabled);
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLowerCase();
   const providers = data.providers.filter((provider) => matchesProvider(provider, normalizedQuery));
@@ -159,6 +160,7 @@ function ProvidersTable({ data }: { data: OverviewDto }) {
         </section>
       ) : null}
       <SearchInput
+        ref={searchRef}
         className="providers-search"
         type="search"
         name="provider-search"

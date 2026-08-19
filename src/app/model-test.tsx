@@ -60,7 +60,7 @@ export function useRefreshAfterModelTest({
         if (!active) return;
         if (!failureNotified) {
           const error = asAppError(cause, "无法同步模型测试状态");
-          toast.error(error.message, { description: error.action });
+          toast.error(error.message);
           failureNotified = true;
         }
         retryTimer = window.setTimeout(() => {
@@ -89,12 +89,12 @@ export function useRefreshAfterModelTest({
         if (refreshError) {
           clearInvalidatedResult();
           const error = asAppError(refreshError, "无法刷新模型测试后的配置");
-          toast.error(error.message, { description: error.action });
+          toast.error(error.message);
         }
       } catch (cause: unknown) {
         clearInvalidatedResult();
         const error = asAppError(cause, "无法刷新模型测试后的配置");
-        toast.error(error.message, { description: error.action });
+        toast.error(error.message);
       }
     })();
   }, [loading, needsOverviewRefresh, ready, refresh, running]);
@@ -121,7 +121,7 @@ function syncRemoteModelTestState(client: Pick<TauriClient, "getModelTestState">
       if (useModelTestStore.getState().generation !== generation) return;
       if (!failureNotified) {
         const error = asAppError(cause, "无法读取模型测试状态");
-        toast.error(error.message, { description: error.action });
+        toast.error(error.message);
         failureNotified = true;
       }
       window.setTimeout(() => void poll(), REMOTE_MODEL_TEST_STATE_POLL_MS);
@@ -161,13 +161,13 @@ export function useModelTestRunner() {
       if (error.code === "model-test-cancelled" || error.code === "model-test-timeout") {
         const generation = useModelTestStore.getState().recoverRemote();
         if (error.code === "model-test-timeout") {
-          toast.error(error.message, { description: error.action });
+          toast.error(error.message);
         }
         syncRemoteModelTestState(client, generation);
         return;
       }
       useModelTestStore.getState().fail();
-      toast.error(error.message, { description: error.action });
+      toast.error(error.message);
     }
   }, [client]);
 
@@ -188,7 +188,7 @@ export function useModelTestRunner() {
   const cancel = useCallback(() => {
     void client.cancelModelTest().catch((cause: unknown) => {
       const error = asAppError(cause, "无法取消模型测试");
-      toast.error(error.message, { description: error.action });
+      toast.error(error.message);
     });
   }, [client]);
 
@@ -202,7 +202,7 @@ export function useModelTestRunner() {
       void execute(test);
     } catch (cause: unknown) {
       const error = asAppError(cause, "无法保存费用说明偏好");
-      toast.error(error.message, { description: error.action });
+      toast.error(error.message);
     }
   }, [client, execute, pendingTest]);
 
@@ -239,7 +239,7 @@ function notifyResult(result: ModelTestResult) {
     toast.success(`模型连接成功 · ${result.latencyMs} ms`);
     return;
   }
-  toast.error("模型测试失败", { description: modelTestFailureAction(result.errorCode) });
+  toast.error("模型测试失败");
 }
 
 function modelTestFailureAction(errorCode: string | undefined): string {

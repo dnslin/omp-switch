@@ -1,0 +1,13 @@
+# Issue #15 Settings visual comparison
+
+- Surface: real Tauri window, macOS native title controls, 1536×1024 capture.
+- Reference: `designs/60-settings-normal.png`.
+- Implementation: `settings-light-tauri-1536x1024.png`.
+- Dialog evidence: `reset-settings-dialog-tauri-1536x1024.png`.
+
+Checked against Pencil node `W7copJ`:
+
+- Settings title, sidebar, section headers, key/value rows, directory actions, appearance controls, danger action, and bottom OMP status area are present in the same order and layout.
+- Theme control uses a dedicated 320×34 segmented group. The selected Light option uses `primary-soft` background with primary text/border, not the solid primary Button treatment.
+- Native macOS titlebar controls and directory/file-picker surfaces are the only platform-specific elements.
+- Reset confirmation reuses the approved Dialog treatment and preserves the settings page behind the scrim.

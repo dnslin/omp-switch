@@ -3,17 +3,6 @@
 使用方式：完成一个工单并关闭后，执行 `/clear`，开启新会话，复制下一条已解除阻塞的提示词。每条提示词均以 GitHub 工单为实施范围；不得从本文件推断或缩减验收标准。
 ```
 
-## #15 — 完成设置、OMP 切换与全局桌面交互
-
-```text
-使用 /implement 完整实施 issue://15。先确认其全部 GitHub blockers 已关闭。
-
-读取 issue://1、issue://15、CONTEXT.md、docs/mvp.md、docs/prd.md、docs/flow.md、docs/adr/0004-use-omp-config-path-as-authority.md、docs/agents/issue-tracker.md，以及 designs/omp-switch.pen。UI 使用 /ui-design-guided 与 /vercel-react-best-practices；行为测试使用 /tdd；完成后运行 /code-review。
-
-按两个既定 seam 做 red→green 纵向切片。完成受限应用设置、目录入口、安全 OMP 切换、未保存确认、快捷键、焦点、通知和 reduced motion；新 OMP 验证失败或取消时保留当前可用选择。Settings 必须 1:1 还原 Pencil 节点 W7copJ；切换和确认复用批准 Dialog。运行真实 Tauri 设置页与关键 Dialog，在 1536×1024 截图对比。
-
-满足 issue://15 全部验收标准，运行页面测试、类型检查、原生选择器/目录打开 smoke、最终完整测试和双轴 review；更新文档，提交并关闭 #15。
-```
 
 ## #16 — 打包并通过 MVP 三平台发布验收
 

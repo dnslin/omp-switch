@@ -9,6 +9,7 @@ use std::{
 
 use parking_lot::{Condvar, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
 use tokio_util::sync::CancellationToken;
 
@@ -114,6 +115,21 @@ pub struct AppSettings {
     pub selected_model_id: Option<String>,
     #[serde(alias = "costNoticeAccepted")]
     pub model_test_cost_notice_accepted: bool,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsDirectories {
+    pub target_configuration: Option<String>,
+    pub application_configuration: String,
+    pub application_log: String,
+    pub target_backup: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeInfo {
+    pub platform: String,
+    pub architecture: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -237,6 +253,8 @@ pub struct AppService {
     settings_write: Arc<Mutex<()>>,
     environment: Arc<dyn OmpEnvironment>,
     pending_omp: Arc<RwLock<Option<PathBuf>>>,
+    pending_omp_confirmation: Arc<RwLock<Option<PendingOmpConfirmation>>>,
+    pending_omp_use_path: Arc<RwLock<bool>>,
     recovery_notice: Arc<RwLock<Option<(PathBuf, String)>>>,
     #[cfg(test)]
     configuration_snapshot: Arc<RwLock<Option<ConfigurationSnapshot>>>,
@@ -248,6 +266,31 @@ pub struct AppService {
     models_write_failure: Arc<Mutex<Option<ModelsWriteFailurePoint>>>,
     #[cfg(test)]
     configuration_transaction_failure: Arc<Mutex<Option<ConfigurationTransactionFailurePoint>>>,
+}
+#[derive(Clone, Debug)]
+struct PendingOmpConfirmation {
+    previous_target: Option<String>,
+    candidate_target: String,
+}
+
+impl PendingOmpConfirmation {
+    fn from_state(state: &StartupState) -> Option<Self> {
+        match state {
+            StartupState::OmpReady {
+                target_configuration,
+                previous_target_configuration,
+                requires_confirmation: true,
+                ..
+            } => Some(Self {
+                previous_target: previous_target_configuration.clone(),
+                candidate_target: target_configuration
+                    .resolved_path
+                    .clone()
+                    .unwrap_or_else(|| target_configuration.path.clone()),
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -414,6 +457,8 @@ impl AppService {
             settings_write: Arc::new(Mutex::new(())),
             environment,
             pending_omp: Arc::new(RwLock::new(None)),
+            pending_omp_confirmation: Arc::new(RwLock::new(None)),
+            pending_omp_use_path: Arc::new(RwLock::new(false)),
             recovery_notice: Arc::new(RwLock::new(None)),
             #[cfg(test)]
             configuration_snapshot: Arc::new(RwLock::new(None)),
@@ -621,6 +666,8 @@ impl AppService {
 
     fn detect_omp_internal(&self) -> StartupState {
         *self.pending_omp.write() = None;
+        *self.pending_omp_confirmation.write() = None;
+        *self.pending_omp_use_path.write() = false;
         let saved = self.settings.read().omp_executable_path.clone();
         let mut saved_failure = None;
         if let Some(path) = saved.as_ref() {
@@ -633,10 +680,15 @@ impl AppService {
         match self.environment.find_in_path() {
             Ok(Some(path)) => {
                 let requires_confirmation = saved.is_some();
-                let state = self.validate_omp(path.clone(), requires_confirmation, None);
+                let previous_target_configuration = self.saved_target_configuration(&path);
+                let state = self.validate_omp(
+                    path.clone(),
+                    requires_confirmation,
+                    previous_target_configuration,
+                );
                 *self.pending_omp.write() =
-                    matches!(state, StartupState::OmpReady { .. } if requires_confirmation)
-                        .then_some(path);
+                    PendingOmpConfirmation::from_state(&state).map(|_| path);
+                *self.pending_omp_confirmation.write() = PendingOmpConfirmation::from_state(&state);
                 state
             }
             Ok(None) => saved_failure.unwrap_or_else(|| StartupState::OmpUnavailable {
@@ -727,23 +779,55 @@ impl AppService {
     pub fn validate_selected_omp(&self, executable: PathBuf) -> StartupState {
         let _detection = self.detection_lock.lock();
         *self.pending_omp.write() = None;
+        *self.pending_omp_confirmation.write() = None;
+        *self.pending_omp_use_path.write() = false;
         let previous_target_configuration = self.saved_target_configuration(&executable);
         let state = self.validate_omp(executable.clone(), true, previous_target_configuration);
-        *self.pending_omp.write() =
-            matches!(state, StartupState::OmpReady { .. }).then_some(executable);
+        *self.pending_omp.write() = PendingOmpConfirmation::from_state(&state).map(|_| executable);
+        *self.pending_omp_confirmation.write() = PendingOmpConfirmation::from_state(&state);
+        state
+    }
+    pub fn validate_path_omp(&self) -> StartupState {
+        let _detection = self.detection_lock.lock();
+        *self.pending_omp.write() = None;
+        *self.pending_omp_confirmation.write() = None;
+        *self.pending_omp_use_path.write() = false;
+        let previous_target_configuration = self.saved_target_configuration(Path::new(""));
+        let state = match self.environment.find_in_path() {
+            Ok(Some(path)) => self.validate_omp(path, true, previous_target_configuration),
+            Ok(None) => StartupState::OmpUnavailable {
+                message: "未在系统 PATH 中找到可用的 OMP。".to_owned(),
+            },
+            Err(error) => StartupState::OmpUnavailable {
+                message: format!(
+                    "无法检查系统 PATH 中的 OMP（{}）。请手动选择 OMP。",
+                    io_error_cause(error.kind())
+                ),
+            },
+        };
+        if let StartupState::OmpReady {
+            executable_path, ..
+        } = &state
+        {
+            let executable = PathBuf::from(executable_path);
+            *self.pending_omp.write() = Some(executable);
+            *self.pending_omp_confirmation.write() = PendingOmpConfirmation::from_state(&state);
+            *self.pending_omp_use_path.write() = true;
+        }
         state
     }
 
-    fn saved_target_configuration(&self, selected: &Path) -> Option<String> {
+    fn saved_target_configuration(&self, _selected: &Path) -> Option<String> {
         let saved = self.settings.read().omp_executable_path.clone()?;
-        if Path::new(&saved) == selected {
-            return None;
-        }
         match self.validate_omp(PathBuf::from(saved), false, None) {
             StartupState::OmpReady {
                 target_configuration,
                 ..
-            } => Some(target_configuration.path),
+            } => Some(
+                target_configuration
+                    .resolved_path
+                    .unwrap_or(target_configuration.path),
+            ),
             _ => None,
         }
     }
@@ -960,7 +1044,8 @@ impl AppService {
         expectation: TargetInitializationExpectation,
     ) -> Result<StartupState, AppError> {
         let _detection = self.detection_lock.lock();
-        let saved = self.settings.read().omp_executable_path.clone();
+        let saved_settings = self.settings.read().clone();
+        let saved = saved_settings.omp_executable_path.clone();
         let requires_confirmation = self.pending_omp.read().as_ref() == Some(&executable)
             || saved
                 .as_deref()
@@ -971,6 +1056,8 @@ impl AppService {
             requires_confirmation,
             previous_target_configuration.clone(),
         );
+        let pending_confirmation = PendingOmpConfirmation::from_state(&state);
+        let pending_use_path = *self.pending_omp_use_path.read();
         let target = match state {
             StartupState::OmpReady {
                 ref target_configuration,
@@ -1016,9 +1103,11 @@ impl AppService {
             );
             if requires_confirmation && !recovery_incomplete {
                 self.update_settings(|settings| {
-                    settings.omp_executable_path = saved.clone();
+                    *settings = saved_settings.clone();
                 })?;
                 *self.pending_omp.write() = Some(executable.clone());
+                *self.pending_omp_confirmation.write() = pending_confirmation;
+                *self.pending_omp_use_path.write() = pending_use_path;
             }
             return Err(AppError::new(
                 "target-initialization-failed",
@@ -1071,6 +1160,17 @@ impl AppService {
 
     pub fn confirm_selected_omp(&self, executable: PathBuf) -> Result<AppSettings, AppError> {
         let _detection = self.detection_lock.lock();
+        if *self.pending_omp_use_path.read() {
+            return Err(AppError::internal("当前 OMP 验证状态要求使用 PATH 确认"));
+        }
+        self.confirm_selected_omp_locked(executable)
+    }
+
+    pub fn confirm_path_omp(&self, executable: PathBuf) -> Result<AppSettings, AppError> {
+        let _detection = self.detection_lock.lock();
+        if !*self.pending_omp_use_path.read() {
+            return Err(AppError::internal("当前 OMP 验证状态不是 PATH 选择"));
+        }
         self.confirm_selected_omp_locked(executable)
     }
 
@@ -1079,10 +1179,25 @@ impl AppService {
         if pending.as_ref() != Some(&executable) {
             return Err(AppError::internal("OMP 验证状态已变化，请重新检测"));
         }
+        let pending_confirmation = self.pending_omp_confirmation.read().clone();
+        let target_changed = pending_confirmation.as_ref().map_or(true, |pending| {
+            pending.previous_target.as_deref() != Some(pending.candidate_target.as_str())
+        });
+        let use_system_path = *self.pending_omp_use_path.read();
         let settings = self.update_settings(|settings| {
-            settings.omp_executable_path = Some(executable.to_string_lossy().into_owned());
+            settings.omp_executable_path = if use_system_path {
+                None
+            } else {
+                Some(executable.to_string_lossy().into_owned())
+            };
+            if target_changed {
+                settings.selected_provider_id = None;
+                settings.selected_model_id = None;
+            }
         })?;
         *pending = None;
+        *self.pending_omp_confirmation.write() = None;
+        *self.pending_omp_use_path.write() = false;
         self.model_tests.invalidate();
         Ok(settings)
     }
@@ -1097,6 +1212,118 @@ impl AppService {
             settings.selected_provider_id = update.selected_provider_id;
             settings.selected_model_id = update.selected_model_id;
         })
+    }
+    pub fn reset_ui_settings(&self) -> Result<AppSettings, AppError> {
+        let _detection = self.detection_lock.lock();
+        let settings = self.update_settings(|settings| {
+            *settings = AppSettings::default();
+        })?;
+        *self.pending_omp.write() = None;
+        *self.pending_omp_confirmation.write() = None;
+        *self.pending_omp_use_path.write() = false;
+        self.model_tests.invalidate();
+        Ok(settings)
+    }
+    pub fn application_configuration_directory(&self) -> Result<PathBuf, AppError> {
+        self.settings_path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| AppError::internal("界面设置路径没有父目录"))
+    }
+
+    pub fn prepare_application_configuration_directory(&self) -> Result<PathBuf, AppError> {
+        let directory = self.application_configuration_directory()?;
+        fs::create_dir_all(&directory).map_err(|error| {
+            AppError::new(
+                "application-directory-unavailable",
+                "无法准备应用配置目录。",
+                format!(
+                    "请检查应用数据目录权限后重试（{}）。",
+                    io_error_cause(error.kind())
+                ),
+            )
+        })?;
+        Ok(directory)
+    }
+    fn detect_current_confirmed_omp(&self) -> StartupState {
+        if let Some(saved) = self.settings.read().omp_executable_path.clone() {
+            return self.validate_omp(PathBuf::from(saved), false, None);
+        }
+        match self.environment.find_in_path() {
+            Ok(Some(path)) => self.validate_omp(path, false, None),
+            Ok(None) => StartupState::OmpUnavailable {
+                message: "未在已保存路径或系统 PATH 中找到可用的 OMP。".to_owned(),
+            },
+            Err(error) => StartupState::OmpUnavailable {
+                message: format!(
+                    "无法检查系统 PATH 中的 OMP（{}）。",
+                    io_error_cause(error.kind())
+                ),
+            },
+        }
+    }
+
+    fn target_path_from_confirmed_state(state: StartupState) -> Result<PathBuf, AppError> {
+        match state {
+            StartupState::OmpReady {
+                target_configuration,
+                requires_confirmation: false,
+                ..
+            } => target_configuration
+                .resolved_path
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    AppError::new(
+                        "target-directory-unresolved",
+                        "无法确认当前 Target configuration 的真实目录。",
+                        "请修复链接或路径问题后重新检测。",
+                    )
+                }),
+            StartupState::OmpReady {
+                requires_confirmation: true,
+                ..
+            } => Err(AppError::new(
+                "target-directory-confirmation-required",
+                "当前 OMP 尚未完成确认，无法打开 Target configuration。",
+                "请先确认新的 OMP 与 Target configuration 后重试。",
+            )),
+            _ => Err(AppError::new(
+                "target-directory-unavailable",
+                "无法确定当前 Target configuration。",
+                "请重新检测或重新选择 OMP。",
+            )),
+        }
+    }
+
+    pub fn current_target_and_backup_directories(&self) -> Result<(PathBuf, PathBuf), AppError> {
+        let _detection = self.detection_lock.lock();
+        let target = Self::target_path_from_confirmed_state(self.detect_current_confirmed_omp())?;
+        let backup = self
+            .backup_root
+            .join(crate::models_write::target_fingerprint(&target));
+        Ok((target, backup))
+    }
+
+    pub fn current_target_directory(&self) -> Result<PathBuf, AppError> {
+        self.current_target_and_backup_directories()
+            .map(|(target, _)| target)
+    }
+
+    pub fn target_backup_directory(&self) -> Result<PathBuf, AppError> {
+        let (_, directory) = self.current_target_and_backup_directories()?;
+        for path in [self.backup_root.as_path(), directory.as_path()] {
+            crate::models_write::ensure_private_backup_directory(path).map_err(|error| {
+                AppError::new(
+                    "target-backup-directory-unavailable",
+                    "无法准备当前 Target configuration 的备份目录。",
+                    format!(
+                        "请检查应用数据目录权限后重试（{}）。",
+                        io_error_cause(error.kind())
+                    ),
+                )
+            })?;
+        }
+        Ok(directory)
     }
 
     pub fn accept_model_test_cost_notice(&self) -> Result<AppSettings, AppError> {
@@ -1828,6 +2055,61 @@ pub fn get_ui_settings(service: tauri::State<'_, AppService>) -> Result<AppSetti
 }
 
 #[tauri::command]
+pub fn get_runtime_info() -> RuntimeInfo {
+    let platform = match std::env::consts::OS {
+        "macos" => "macOS",
+        "windows" => "Windows",
+        "linux" => "Linux",
+        other => other,
+    };
+    let architecture = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        "x86" => "x86",
+        other => other,
+    };
+    RuntimeInfo {
+        platform: platform.to_owned(),
+        architecture: architecture.to_owned(),
+    }
+}
+
+#[tauri::command]
+pub fn get_settings_directories(
+    service: tauri::State<'_, AppService>,
+    app: tauri::AppHandle,
+) -> Result<SettingsDirectories, AppError> {
+    let started_at = Instant::now();
+    let result = (|| {
+        let application_configuration = service.application_configuration_directory()?;
+        let application_log = app.path().app_log_dir().map_err(|error| {
+            tracing::warn!(
+                operation = "get_settings_directories",
+                diagnostic = %redact_diagnostic(&error.to_string()),
+                "application log directory resolution failed"
+            );
+            AppError::new(
+                "application-log-directory-unavailable",
+                "无法确定应用日志目录。",
+                "请检查系统应用目录权限后重试。",
+            )
+        })?;
+        let current_target = service.current_target_and_backup_directories().ok();
+        Ok(SettingsDirectories {
+            target_configuration: current_target
+                .as_ref()
+                .map(|(target, _)| target.to_string_lossy().into_owned()),
+            application_configuration: application_configuration.to_string_lossy().into_owned(),
+            application_log: application_log.to_string_lossy().into_owned(),
+            target_backup: current_target
+                .as_ref()
+                .map(|(_, backup)| backup.to_string_lossy().into_owned()),
+        })
+    })();
+    log_command_result("get_settings_directories", started_at, &result);
+    result
+}
+#[tauri::command]
 pub fn save_ui_settings(
     service: tauri::State<'_, AppService>,
     settings: UiSettingsUpdate,
@@ -1969,6 +2251,25 @@ pub fn validate_selected_omp(
     log_startup_state("validate_selected_omp", started_at, &safe_state);
     safe_state
 }
+#[tauri::command]
+pub fn validate_path_omp(service: tauri::State<'_, AppService>) -> StartupState {
+    let started_at = Instant::now();
+    let state = service.validate_path_omp();
+    let safe_state = AppService::sanitize_overview_startup_state(&state);
+    log_startup_state("validate_path_omp", started_at, &safe_state);
+    safe_state
+}
+
+#[tauri::command]
+pub fn confirm_path_omp(
+    service: tauri::State<'_, AppService>,
+    executable_path: String,
+) -> Result<AppSettings, AppError> {
+    let started_at = Instant::now();
+    let result = service.confirm_path_omp(PathBuf::from(executable_path));
+    log_command_result("confirm_path_omp", started_at, &result);
+    result
+}
 
 #[tauri::command]
 pub fn initialize_target_configuration(
@@ -1984,6 +2285,150 @@ pub fn initialize_target_configuration(
     safe_result
 }
 
+fn open_native_directory(
+    app: &tauri::AppHandle,
+    path: PathBuf,
+    operation: &'static str,
+    code: &'static str,
+    message: &'static str,
+    action: &'static str,
+) -> Result<(), AppError> {
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|error| {
+            tracing::warn!(
+                operation,
+                diagnostic = %redact_diagnostic(&error.to_string()),
+                "native directory opener failed"
+            );
+            AppError::new(code, message, action)
+        })
+}
+
+#[tauri::command]
+pub fn open_current_target_configuration_directory(
+    service: tauri::State<'_, AppService>,
+    app: tauri::AppHandle,
+) -> Result<(), AppError> {
+    let started_at = Instant::now();
+    let result = service.current_target_directory().and_then(|path| {
+        open_native_directory(
+            &app,
+            path,
+            "open_current_target_configuration_directory",
+            "target-directory-open-failed",
+            "系统文件管理器未能打开配置目录。",
+            "请检查系统文件管理器关联后重试，并在问题持续时查看脱敏日志。",
+        )
+    });
+    log_command_result(
+        "open_current_target_configuration_directory",
+        started_at,
+        &result,
+    );
+    result
+}
+
+#[tauri::command]
+pub fn open_application_configuration_directory(
+    service: tauri::State<'_, AppService>,
+    app: tauri::AppHandle,
+) -> Result<(), AppError> {
+    let started_at = Instant::now();
+    let result = service
+        .prepare_application_configuration_directory()
+        .and_then(|path| {
+            open_native_directory(
+                &app,
+                path,
+                "open_application_configuration_directory",
+                "application-directory-open-failed",
+                "系统文件管理器未能打开应用配置目录。",
+                "请检查应用数据目录权限后重试，并在问题持续时查看脱敏日志。",
+            )
+        });
+    log_command_result(
+        "open_application_configuration_directory",
+        started_at,
+        &result,
+    );
+    result
+}
+
+#[tauri::command]
+pub fn open_application_log_directory(app: tauri::AppHandle) -> Result<(), AppError> {
+    let started_at = Instant::now();
+    let result = app
+        .path()
+        .app_log_dir()
+        .map_err(|error| {
+            tracing::warn!(
+                operation = "open_application_log_directory",
+                diagnostic = %redact_diagnostic(&error.to_string()),
+                "application log directory resolution failed"
+            );
+            AppError::new(
+                "application-log-directory-unavailable",
+                "无法确定应用日志目录。",
+                "请检查系统应用目录权限后重试。",
+            )
+        })
+        .and_then(|path| {
+            fs::create_dir_all(&path).map_err(|error| {
+                tracing::warn!(
+                    operation = "open_application_log_directory",
+                    cause = io_error_cause(error.kind()),
+                    "application log directory creation failed"
+                );
+                AppError::new(
+                    "application-log-directory-unavailable",
+                    "无法准备应用日志目录。",
+                    "请检查系统应用目录权限后重试。",
+                )
+            })?;
+            Ok(path)
+        })
+        .and_then(|path| {
+            open_native_directory(
+                &app,
+                path,
+                "open_application_log_directory",
+                "application-log-directory-open-failed",
+                "系统文件管理器未能打开应用日志目录。",
+                "请检查系统文件管理器关联后重试，并在问题持续时查看脱敏日志。",
+            )
+        });
+    log_command_result("open_application_log_directory", started_at, &result);
+    result
+}
+
+#[tauri::command]
+pub fn open_target_backup_directory(
+    service: tauri::State<'_, AppService>,
+    app: tauri::AppHandle,
+) -> Result<(), AppError> {
+    let started_at = Instant::now();
+    let result = service.target_backup_directory().and_then(|path| {
+        open_native_directory(
+            &app,
+            path,
+            "open_target_backup_directory",
+            "target-backup-directory-open-failed",
+            "系统文件管理器未能打开当前 Target configuration 的备份目录。",
+            "请检查应用数据目录和系统文件管理器关联后重试。",
+        )
+    });
+    log_command_result("open_target_backup_directory", started_at, &result);
+    result
+}
+
+#[tauri::command]
+pub fn reset_ui_settings(service: tauri::State<'_, AppService>) -> Result<AppSettings, AppError> {
+    let started_at = Instant::now();
+    let result = service.reset_ui_settings();
+    log_command_result("reset_ui_settings", started_at, &result);
+    result
+}
 #[tauri::command]
 pub fn open_target_configuration_directory(
     service: tauri::State<'_, AppService>,
