@@ -15,6 +15,7 @@ use crate::{
     overview,
     provider_mutation::{self, SupportedApi, SupportedInput},
     redaction::redact_diagnostic,
+    role_mutation,
     target_configuration::{ConfigurationFileStatus, TargetConfigurationDiscovery},
 };
 
@@ -297,7 +298,7 @@ pub(crate) fn delete_model(
     let loaded = models_write::load_models_for_write(target, &input.opened_models_hash)
         .map_err(|error| remap_model_error(error, ModelOperation::Delete))?;
     let config = load_config_for_reference_check(target, &input.opened_config_hash)?;
-    let validated = validate_delete_input(input, &loaded.original_tree, &config, catalog, true)?;
+    let validated = validate_delete_input(input, &loaded.original_tree, &config, catalog)?;
     let result = ModelMutationResult {
         provider_id: validated.provider_id.clone(),
         model_id: validated.model_id.clone(),
@@ -403,8 +404,7 @@ fn prepare_model_delete_transaction(
     config: &configuration_transaction::TransactionFile,
 ) -> Result<configuration_transaction::TransactionCandidates, AppError> {
     let loaded_config = loaded_config_from_transaction(config);
-    let validated =
-        validate_delete_input(input, &models.original_tree, &loaded_config, catalog, true)?;
+    let validated = validate_delete_input(input, &models.original_tree, &loaded_config, catalog)?;
     if validated.role_reference_ids.is_empty() {
         return Err(AppError::new(
             "model-delete-role-reference-changed",
@@ -415,10 +415,7 @@ fn prepare_model_delete_transaction(
     let mut candidate_models = models.original_tree.clone();
     validated.apply(&mut candidate_models)?;
     let mut candidate_config = config.original_tree.clone();
-    configuration_transaction::remove_model_role_ids(
-        &mut candidate_config,
-        &validated.role_reference_ids,
-    )?;
+    role_mutation::remove_model_role_ids(&mut candidate_config, &validated.role_reference_ids)?;
     Ok(configuration_transaction::TransactionCandidates {
         models: candidate_models,
         config: candidate_config,
@@ -434,10 +431,9 @@ fn validate_model_delete_transaction(
     candidate_config: &Value,
 ) -> Result<(), AppError> {
     let loaded_config = loaded_config_from_transaction(config);
-    let validated =
-        validate_delete_input(input, &models.original_tree, &loaded_config, catalog, true)?;
+    let validated = validate_delete_input(input, &models.original_tree, &loaded_config, catalog)?;
     validated.validate(candidate_models, &models.original_tree)?;
-    configuration_transaction::validate_model_role_ids_removed(
+    role_mutation::validate_model_role_ids_removed(
         &config.original_tree,
         candidate_config,
         &validated.role_reference_ids,
@@ -541,7 +537,6 @@ fn validate_delete_input(
     original_tree: &Value,
     config: &LoadedConfig,
     catalog: &BundledCatalog,
-    allow_role_references: bool,
 ) -> Result<ValidatedDelete, AppError> {
     let provider_id = validate_provider_id(&input.provider_id)?;
     ensure_editable_provider(original_tree, &provider_id, catalog, ModelOperation::Delete)?;
@@ -602,18 +597,6 @@ fn validate_delete_input(
         Some(&input.model_id),
         &known_model_ids,
     );
-    if !references.role_paths.is_empty() && !allow_role_references {
-        return Err(AppError::new(
-            "model-delete-role-reference",
-            format!(
-                "无法删除 {}/{}：受支持 Model role 仍有引用：{}",
-                provider_id,
-                input.model_id,
-                references.role_paths.join("、")
-            ),
-            "请转入 Configuration transaction，同时更新 models.yml 和 config.yml；当前不会部分删除。",
-        ));
-    }
     if !references.role_paths.is_empty() && role_reference_ids.is_empty() {
         return Err(AppError::new(
             "model-delete-role-reference",

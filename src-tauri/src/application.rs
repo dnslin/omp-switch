@@ -756,19 +756,25 @@ impl AppService {
         let recovery = configuration_transaction::recover_for_target(&self.backup_root, target)?;
         let mut discovery = inspect(target)?;
         if let Some(recovery) = recovery {
-            let notice = match discovery.recovery_notice.take() {
-                Some(existing) => format!("{} {}", existing, recovery.notice),
-                None => recovery.notice,
-            };
-            discovery.recovery_notice = Some(notice);
-            if recovery.manual {
-                discovery.status = TargetConfigurationStatus::Unsafe;
-                discovery.writable = false;
-            }
+            Self::apply_configuration_recovery(&mut discovery, recovery);
         }
         Ok(discovery)
     }
 
+    fn apply_configuration_recovery(
+        discovery: &mut TargetConfigurationDiscovery,
+        recovery: configuration_transaction::RecoveryResult,
+    ) {
+        let notice = match discovery.recovery_notice.take() {
+            Some(existing) => format!("{} {}", existing, recovery.notice),
+            None => recovery.notice,
+        };
+        discovery.recovery_notice = Some(notice);
+        if recovery.manual {
+            discovery.status = TargetConfigurationStatus::Unsafe;
+            discovery.writable = false;
+        }
+    }
     fn validate_omp(
         &self,
         executable: PathBuf,
@@ -832,15 +838,7 @@ impl AppService {
                     deadline,
                 )?;
                 if let Some(recovery) = recovery {
-                    let notice = match discovery.recovery_notice.take() {
-                        Some(existing) => format!("{} {}", existing, recovery.notice),
-                        None => recovery.notice,
-                    };
-                    discovery.recovery_notice = Some(notice);
-                    if recovery.manual {
-                        discovery.status = TargetConfigurationStatus::Unsafe;
-                        discovery.writable = false;
-                    }
+                    Self::apply_configuration_recovery(&mut discovery, recovery);
                 }
                 Ok(discovery)
             },

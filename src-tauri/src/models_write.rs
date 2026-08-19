@@ -9,6 +9,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use atomic_write_file::AtomicWriteFile;
 use fs4::{FileExt, TryLockError};
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use sha2::{Digest, Sha256};
 
@@ -22,6 +23,23 @@ use crate::{
 
 const BACKUP_ALLOCATION_ATTEMPTS: usize = 128;
 const MAX_BACKUPS_PER_FILE: usize = 10;
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum BackupPartition {
+    Models,
+    Config,
+}
+
+impl BackupPartition {
+    pub(crate) const fn directory(self) -> &'static str {
+        match self {
+            Self::Models => "models",
+            Self::Config => "config",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ModelsWriteFailurePoint {
     BeforeBackup,
@@ -67,7 +85,7 @@ pub(crate) trait ModelsMutation {
 pub(crate) struct LoadedModels {
     pub(crate) expected_target: PathBuf,
     pub(crate) models_path: PathBuf,
-    pub(crate) backup_partition: &'static str,
+    pub(crate) backup_partition: BackupPartition,
     pub(crate) original_bytes: Vec<u8>,
     pub(crate) original_hash: String,
     pub(crate) original_tree: Value,
@@ -99,7 +117,7 @@ pub(crate) fn load_models_for_write(
     Ok(LoadedModels {
         expected_target,
         models_path,
-        backup_partition: "models",
+        backup_partition: BackupPartition::Models,
         original_bytes,
         original_hash,
         original_tree,
@@ -112,7 +130,7 @@ pub(crate) fn load_config_for_write(
     let mut config_target = target.clone();
     config_target.models = target.config.clone();
     let mut loaded = load_models_for_write(&config_target, opened_config_hash)?;
-    loaded.backup_partition = "config";
+    loaded.backup_partition = BackupPartition::Config;
     Ok(loaded)
 }
 
@@ -126,7 +144,7 @@ pub(crate) fn write_models_mutation<M: ModelsMutation>(
     if failure == Some(ModelsWriteFailurePoint::BeforeBackup) {
         return Err(injected_failure(format!("{verb}当前备份前发生故障。")));
     }
-    let _write_lock = acquire_models_write_lock(backup_root, &loaded.expected_target)?;
+    let _write_lock = acquire_configuration_lock(backup_root, &loaded.expected_target)?;
     ensure_no_pending_configuration_transaction(backup_root, &loaded.expected_target)?;
     create_current_backup(
         backup_root,
@@ -379,13 +397,6 @@ fn acquire_lock(
     }
 }
 
-fn acquire_models_write_lock(
-    backup_root: &Path,
-    resolved_target: &Path,
-) -> Result<fs::File, AppError> {
-    acquire_configuration_lock(backup_root, resolved_target)
-}
-
 fn models_write_in_progress() -> AppError {
     AppError::new(
         "models-write-in-progress",
@@ -476,21 +487,15 @@ pub(crate) fn ensure_resolved_file_path(
     }
     Ok(())
 }
-fn backup_partition(partition: &str) -> Result<&str, AppError> {
-    match partition {
-        "models" | "config" => Ok(partition),
-        _ => Err(AppError::internal("Configuration transaction 备份分区无效")),
-    }
-}
 fn create_current_backup(
     backup_root: &Path,
     target_configuration: &Path,
-    partition: &str,
+    partition: BackupPartition,
     original_bytes: &[u8],
     failure: Option<ModelsWriteFailurePoint>,
 ) -> Result<(), AppError> {
     let target_directory = backup_root.join(target_fingerprint(target_configuration));
-    let directory = target_directory.join(backup_partition(partition)?);
+    let directory = target_directory.join(partition.directory());
     for path in [backup_root, target_directory.as_path(), directory.as_path()] {
         create_private_backup_directory(path, failure)
             .map_err(|error| write_error("create_backup_directory", error))?;
@@ -534,7 +539,7 @@ pub(crate) fn create_transaction_backup(
     backup_root: &Path,
     target_configuration: &Path,
     original_bytes: &[u8],
-    partition: &str,
+    partition: BackupPartition,
     transaction_id: &str,
 ) -> Result<PathBuf, AppError> {
     if transaction_id.is_empty()
@@ -545,7 +550,7 @@ pub(crate) fn create_transaction_backup(
         return Err(AppError::internal("Configuration transaction ID 无效"));
     }
     let target_directory = backup_root.join(target_fingerprint(target_configuration));
-    let directory = target_directory.join(backup_partition(partition)?);
+    let directory = target_directory.join(partition.directory());
     for path in [backup_root, target_directory.as_path(), directory.as_path()] {
         create_private_backup_directory(path, None)
             .map_err(|error| write_error("create_transaction_backup_directory", error))?;
@@ -917,7 +922,7 @@ mod tests {
         create_current_backup(
             &backup_root,
             &target_configuration,
-            "models",
+            BackupPartition::Models,
             original,
             None,
         )
@@ -944,7 +949,7 @@ mod tests {
             create_current_backup(
                 &backup_root,
                 &target_configuration,
-                "config",
+                BackupPartition::Config,
                 b"original config",
                 None,
             )
@@ -1042,7 +1047,7 @@ mod tests {
         let loaded = LoadedModels {
             expected_target: target.clone(),
             models_path: target.join("models.yml"),
-            backup_partition: "models",
+            backup_partition: BackupPartition::Models,
             original_hash: content_hash(&original_bytes),
             original_tree: serde_yaml::from_slice(&original_bytes).unwrap(),
             original_bytes,

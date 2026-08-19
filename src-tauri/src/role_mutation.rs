@@ -546,6 +546,46 @@ fn model_roles_mut(tree: &mut Value) -> Result<&mut Mapping, AppError> {
         .ok_or_else(roles_structure_error)
 }
 
+pub(crate) fn remove_model_role_ids(tree: &mut Value, role_ids: &[String]) -> Result<(), AppError> {
+    let roles = tree
+        .as_mapping_mut()
+        .and_then(|root| root.get_mut(key("modelRoles")))
+        .and_then(Value::as_mapping_mut)
+        .ok_or_else(transaction_roles_structure_error)?;
+    for role_id in role_ids {
+        roles.remove(key(role_id));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_model_role_ids_removed(
+    original: &Value,
+    candidate: &Value,
+    role_ids: &[String],
+) -> Result<(), AppError> {
+    let original_root = config_root(original).map_err(|_| transaction_roles_untouched_error())?;
+    let candidate_root = config_root(candidate).map_err(|_| transaction_roles_untouched_error())?;
+    if original_root.len() != candidate_root.len() {
+        return Err(transaction_roles_untouched_error());
+    }
+    for (field, value) in original_root {
+        if field.as_str() != Some("modelRoles") && candidate_root.get(field) != Some(value) {
+            return Err(transaction_roles_untouched_error());
+        }
+    }
+    let original_roles = model_roles(original).map_err(|_| transaction_roles_untouched_error())?;
+    let candidate_roles =
+        model_roles(candidate).map_err(|_| transaction_roles_untouched_error())?;
+    let mut expected_roles = original_roles.clone();
+    for role_id in role_ids {
+        expected_roles.remove(key(role_id));
+    }
+    if candidate_roles != &expected_roles {
+        return Err(transaction_roles_untouched_error());
+    }
+    Ok(())
+}
+
 fn config_root(tree: &Value) -> Result<&Mapping, AppError> {
     tree.as_mapping().ok_or_else(roles_structure_error)
 }
@@ -570,6 +610,21 @@ fn key(value: &str) -> Value {
     Value::String(value.to_owned())
 }
 
+fn transaction_roles_structure_error() -> AppError {
+    AppError::new(
+        "configuration-transaction-roles-invalid",
+        "config.yml 的 modelRoles 结构无法安全修改。",
+        "请在外部修复后重新读取；两个原始配置文件都没有被修改。",
+    )
+}
+
+fn transaction_roles_untouched_error() -> AppError {
+    AppError::new(
+        "configuration-transaction-untouched-path-changed",
+        "Configuration transaction 改变了未触及的 config.yml 路径。",
+        "请重试；两个原始配置文件都没有被安全替换。",
+    )
+}
 fn roles_structure_error() -> AppError {
     AppError::new(
         "role-config-structure-invalid",

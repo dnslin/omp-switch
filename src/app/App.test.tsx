@@ -203,6 +203,32 @@ describe("React page seam", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("/safe/recovery/scene");
     expect(screen.getByText(/目标不安全/)).toBeVisible();
   });
+  it("routes unsafe recovery reloads to the manual handling setup state", async () => {
+    const unsafeState: StartupState = {
+      ...readyState,
+      targetConfiguration: targetConfiguration(undefined, {
+        status: "unsafe",
+        writable: false,
+        recoveryNotice: "Configuration transaction 需要人工处理；安全路径：/safe/recovery/scene。",
+      }),
+    };
+    renderRoute("/providers/dnslin", {
+      ...unavailableClient,
+      getStartupState: async () => unsafeState,
+      getOverviewLoad: async () => ({
+        startupState: unsafeState,
+        overview: null,
+        error: {
+          code: "overview-unsafe-target",
+          message: "无法安全读取 Target configuration。",
+          action: "请修复路径后重新读取。",
+        },
+      }),
+    });
+
+    expect(await screen.findByText("上次事务需要人工处理")).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("/safe/recovery/scene");
+  });
 
 
 
@@ -1753,6 +1779,52 @@ describe("React page seam", () => {
     await waitFor(() => expect(getOverviewLoad).toHaveBeenCalledTimes(2));
     expect(await screen.findByText("尚未配置 Provider。")).toBeVisible();
     expect(await screen.findByText("Provider 已删除；已重新读取事务状态")).toBeVisible();
+  });
+  it("keeps manual recovery visible after a committed Provider cleanup failure becomes unsafe", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const provider: OverviewProvider = { ...base.providers[0], roleReferencePaths: [], otherReferencePaths: [], models: [base.models[0]] };
+    const initial = overviewDto({ providers: [provider], models: [base.models[0]], counts: { providerCount: 1, modelCount: 1, roleCount: 0 } });
+    const unsafeState: StartupState = {
+      ...readyState,
+      targetConfiguration: targetConfiguration(undefined, {
+        status: "unsafe",
+        writable: false,
+        recoveryNotice: "Configuration transaction 需要人工处理；安全路径：/safe/recovery/scene。",
+      }),
+    };
+    const getOverviewLoad = vi.fn()
+      .mockResolvedValueOnce(overviewLoad(initial, readyState))
+      .mockResolvedValueOnce({
+        startupState: unsafeState,
+        overview: null,
+        error: {
+          code: "overview-unsafe-target",
+          message: "无法安全读取 Target configuration。",
+          action: "请修复路径后重新读取。",
+        },
+      });
+    const deleteProvider = vi.fn().mockRejectedValue({
+      code: "configuration-transaction-cleanup-failed",
+      message: "models.yml 与 config.yml 已完成替换，但事务清单清理失败。",
+      action: "请重新检测 OMP。",
+    });
+    renderRoute("/providers/dnslin", {
+      ...unavailableClient,
+      getStartupState: async () => unsafeState,
+      getOverviewLoad,
+      deleteProvider,
+    });
+
+    await screen.findByText("Sol");
+    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "删除 Provider" }));
+
+    await waitFor(() => expect(getOverviewLoad).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("上次事务需要人工处理")).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("/safe/recovery/scene");
+    expect(screen.queryByText("Provider 已删除；已重新读取事务状态")).not.toBeInTheDocument();
   });
   it("shows a reload action when a cross-file deletion conflicts", async () => {
     const user = userEvent.setup();

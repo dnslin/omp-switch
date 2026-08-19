@@ -9,7 +9,7 @@ use crate::{
     configuration_transaction,
     error::AppError,
     models_write::{self, ModelsMutation, ModelsWriteFailurePoint},
-    overview,
+    overview, role_mutation,
     target_configuration::TargetConfigurationDiscovery,
 };
 
@@ -356,7 +356,7 @@ pub(crate) fn delete_provider(
         .map_err(remap_delete_operation_error)?;
     let config = models_write::load_config_for_write(target, &input.opened_config_hash)
         .map_err(remap_delete_operation_error)?;
-    let validated = validate_delete_input(input, &loaded.original_tree, &config, catalog, true)?;
+    let validated = validate_delete_input(input, &loaded.original_tree, &config, catalog)?;
     let result = DeleteProviderResult {
         provider_id: validated.provider_id.clone(),
         model_count: validated.model_count,
@@ -397,7 +397,7 @@ fn loaded_config_from_transaction(
             .map(std::path::Path::to_path_buf)
             .unwrap_or_default(),
         models_path: file.path.clone(),
-        backup_partition: "config",
+        backup_partition: models_write::BackupPartition::Config,
         original_bytes: Vec::new(),
         original_hash: file.original_hash.clone(),
         original_tree: file.original_tree.clone(),
@@ -411,8 +411,7 @@ fn prepare_provider_delete_transaction(
     config: &configuration_transaction::TransactionFile,
 ) -> Result<configuration_transaction::TransactionCandidates, AppError> {
     let loaded_config = loaded_config_from_transaction(config);
-    let validated =
-        validate_delete_input(input, &models.original_tree, &loaded_config, catalog, true)?;
+    let validated = validate_delete_input(input, &models.original_tree, &loaded_config, catalog)?;
     if validated.role_reference_ids.is_empty() {
         return Err(AppError::new(
             "provider-delete-role-reference-changed",
@@ -423,10 +422,7 @@ fn prepare_provider_delete_transaction(
     let mut candidate_models = models.original_tree.clone();
     validated.apply(&mut candidate_models)?;
     let mut candidate_config = config.original_tree.clone();
-    configuration_transaction::remove_model_role_ids(
-        &mut candidate_config,
-        &validated.role_reference_ids,
-    )?;
+    role_mutation::remove_model_role_ids(&mut candidate_config, &validated.role_reference_ids)?;
     Ok(configuration_transaction::TransactionCandidates {
         models: candidate_models,
         config: candidate_config,
@@ -442,10 +438,9 @@ fn validate_provider_delete_transaction(
     candidate_config: &Value,
 ) -> Result<(), AppError> {
     let loaded_config = loaded_config_from_transaction(config);
-    let validated =
-        validate_delete_input(input, &models.original_tree, &loaded_config, catalog, true)?;
+    let validated = validate_delete_input(input, &models.original_tree, &loaded_config, catalog)?;
     validated.validate(candidate_models, &models.original_tree)?;
-    configuration_transaction::validate_model_role_ids_removed(
+    role_mutation::validate_model_role_ids_removed(
         &config.original_tree,
         candidate_config,
         &validated.role_reference_ids,
@@ -457,7 +452,6 @@ fn validate_delete_input(
     original_tree: &Value,
     config: &models_write::LoadedModels,
     catalog: &BundledCatalog,
-    allow_role_references: bool,
 ) -> Result<ValidatedProviderDelete, AppError> {
     let provider_id = validate_delete_provider_id(&input.provider_id)?;
     if !overview::is_editable_custom_provider(original_tree, &provider_id, catalog) {
@@ -532,17 +526,6 @@ fn validate_delete_input(
         None,
         &known_model_ids,
     );
-    if !references.role_paths.is_empty() && !allow_role_references {
-        return Err(AppError::new(
-            "provider-delete-role-reference",
-            format!(
-                "无法删除 Provider {}：受支持 Model role 仍有引用：{}",
-                provider_id,
-                references.role_paths.join("、")
-            ),
-            "请转入 Configuration transaction，同时更新 models.yml 和 config.yml；当前不会部分删除。",
-        ));
-    }
     if !references.role_paths.is_empty() && role_reference_ids.is_empty() {
         return Err(AppError::new(
             "provider-delete-role-reference",

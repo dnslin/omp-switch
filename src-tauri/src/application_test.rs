@@ -4823,6 +4823,13 @@ fn configuration_transaction_cleanup_failure_is_reported_and_recovered_on_startu
             .as_deref()
             .is_some_and(|notice| notice.contains("完整提交"))
     );
+    let target_fingerprint =
+        crate::models_write::target_fingerprint(&target.canonicalize().unwrap());
+    let models_backup_directory = backup_root.join(&target_fingerprint).join("models");
+    let config_backup_directory = backup_root.join(target_fingerprint).join("config");
+    let recovery_notice = target_configuration.recovery_notice.as_deref().unwrap();
+    assert!(recovery_notice.contains(models_backup_directory.to_string_lossy().as_ref()));
+    assert!(recovery_notice.contains(config_backup_directory.to_string_lossy().as_ref()));
     let refreshed = load.overview.unwrap();
     assert!(refreshed.models.iter().all(|model| model.id != "second"));
     assert_eq!(manifest_count(), 0);
@@ -4831,6 +4838,102 @@ fn configuration_transaction_cleanup_failure_is_reported_and_recovered_on_startu
         &target.canonicalize().unwrap(),
     )
     .unwrap();
+}
+
+#[test]
+fn configuration_transaction_does_not_leave_partial_restore_when_second_file_restore_fails() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_models = b"providers:\n  editable:\n    baseUrl: https://example.com/v1\n    api: openai-responses\n    models:\n      - id: first\n        name: First\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n      - id: second\n        name: Second\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n";
+    let original_config = b"modelRoles:\n  default: editable/second\n";
+    let external_config = b"modelRoles:\n  external: editable/first\n";
+    fs::write(target.join("models.yml"), original_models).unwrap();
+    fs::write(target.join("config.yml"), original_config).unwrap();
+
+    let service = service_for_target_with_app_data(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+    service.set_configuration_transaction_failure_for_test(
+        ConfigurationTransactionFailurePoint::AfterFirstReplacement,
+    );
+    let error = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash: overview.files.models.content_hash.unwrap(),
+            opened_config_hash: overview.files.config.content_hash.unwrap(),
+            provider_id: "editable".to_owned(),
+            model_id: "second".to_owned(),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, "configuration-transaction-interrupted");
+
+    let current_models = fs::read(target.join("models.yml")).unwrap();
+    assert_ne!(current_models, original_models);
+    fs::write(target.join("config.yml"), external_config).unwrap();
+
+    let backup_root = app_data.path().join("target-configuration-backups");
+    let recovery = crate::configuration_transaction::recover_for_target_with_failure(
+        &backup_root,
+        &target,
+        ConfigurationTransactionFailurePoint::DuringRecoverySecondRestore,
+    )
+    .unwrap()
+    .unwrap();
+
+    assert!(recovery.manual);
+    assert_eq!(fs::read(target.join("models.yml")).unwrap(), current_models);
+    assert_eq!(
+        fs::read(target.join("config.yml")).unwrap(),
+        external_config
+    );
+}
+
+#[test]
+fn configuration_transaction_stops_after_first_restore_failure() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_models = b"providers:\n  editable:\n    baseUrl: https://example.com/v1\n    api: openai-responses\n    models:\n      - id: first\n        name: First\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n      - id: second\n        name: Second\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n";
+    let original_config = b"modelRoles:\n  default: editable/second\n";
+    let external_config = b"modelRoles:\n  external: editable/first\n";
+    fs::write(target.join("models.yml"), original_models).unwrap();
+    fs::write(target.join("config.yml"), original_config).unwrap();
+
+    let service = service_for_target_with_app_data(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+    service.set_configuration_transaction_failure_for_test(
+        ConfigurationTransactionFailurePoint::AfterFirstReplacement,
+    );
+    let error = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash: overview.files.models.content_hash.unwrap(),
+            opened_config_hash: overview.files.config.content_hash.unwrap(),
+            provider_id: "editable".to_owned(),
+            model_id: "second".to_owned(),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, "configuration-transaction-interrupted");
+
+    let current_models = fs::read(target.join("models.yml")).unwrap();
+    assert_ne!(current_models, original_models);
+    fs::write(target.join("config.yml"), external_config).unwrap();
+
+    let backup_root = app_data.path().join("target-configuration-backups");
+    let recovery = crate::configuration_transaction::recover_for_target_with_failure(
+        &backup_root,
+        &target,
+        ConfigurationTransactionFailurePoint::DuringRecoveryFirstRestore,
+    )
+    .unwrap()
+    .unwrap();
+
+    assert!(recovery.manual);
+    assert!(recovery.notice.contains("models.yml 恢复失败"));
+    assert!(!recovery.notice.contains("config.yml 恢复失败"));
+    assert_eq!(fs::read(target.join("models.yml")).unwrap(), current_models);
+    assert_eq!(
+        fs::read(target.join("config.yml")).unwrap(),
+        external_config
+    );
 }
 
 #[cfg(unix)]

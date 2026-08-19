@@ -42,6 +42,20 @@ export function useOverviewLoad(copy: OverviewLoadCopy) {
         };
       }
       setStartupState(result.startupState);
+      if (
+        result.startupState.kind === "omp-ready"
+        && result.startupState.targetConfiguration.status === "unsafe"
+        && result.startupState.targetConfiguration.recoveryNotice
+      ) {
+        const recoveryError = result.error ?? {
+          code: "overview-unsafe-target",
+          message: "Configuration transaction 需要人工处理。",
+          action: result.startupState.targetConfiguration.recoveryNotice,
+        };
+        if (clearBeforeLoad) setError(recoveryError);
+        navigate("/setup", { replace: true });
+        return recoveryError;
+      }
       if (result.startupState.kind === "omp-ready" && result.startupState.requiresConfirmation) {
         navigate("/setup", { replace: true });
         return null;

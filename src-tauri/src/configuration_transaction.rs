@@ -30,6 +30,8 @@ pub(crate) enum ConfigurationTransactionFailurePoint {
     AfterSecondReplacement,
     DuringCleanup,
     ManifestCleanupFailure,
+    DuringRecoverySecondRestore,
+    DuringRecoveryFirstRestore,
 }
 
 #[derive(Clone, Debug)]
@@ -66,7 +68,7 @@ struct TransactionManifest {
 #[serde(rename_all = "camelCase")]
 struct TransactionManifestEntry {
     name: String,
-    partition: String,
+    partition: models_write::BackupPartition,
     target_path: PathBuf,
     backup_path: PathBuf,
     original_hash: String,
@@ -130,7 +132,7 @@ where
         backup_root,
         &expected_target,
         &models.original_bytes,
-        "models",
+        models_write::BackupPartition::Models,
         &transaction_id,
     )
     .map_err(map_backup_error)?;
@@ -138,7 +140,7 @@ where
         backup_root,
         &expected_target,
         &config.original_bytes,
-        "config",
+        models_write::BackupPartition::Config,
         &transaction_id,
     ) {
         Ok(path) => path,
@@ -197,7 +199,7 @@ where
         entries: vec![
             TransactionManifestEntry {
                 name: "models.yml".to_owned(),
-                partition: "models".to_owned(),
+                partition: models_write::BackupPartition::Models,
                 target_path: models_path.clone(),
                 backup_path: models_backup,
                 original_hash: models.original_hash.clone(),
@@ -205,7 +207,7 @@ where
             },
             TransactionManifestEntry {
                 name: "config.yml".to_owned(),
-                partition: "config".to_owned(),
+                partition: models_write::BackupPartition::Config,
                 target_path: config_path.clone(),
                 backup_path: config_backup,
                 original_hash: config.original_hash.clone(),
@@ -213,7 +215,7 @@ where
             },
         ],
     };
-    let manifest_path = persist_manifest(backup_root, &expected_target, &manifest)?;
+    let manifest_path = persist_manifest(backup_root, &manifest)?;
     if failure == Some(ConfigurationTransactionFailurePoint::AfterManifest) {
         discard_temporary(temporary_models);
         discard_temporary(temporary_config);
@@ -422,7 +424,6 @@ fn transaction_manifest_file_name(logical_target: &Path, transaction_id: &str) -
 
 fn persist_manifest(
     backup_root: &Path,
-    target: &Path,
     manifest: &TransactionManifest,
 ) -> Result<PathBuf, AppError> {
     let directory = backup_root
@@ -453,7 +454,6 @@ fn persist_manifest(
         .and_then(|_| writer.sync_all())
         .and_then(|_| writer.commit())
         .map_err(|error| transaction_io_error("持久化 Configuration transaction 清单", error))?;
-    let _ = target;
     Ok(path)
 }
 
@@ -586,6 +586,23 @@ enum ManifestCandidate {
 pub(crate) fn recover_for_target(
     backup_root: &Path,
     logical_target: &Path,
+) -> std::io::Result<Option<RecoveryResult>> {
+    recover_for_target_with_injection(backup_root, logical_target, None)
+}
+
+#[cfg(test)]
+pub(crate) fn recover_for_target_with_failure(
+    backup_root: &Path,
+    logical_target: &Path,
+    failure: ConfigurationTransactionFailurePoint,
+) -> std::io::Result<Option<RecoveryResult>> {
+    recover_for_target_with_injection(backup_root, logical_target, Some(failure))
+}
+
+fn recover_for_target_with_injection(
+    backup_root: &Path,
+    logical_target: &Path,
+    failure: Option<ConfigurationTransactionFailurePoint>,
 ) -> std::io::Result<Option<RecoveryResult>> {
     let mut candidates = find_manifests_for_logical_target(backup_root, logical_target)?;
     if candidates.is_empty() {
@@ -742,8 +759,8 @@ pub(crate) fn recover_for_target(
         }
         return Ok(Some(RecoveryResult {
             notice: format!(
-                "上次 Configuration transaction 已完整提交；已按最终 Hash 清理事务清单。共享备份保留在 {}。",
-                directory.display()
+                "上次 Configuration transaction 已完整提交；已按最终 Hash 清理事务清单。共享备份保留位置：{}。",
+                backup_path_summary(&manifest),
             ),
             manual: false,
         }));
@@ -766,10 +783,46 @@ pub(crate) fn recover_for_target(
             format!("整体恢复前备份预检失败：{}", backup_errors.join("；")),
         )));
     }
+    let current_files = match manifest
+        .entries
+        .iter()
+        .map(|entry| fs::read(&entry.target_path).map(|bytes| (entry, bytes)))
+        .collect::<std::io::Result<Vec<_>>>()
+    {
+        Ok(files) => files,
+        Err(error) => {
+            return Ok(Some(manual_recovery(
+                &scene,
+                format!(
+                    "整体恢复前当前现场读取失败：{}",
+                    redact_diagnostic(&error.to_string())
+                ),
+            )));
+        }
+    };
     let mut restore_errors = Vec::new();
-    for (entry, backup) in &backups {
-        if let Err(error) = restore_file(&entry.target_path, backup) {
+    for (index, (entry, backup)) in backups.iter().enumerate() {
+        let result = match failure {
+            Some(ConfigurationTransactionFailurePoint::DuringRecoveryFirstRestore)
+                if index <= 1 =>
+            {
+                Err(std::io::Error::other("injected recovery restore failure"))
+            }
+            Some(ConfigurationTransactionFailurePoint::DuringRecoverySecondRestore)
+                if index == 1 =>
+            {
+                match restore_file(&entry.target_path, backup) {
+                    Ok(()) => Err(std::io::Error::other(
+                        "injected recovery restore failure after commit",
+                    )),
+                    Err(error) => Err(error),
+                }
+            }
+            _ => restore_file(&entry.target_path, backup),
+        };
+        if let Err(error) = result {
             restore_errors.push(format!("{} 恢复失败：{}", entry.name, error));
+            break;
         }
     }
     for entry in &manifest.entries {
@@ -780,9 +833,26 @@ pub(crate) fn recover_for_target(
         }
     }
     if !restore_errors.is_empty() {
+        let rollback_errors = current_files
+            .iter()
+            .filter_map(|(entry, bytes)| {
+                restore_file(&entry.target_path, bytes)
+                    .err()
+                    .map(|error| format!("{} 现场回滚失败：{}", entry.name, error))
+            })
+            .collect::<Vec<_>>();
+        let rollback_detail = if rollback_errors.is_empty() {
+            "已回滚本次恢复尝试，两个文件保持恢复前现场".to_owned()
+        } else {
+            format!("现场回滚也未完成：{}", rollback_errors.join("；"))
+        };
         return Ok(Some(manual_recovery(
             &scene,
-            format!("整体恢复未完成：{}", restore_errors.join("；")),
+            format!(
+                "整体恢复未完成：{}；{}",
+                restore_errors.join("；"),
+                rollback_detail
+            ),
         )));
     }
     if let Err(error) = fs::remove_file(&manifest_path) {
@@ -795,13 +865,13 @@ pub(crate) fn recover_for_target(
         )));
     }
     drop(locks);
-    Ok(Some(RecoveryResult {
+    return Ok(Some(RecoveryResult {
         notice: format!(
             "上次 Configuration transaction 未完整提交；已将现场保存到 {}，并从同一事务备份整体恢复 models.yml 与 config.yml。",
             scene.display()
         ),
         manual: false,
-    }))
+    }));
 }
 fn find_manifests_for_logical_target(
     backup_root: &Path,
@@ -865,69 +935,6 @@ fn find_manifests_for_logical_target(
     Ok(matches)
 }
 
-pub(crate) fn remove_model_role_ids(tree: &mut Value, role_ids: &[String]) -> Result<(), AppError> {
-    let roles = tree
-        .as_mapping_mut()
-        .and_then(|root| root.get_mut(Value::String("modelRoles".to_owned())))
-        .and_then(Value::as_mapping_mut)
-        .ok_or_else(|| {
-            AppError::new(
-                "configuration-transaction-roles-invalid",
-                "config.yml 的 modelRoles 结构无法安全修改。",
-                "请在外部修复后重新读取；两个原始配置文件都没有被修改。",
-            )
-        })?;
-    for role_id in role_ids {
-        roles.remove(Value::String(role_id.clone()));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_model_role_ids_removed(
-    original: &Value,
-    candidate: &Value,
-    role_ids: &[String],
-) -> Result<(), AppError> {
-    let original_root = original
-        .as_mapping()
-        .ok_or_else(|| transaction_roles_untouched_error())?;
-    let candidate_root = candidate
-        .as_mapping()
-        .ok_or_else(|| transaction_roles_untouched_error())?;
-    if original_root.len() != candidate_root.len() {
-        return Err(transaction_roles_untouched_error());
-    }
-    for (key, value) in original_root {
-        if key.as_str() != Some("modelRoles") && candidate_root.get(key) != Some(value) {
-            return Err(transaction_roles_untouched_error());
-        }
-    }
-    let original_roles = original_root
-        .get(Value::String("modelRoles".to_owned()))
-        .and_then(Value::as_mapping)
-        .ok_or_else(|| transaction_roles_untouched_error())?;
-    let candidate_roles = candidate_root
-        .get(Value::String("modelRoles".to_owned()))
-        .and_then(Value::as_mapping)
-        .ok_or_else(|| transaction_roles_untouched_error())?;
-    let mut expected_roles = original_roles.clone();
-    for role_id in role_ids {
-        expected_roles.remove(Value::String(role_id.clone()));
-    }
-    if candidate_roles != &expected_roles {
-        return Err(transaction_roles_untouched_error());
-    }
-    Ok(())
-}
-
-fn transaction_roles_untouched_error() -> AppError {
-    AppError::new(
-        "configuration-transaction-untouched-path-changed",
-        "Configuration transaction 改变了未触及的 config.yml 路径。",
-        "请重试；两个原始配置文件都没有被安全替换。",
-    )
-}
-
 fn validate_manifest(
     manifest: &TransactionManifest,
     target: &Path,
@@ -955,8 +962,10 @@ fn validate_manifest(
     let backup_root = transaction_directory
         .parent()
         .ok_or_else(|| "事务备份根目录无效".to_owned())?;
-    for (expected_name, expected_partition) in [("models.yml", "models"), ("config.yml", "config")]
-    {
+    for (expected_name, expected_partition) in [
+        ("models.yml", models_write::BackupPartition::Models),
+        ("config.yml", models_write::BackupPartition::Config),
+    ] {
         let Some(entry) = manifest
             .entries
             .iter()
@@ -978,7 +987,7 @@ fn validate_manifest(
             || entry.target_path != expected_target_path
             || entry.backup_path
                 != backup_root
-                    .join(expected_partition)
+                    .join(expected_partition.directory())
                     .join(format!("tx-{}.yml", manifest.transaction_id))
             || !is_hash(&entry.original_hash)
             || !is_hash(&entry.final_hash)
@@ -989,6 +998,14 @@ fn validate_manifest(
     Ok(())
 }
 
+fn backup_path_summary(manifest: &TransactionManifest) -> String {
+    manifest
+        .entries
+        .iter()
+        .map(|entry| format!("{}：{}", entry.name, entry.backup_path.display()))
+        .collect::<Vec<_>>()
+        .join("；")
+}
 fn is_hash(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }

@@ -538,26 +538,52 @@ function ProviderDetailPage() {
     toast.success(editorMode === "edit" ? "Model 已保存" : "Model 已创建");
     return null;
   };
-  const reloadModelAfterConflict = async () => {
+  const reloadAfterDeleteConflict = async (
+    clear: () => void,
+    setError: (error: AppError | null) => void,
+  ) => {
     const reloadError = await reload();
     if (reloadError) {
       toast.error(reloadError.message, { description: reloadError.action });
       return;
     }
-    setDeletingModel(null);
-    setDeleteHashes(null);
-    setDeleteError(null);
+    clear();
+    setError(null);
   };
 
-  const reloadProviderAfterConflict = async () => {
+  const reloadModelAfterConflict = () => reloadAfterDeleteConflict(
+    () => {
+      setDeletingModel(null);
+      setDeleteHashes(null);
+    },
+    setDeleteError,
+  );
+
+  const reloadProviderAfterConflict = () => reloadAfterDeleteConflict(
+    () => {
+      setDeletingProvider(false);
+      setDeleteHashes(null);
+    },
+    setProviderDeleteError,
+  );
+
+  const recoverCommittedDelete = async ({
+    clear,
+    setError,
+    successMessage,
+    afterSuccess,
+  }: {
+    clear: () => void;
+    setError: (error: AppError | null) => void;
+    successMessage: string;
+    afterSuccess?: () => void;
+  }) => {
     const reloadError = await reload();
-    if (reloadError) {
-      toast.error(reloadError.message, { description: reloadError.action });
-      return;
-    }
-    setDeletingProvider(false);
-    setDeleteHashes(null);
-    setProviderDeleteError(null);
+    clear();
+    setError(reloadError);
+    if (reloadError) return;
+    toast.success(successMessage);
+    afterSuccess?.();
   };
 
   const deleteModel = async () => {
@@ -581,12 +607,14 @@ function ProviderDetailPage() {
     } catch (cause: unknown) {
       const appError = asAppError(cause, "删除 Model 失败");
       if (isCommittedCleanupFailure(appError)) {
-        const reloadError = await reload();
-        setDeletingModel(null);
-        setDeleteHashes(null);
-        setDeleteError(reloadError);
-        if (reloadError) return;
-        toast.success("Model 已删除；已重新读取事务状态");
+        await recoverCommittedDelete({
+          clear: () => {
+            setDeletingModel(null);
+            setDeleteHashes(null);
+          },
+          setError: setDeleteError,
+          successMessage: "Model 已删除；已重新读取事务状态",
+        });
         return;
       }
       if (isHashConflict(appError)) {
@@ -619,13 +647,15 @@ function ProviderDetailPage() {
     } catch (cause: unknown) {
       const appError = asAppError(cause, "删除 Provider 失败");
       if (isCommittedCleanupFailure(appError)) {
-        const reloadError = await reload();
-        setDeletingProvider(false);
-        setDeleteHashes(null);
-        setProviderDeleteError(reloadError);
-        if (reloadError) return;
-        toast.success("Provider 已删除；已重新读取事务状态");
-        navigate("/providers");
+        await recoverCommittedDelete({
+          clear: () => {
+            setDeletingProvider(false);
+            setDeleteHashes(null);
+          },
+          setError: setProviderDeleteError,
+          successMessage: "Provider 已删除；已重新读取事务状态",
+          afterSuccess: () => navigate("/providers"),
+        });
         return;
       }
       if (isHashConflict(appError)) {
