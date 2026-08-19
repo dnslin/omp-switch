@@ -18,8 +18,8 @@ pub(crate) use crate::model_mutation::{
 pub(crate) use crate::model_test::{ModelTestInput, ModelTestResult, ModelTestState};
 pub(crate) use crate::models_write::ModelsWriteFailurePoint;
 pub(crate) use crate::provider_mutation::{
-    CreateCustomProviderInput, CreateCustomProviderResult, EditCustomProviderInput,
-    EditCustomProviderResult,
+    CreateCustomProviderInput, CreateCustomProviderResult, DeleteProviderInput,
+    DeleteProviderResult, EditCustomProviderInput, EditCustomProviderResult,
 };
 pub(crate) use crate::role_mutation::{SaveModelRolesInput, SaveModelRolesResult};
 
@@ -252,6 +252,7 @@ pub struct AppService {
 enum ProviderWriteOperation {
     Create,
     Edit,
+    Delete,
 }
 
 impl ProviderWriteOperation {
@@ -265,6 +266,11 @@ impl ProviderWriteOperation {
             Self::Edit => AppError::new(
                 "provider-edit-confirmation-required",
                 "尚未确认新的 OMP 与 Target configuration，不能编辑 Provider。",
+                "请先在设置页面确认 OMP 切换后重试。",
+            ),
+            Self::Delete => AppError::new(
+                "provider-delete-confirmation-required",
+                "尚未确认新的 OMP 与 Target configuration，不能删除 Provider。",
                 "请先在设置页面确认 OMP 切换后重试。",
             ),
         }
@@ -282,6 +288,11 @@ impl ProviderWriteOperation {
                 "无法重新验证 OMP 的 Target configuration。",
                 "请重新检测或重新选择 OMP。",
             ),
+            Self::Delete => AppError::new(
+                "provider-delete-unavailable",
+                "无法重新验证 OMP 的 Target configuration。",
+                "请重新检测或重新选择 OMP。",
+            ),
         }
     }
 
@@ -296,6 +307,11 @@ impl ProviderWriteOperation {
                 "provider-edit-catalog-missing",
                 "当前 OMP 版本没有匹配的 bundled Provider 清单。",
                 "为避免覆盖 OMP 内置 Provider，Provider 与模型管理暂时只读。",
+            ),
+            Self::Delete => AppError::new(
+                "provider-delete-catalog-missing",
+                "当前 OMP 版本没有匹配的 bundled Provider 清单。",
+                "为避免绕过 OMP 内置 Provider 保护，Provider 删除暂时只读。",
             ),
         }
     }
@@ -1086,6 +1102,25 @@ impl AppService {
         }
         result
     }
+    pub fn delete_provider(
+        &self,
+        input: DeleteProviderInput,
+    ) -> Result<DeleteProviderResult, AppError> {
+        let _detection = self.detection_lock.lock();
+        let context = self.prepare_provider_write(ProviderWriteOperation::Delete)?;
+        let result = provider_mutation::delete_provider(
+            &context.target,
+            &self.backup_root,
+            context.catalog,
+            &input,
+            self.take_models_write_failure(),
+        );
+        if result.is_ok() {
+            self.model_tests.invalidate();
+            self.clear_configuration_snapshot();
+        }
+        result
+    }
 
     pub fn create_model(&self, input: CreateModelInput) -> Result<ModelMutationResult, AppError> {
         let _detection = self.detection_lock.lock();
@@ -1760,6 +1795,16 @@ pub fn edit_custom_provider(
     let started_at = Instant::now();
     let result = service.edit_custom_provider(input);
     log_command_result("edit_custom_provider", started_at, &result);
+    result
+}
+#[tauri::command]
+pub fn delete_provider(
+    service: tauri::State<'_, AppService>,
+    input: DeleteProviderInput,
+) -> Result<DeleteProviderResult, AppError> {
+    let started_at = Instant::now();
+    let result = service.delete_provider(input);
+    log_command_result("delete_provider", started_at, &result);
     result
 }
 

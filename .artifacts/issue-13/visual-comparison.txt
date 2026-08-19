@@ -1,0 +1,18 @@
+Issue #13 visual acceptance — 2026-08-19
+
+Pencil exports:
+- pencil-reference/provider-detail.png/vz6sg.png (node vz6sg, 05 Page / Provider Detail)
+- pencil-reference/dialog-confirm.png/P0H6Xc.png (node P0H6Xc, Dialog / Confirm)
+
+Real Tauri captures:
+- model-delete-confirm-tauri-1536x961.png
+- provider-delete-confirm-tauri-1536x961.png
+- provider-delete-blocked-tauri-1536x961.png
+
+Checks:
+- Native Tauri window title is "OMP Switch"; the page does not draw a second title bar.
+- All captures are 3072×1922 Retina pixels, representing a 1536×961 logical Tauri content window after native macOS chrome.
+- Confirm dialogs preserve the Pencil component's 520px width, 28px inset, 10px radius, 1px border, 0/8/24 shadow, 20px title/body/action rhythm, 12px action gap, and Cancel → destructive action order.
+- Model and Provider dialogs show the deletion target, included model IDs, Model role references, other references, and backup behavior.
+- The blocked state shows the full role-path list in a scrollable region, a red blocking panel, and a disabled destructive action; it states that a Configuration transaction must update models.yml and config.yml together.
+- The page remains responsive at the native 1536px width; long reference paths wrap or scroll inside the dialog without changing the shared Confirm geometry.

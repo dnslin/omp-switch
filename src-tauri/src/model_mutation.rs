@@ -482,17 +482,43 @@ fn validate_delete_input(
     ) {
         return Err(read_only_model_error());
     }
-    let references = overview::model_reference_paths(&config.tree, &provider_id, &input.model_id);
-    if !references.is_empty() {
+    let known_model_ids: Vec<String> = models
+        .iter()
+        .filter_map(model_id_value)
+        .map(str::to_owned)
+        .collect();
+
+    let skip_path = overview::model_node_path(original_tree, &provider_id, &input.model_id);
+    let references = overview::scan_model_references(
+        Some(original_tree),
+        Some(&config.tree),
+        &provider_id,
+        Some(&input.model_id),
+        &known_model_ids,
+        skip_path.as_deref(),
+    );
+    if !references.other_paths.is_empty() {
         return Err(AppError::new(
-            "model-delete-referenced",
+            "model-delete-unmanaged-reference",
             format!(
-                "无法删除 {}/{}：仍有配置引用：{}",
+                "无法删除 {}/{}：非受管配置路径仍有引用：{}",
                 provider_id,
                 input.model_id,
-                references.join("、")
+                references.other_paths.join("、")
             ),
-            "请先在 OMP 或外部编辑器中处理这些引用；OMP Switch 不会修改其他配置路径。",
+            "请先在 OMP 或外部编辑器中处理这些路径；OMP Switch 不会自动修改非受管配置。",
+        ));
+    }
+    if !references.role_paths.is_empty() {
+        return Err(AppError::new(
+            "model-delete-role-reference",
+            format!(
+                "无法删除 {}/{}：受支持 Model role 仍有引用：{}",
+                provider_id,
+                input.model_id,
+                references.role_paths.join("、")
+            ),
+            "请转入 Configuration transaction，同时更新 models.yml 和 config.yml；当前不会部分删除。",
         ));
     }
     if models.len() <= 1 {

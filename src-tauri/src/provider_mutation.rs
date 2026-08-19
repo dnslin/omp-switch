@@ -8,6 +8,7 @@ use crate::{
     bundled_catalog::BundledCatalog,
     error::AppError,
     models_write::{self, ModelsMutation, ModelsWriteFailurePoint},
+    overview,
     target_configuration::TargetConfigurationDiscovery,
 };
 
@@ -128,6 +129,20 @@ pub(crate) struct EditCustomProviderInput {
 pub(crate) struct EditCustomProviderResult {
     pub(crate) provider_id: String,
 }
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DeleteProviderInput {
+    pub(crate) opened_models_hash: String,
+    pub(crate) opened_config_hash: String,
+    pub(crate) provider_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DeleteProviderResult {
+    pub(crate) provider_id: String,
+    pub(crate) model_count: usize,
+}
 
 struct ValidatedCreate {
     provider_id: String,
@@ -140,6 +155,13 @@ struct ValidatedEdit {
     base_url: String,
     default_api: Option<SupportedApi>,
     api_key: ValidatedApiKeyIntent,
+}
+struct ValidatedProviderDelete {
+    provider_id: String,
+    model_count: usize,
+    config_path: std::path::PathBuf,
+    expected_target: std::path::PathBuf,
+    expected_config_hash: String,
 }
 
 enum ValidatedApiKeyIntent {
@@ -198,6 +220,93 @@ impl ModelsMutation for ValidatedEdit {
         )
     }
 }
+impl ModelsMutation for ValidatedProviderDelete {
+    fn verb(&self) -> &'static str {
+        "删除 Provider"
+    }
+
+    fn serialization_error(&self) -> (&'static str, &'static str, &'static str) {
+        (
+            "serialize_deleted_provider",
+            "无法序列化 Provider 删除结果",
+            "请重试；原 models.yml 没有被修改。",
+        )
+    }
+
+    fn apply(&self, tree: &mut Value) -> Result<(), AppError> {
+        let providers = tree
+            .as_mapping_mut()
+            .and_then(|root| root.get_mut(Value::String("providers".to_owned())))
+            .and_then(Value::as_mapping_mut)
+            .ok_or_else(models_structure_error)?;
+        providers
+            .remove(Value::String(self.provider_id.clone()))
+            .ok_or_else(|| provider_not_found(&self.provider_id))?;
+        Ok(())
+    }
+
+    fn validate(&self, candidate: &Value, original: &Value) -> Result<(), AppError> {
+        let original_root = original.as_mapping().ok_or_else(models_structure_error)?;
+        let candidate_root = candidate.as_mapping().ok_or_else(untouched_value_error)?;
+        if original_root.len() != candidate_root.len() {
+            return Err(untouched_value_error());
+        }
+        for (key, value) in original_root {
+            if value_string(key) != Some("providers") && candidate_root.get(key) != Some(value) {
+                return Err(untouched_value_error());
+            }
+        }
+        let original_providers = providers_mapping(original)?;
+        let candidate_providers =
+            providers_mapping(candidate).map_err(|_| untouched_value_error())?;
+        if candidate_providers.len() + 1 != original_providers.len() {
+            return Err(untouched_value_error());
+        }
+        for (key, value) in original_providers {
+            if value_string(key) == Some(self.provider_id.as_str()) {
+                if candidate_providers.contains_key(key) {
+                    return Err(untouched_value_error());
+                }
+            } else if candidate_providers.get(key) != Some(value) {
+                return Err(untouched_value_error());
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_before_commit(&self, _loaded: &models_write::LoadedModels) -> Result<(), AppError> {
+        models_write::ensure_resolved_file_path(
+            &self.config_path,
+            &self.expected_target,
+            "config.yml",
+        )
+        .map_err(|error| remap_delete_operation_error(error))?;
+        let bytes = std::fs::read(&self.config_path).map_err(|error| {
+            AppError::new(
+                "provider-delete-unavailable",
+                format!("无法在提交删除前读取 config.yml：{}", error.kind()),
+                "请重新读取配置；OMP Switch 不会提交可能破坏引用的删除。",
+            )
+        })?;
+        if models_write::content_hash(&bytes) != self.expected_config_hash {
+            return Err(AppError::new(
+                "config-hash-conflict",
+                "config.yml 在删除提交前已被外部修改。",
+                "请重新读取配置；OMP Switch 不会自动合并引用变化。",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn mutate_external_state_for_test(&self) {
+        std::fs::write(
+            &self.config_path,
+            format!("modelRoles:\n  external: {}/*\n", self.provider_id),
+        )
+        .expect("test config mutation must succeed");
+    }
+}
 
 pub(crate) fn create_custom_provider(
     target: &TargetConfigurationDiscovery,
@@ -232,6 +341,138 @@ pub(crate) fn edit_custom_provider(
     models_write::write_models_mutation(backup_root, &loaded, &validated, failure)
         .map_err(remap_edit_operation_error)?;
     Ok(result)
+}
+pub(crate) fn delete_provider(
+    target: &TargetConfigurationDiscovery,
+    backup_root: &Path,
+    catalog: &BundledCatalog,
+    input: &DeleteProviderInput,
+    failure: Option<ModelsWriteFailurePoint>,
+) -> Result<DeleteProviderResult, AppError> {
+    let loaded = models_write::load_models_for_write(target, &input.opened_models_hash)
+        .map_err(remap_delete_operation_error)?;
+    let config = models_write::load_config_for_write(target, &input.opened_config_hash)
+        .map_err(remap_delete_operation_error)?;
+    let validated = validate_delete_input(input, &loaded.original_tree, &config, catalog)?;
+    let result = DeleteProviderResult {
+        provider_id: validated.provider_id.clone(),
+        model_count: validated.model_count,
+    };
+    models_write::write_models_mutation(backup_root, &loaded, &validated, failure)
+        .map_err(remap_delete_operation_error)?;
+    Ok(result)
+}
+
+fn validate_delete_input(
+    input: &DeleteProviderInput,
+    original_tree: &Value,
+    config: &models_write::LoadedModels,
+    catalog: &BundledCatalog,
+) -> Result<ValidatedProviderDelete, AppError> {
+    let provider_id = validate_delete_provider_id(&input.provider_id)?;
+    if !overview::is_editable_custom_provider(original_tree, &provider_id, catalog) {
+        return Err(AppError::new(
+            "provider-delete-unavailable",
+            "当前 Provider 不是可编辑的普通 Custom Provider。",
+            "高级配置、内置覆盖和不支持的 Provider 保持只读。",
+        ));
+    }
+    let providers = providers_mapping(original_tree)?;
+    let provider = providers
+        .get(Value::String(provider_id.clone()))
+        .ok_or_else(|| provider_not_found(&provider_id))?;
+    let model_count = provider
+        .as_mapping()
+        .and_then(|provider| provider.get(Value::String("models".to_owned())))
+        .and_then(Value::as_sequence)
+        .map_or(0, Vec::len);
+    let known_model_ids: Vec<String> = provider
+        .as_mapping()
+        .and_then(|provider| provider.get(Value::String("models".to_owned())))
+        .and_then(Value::as_sequence)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|model| {
+                    model
+                        .as_mapping()
+                        .and_then(|model| model.get(Value::String("id".to_owned())))
+                        .and_then(Value::as_str)
+                })
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(blocked_model_id) = known_model_ids.iter().find(|model_id| {
+        !overview::is_editable_model_definition(original_tree, &provider_id, model_id, catalog)
+    }) {
+        return Err(AppError::new(
+            "provider-delete-unavailable",
+            format!(
+                "无法删除 Provider {}：Model definition {} 含有高级或不受支持配置。",
+                provider_id, blocked_model_id
+            ),
+            "请先在 Provider 详情中处理该 Model definition；OMP Switch 不会通过删除 Provider 绕过只读边界。",
+        ));
+    }
+
+    let skip_path = overview::provider_node_path(&provider_id);
+    let references = overview::scan_model_references(
+        Some(original_tree),
+        Some(&config.original_tree),
+        &provider_id,
+        None,
+        &known_model_ids,
+        Some(&skip_path),
+    );
+    if !references.other_paths.is_empty() {
+        return Err(AppError::new(
+            "provider-delete-unmanaged-reference",
+            format!(
+                "无法删除 Provider {}：非受管配置路径仍有引用：{}",
+                provider_id,
+                references.other_paths.join("、")
+            ),
+            "请先在 OMP 或外部编辑器中处理这些路径；OMP Switch 不会自动修改非受管配置。",
+        ));
+    }
+    if !references.role_paths.is_empty() {
+        return Err(AppError::new(
+            "provider-delete-role-reference",
+            format!(
+                "无法删除 Provider {}：受支持 Model role 仍有引用：{}",
+                provider_id,
+                references.role_paths.join("、")
+            ),
+            "请转入 Configuration transaction，同时更新 models.yml 和 config.yml；当前不会部分删除。",
+        ));
+    }
+    Ok(ValidatedProviderDelete {
+        provider_id,
+        model_count,
+        config_path: config.models_path.clone(),
+        expected_target: config.expected_target.clone(),
+        expected_config_hash: config.original_hash.clone(),
+    })
+}
+
+fn validate_delete_provider_id(value: &str) -> Result<String, AppError> {
+    if value.is_empty() || value.trim() != value {
+        return Err(AppError::new(
+            "provider-id-immutable",
+            "已有 Provider ID 是 Stable ID，不能修改。",
+            "请重新读取配置并使用当前 Provider ID。",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn provider_not_found(provider_id: &str) -> AppError {
+    AppError::new(
+        "provider-delete-not-found",
+        format!("要删除的 Provider {provider_id} 已不存在。"),
+        "请重新读取配置后选择当前存在的 Provider。",
+    )
 }
 
 fn validate_input(
@@ -934,6 +1175,16 @@ fn remap_edit_operation_error(error: AppError) -> AppError {
             unavailable: "provider-edit-unavailable",
             target_changed: "provider-edit-target-changed",
             failed: "provider-edit-failed",
+        },
+    )
+}
+fn remap_delete_operation_error(error: AppError) -> AppError {
+    models_write::remap_models_write_error(
+        error,
+        models_write::ModelsWriteErrorCodes {
+            unavailable: "provider-delete-unavailable",
+            target_changed: "provider-delete-target-changed",
+            failed: "provider-delete-failed",
         },
     )
 }

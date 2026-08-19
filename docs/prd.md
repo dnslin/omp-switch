@@ -475,7 +475,7 @@ type ProviderView = {
 - 高级字段值不返回前端。
 - 写入其他对象时原样保留。
 
-高级 Custom Provider 可以删除完整 Provider 节点；删除确认必须说明全部模型和未知字段都会被删除。Built-in Provider override 原样保留，不提供普通删除入口。
+高级、不支持和 Built-in Provider override 保持只读，不通过删除流程旁路；只有普通可编辑 Custom Provider 可以进入删除引用检查。
 
 ## 10. 模型页面与规则
 
@@ -671,22 +671,29 @@ auto
 
 执行前：
 
-1. 扫描 `modelRoles`。
-2. 遍历完整 `config.yml`，识别精确选择器、Thinking 后缀、`provider/*` 和选择器数组。
-3. `modelRoles` 简单引用可以在事务中清除。
-4. `modelRoles` 之外存在相关或疑似引用时阻止删除，并显示配置路径。
+1. 扫描两份完整配置树中的所有值，包括非字符串 YAML key 下的嵌套值；路径摘要对非字符串 key 做安全序列化并脱敏。
+2. 识别精确选择器、Thinking 后缀、`provider/*` 和选择器数组。
+3. 先按所属 Provider 的现存完整 Model ID 精确解析选择器；仅当完整 ID 不存在时才剥离受支持 Thinking 后缀。未知后缀若命中目标基础 ID，归入疑似非受管引用并阻止删除；现存完整 ID（例如 `second:ultra`）优先于后缀解释。
+4. 无引用时，复用单文件 Safe structured edit 删除 `models.yml` 中明确选中的节点。
+5. 只有受支持 `modelRoles` 引用时，不执行 models-only 部分删除；交给同时更新 `models.yml` 与 `config.yml` 的 Configuration transaction 流程，并提供“打开配置目录”入口。
+6. `modelRoles` 之外存在相关或疑似引用时阻止删除，并显示安全路径摘要；阻止状态说明不会写入配置或创建备份。
 
 ### 12.2 删除 Provider
 
 确认内容：
 
 - Provider ID。
-- 模型数量。
+- 包含的全部模型。
 - 所有 `modelRoles` 引用。
+- 是否存在其他路径引用。
 - 删除会移除 Provider 及全部模型。
 - 备份说明。
 
-执行规则与删除模型相同，并使用跨文件事务。
+执行规则与删除模型相同；Provider 必须先检查其全部模型选择器，不能通过删除 Provider 绕过引用完整性检查。无引用删除只修改 `models.yml`；支持角色引用时转入跨文件事务，其他路径引用阻止删除。
+Provider 整体删除还要求其每个 Model definition 都是可编辑、非高级对象；不能因 Provider 顶层字段普通而通过删除 Provider 绕过只读模型边界。
+
+实现状态（issue #13）：Rust application service 已实现完整树扫描、Provider 全模型聚合、无引用单文件安全删除、非受管路径阻止和受支持角色的事务入口错误。React 确认 Dialog 按 `01 Components / Dialog / Confirm` 显示影响清单，阻止状态禁用确认按钮。
+实现状态补充（issue #13）：完整 ID 消歧、未知后缀疑似引用阻止、非字符串 YAML key 值递归扫描与安全路径摘要、Provider 子模型只读复核均由 Rust application service 执行，失败时原文件保持不变。
 
 ### 12.3 不自动修改的引用
 

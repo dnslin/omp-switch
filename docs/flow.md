@@ -516,19 +516,19 @@ API Key
 - 新值以 `!` 开头时显示不支持错误。
 
 
-高级 Custom Provider 详情仍可提供“删除完整 Provider”，确认文案说明模型和未知字段会一起删除。OMP 内置 Provider/模型覆盖不显示普通删除入口。
+高级、不支持和 Built-in Provider override 保持只读，不显示普通删除入口；只有普通可编辑 Custom Provider 进入删除引用检查。
 
 ### 10.2 删除 Provider
 
 ```text
 删除 Provider？
 
-将删除 dnslin 和它下面的 4 个模型。
-以下角色会被清除：default、plan、advisor
+将删除 `dnslin` 和它下面的 4 个模型。
+受影响 Model role：default、plan、advisor
+其他引用：正在检查完整配置树…
 
-正在检查 config.yml 中的其他引用…
-
-此操作会创建备份。
+无引用时会创建备份并删除完整 Provider 节点；受支持角色引用需要同时更新 `models.yml` 和 `config.yml` 的 Configuration transaction，其他路径引用会阻止删除。
+如果 Provider 包含任一高级、不支持或只读 Model definition，即使 Provider 顶层看似普通，也阻止整节点删除并说明需要先处理该模型。
 
 [取消] [删除 Provider]
 ```
@@ -641,14 +641,15 @@ Max Tokens 不能大于 Context Window。
 ```text
 删除模型？
 
-将删除 dnslin/gpt-5.6-sol。
-以下角色会被清除：default、advisor
+将删除 `dnslin/gpt-5.6-sol`。
+受影响 Model role：default、advisor
+其他引用：无
 此操作会创建备份。
 
 [取消] [删除模型]
-```
 
-其他引用存在时阻止，行为与 Provider 删除一致。
+有角色或其他引用时确认按钮禁用；界面列出安全配置路径和下一步，并提供“打开配置目录”作为外部处理或 Configuration transaction 的入口。阻止状态明确说明当前不会写入配置，也不会创建备份。只有受支持角色引用时，提示转入 Configuration transaction，不执行 models-only 部分删除。
+未知 Thinking 后缀先按现存完整 Model ID 消歧；没有对应完整 ID 时按其他疑似引用阻止，不进入受支持 Model role 的事务入口。扫描也递归非字符串 YAML key 下的值，路径摘要安全序列化并脱敏。
 
 实现状态（issue #10）：Provider 详情模型表格在既定九列布局中显示可见状态标签、协议来源和引用数量；搜索、创建 Sheet、编辑、复制和删除确认共用同一表单组件体系。普通模型以右侧 Sheet 保存，缺失字段在修复时保持空值；高级、不支持、内置覆盖和其他只读模型不提供编辑、复制、删除或测试入口。
 
@@ -1207,26 +1208,27 @@ Provider 详情
 → 保存
 ```
 
-### 路径五：删除被角色引用的模型
+### 路径五：删除被引用的模型
 
 ```text
 模型菜单
 → 删除
-→ 显示角色影响
-→ 扫描其他引用
-→ 确认
-→ 跨文件事务
-→ 列表刷新
+→ 扫描完整 models.yml / config.yml
+→ 显示角色影响和其他引用
+→ 受支持角色引用：提示 Configuration transaction，阻止部分删除
 ```
 
 ### 路径六：其他引用阻止删除
 
 ```text
-删除模型
+删除模型或 Provider
 → 发现 retry.fallbackChains 引用
 → 阻止删除
 → 显示配置路径
+→ 用户先在 OMP 或外部编辑器处理
 ```
+
+实现状态（issue #13）：模型、Provider 和阻止状态均复用 `.pen` 的 `Dialog / Confirm` 尺寸、28px 内边距、20px 内容间距、24px 阴影和“取消 → 删除”按钮顺序；长引用清单在同一设计 token 下滚动并保持响应式。
 
 ### 路径七：配置冲突
 

@@ -3,30 +3,6 @@
 使用方式：完成一个工单并关闭后，执行 `/clear`，开启新会话，复制下一条已解除阻塞的提示词。每条提示词均以 GitHub 工单为实施范围；不得从本文件推断或缩减验收标准。
 ```
 
-## #12 — 手动测试四种 Supported protocol
-
-```text
-使用 /implement 完整实施 issue://12。先确认其全部 GitHub blockers 已关闭。
-
-读取 issue://1、issue://12、CONTEXT.md、docs/mvp.md、docs/prd.md、docs/flow.md、docs/agents/issue-tracker.md，以及 designs/omp-switch.pen。UI 使用 /ui-design-guided 与 /vercel-react-best-practices；网络和页面行为使用 /tdd；完成后运行 /code-review。
-
-按 Rust application-service seam 与 React page seam 做 red→green 纵向切片。Rust 每次从已保存配置构造四种 Supported protocol 的固定最小请求；全应用单并发、可取消、有超时，结果与错误分类完全脱敏。测试 UI 必须保持 Overview 节点 chFfk 和 Provider Detail 节点 vz6sg 的 1:1 布局，并复用 .pen 共享状态/Dialog 组件；运行真实 Tauri 状态截图对比。
-
-满足 issue://12 全部验收标准，使用本地 Mock HTTP 服务验证 URL、方法、body、认证、错误、取消和超时；运行类型检查、真实流程 smoke、最终完整测试和双轴 review；更新文档，提交并关闭 #12。
-```
-
-## #13 — 安全删除无跨文件引用的 Provider 和模型
-
-```text
-使用 /implement 完整实施 issue://13。先确认其全部 GitHub blockers 已关闭。
-
-读取 issue://1、issue://13、CONTEXT.md、docs/mvp.md、docs/prd.md、docs/flow.md、docs/adr/0001-preserve-unknown-configuration-by-path.md、docs/adr/0003-keep-provider-and-model-ids-stable.md、docs/agents/issue-tracker.md，以及 designs/omp-switch.pen。UI 使用 /ui-design-guided 与 /vercel-react-best-practices；测试使用 /tdd；完成后运行 /code-review。
-
-按两个既定 seam 做 red→green 纵向切片。删除前扫描受支持 Model role 与全部其他配置路径：无引用时执行单文件 Safe structured edit，非受管引用阻止删除，受支持角色引用明确移交跨文件事务流程。确认界面必须复用 .pen `Dialog / Confirm` 的尺寸、间距、阴影、按钮顺序和层级；分别截图验证模型删除、Provider 删除和阻止状态。
-
-满足 issue://13 全部验收标准，覆盖引用扫描边界与原文件安全；运行针对性测试、类型检查、真实流程 smoke、最终完整测试和双轴 review；更新文档，提交并关闭 #13。
-```
-
 ## #14 — 通过 Configuration transaction 删除受角色引用对象
 
 ```text

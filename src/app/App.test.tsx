@@ -44,6 +44,7 @@ const unavailableClient: TauriClient = {
   createModel: async () => ({ providerId: "dnslin", modelId: "new-model" }),
   editModel: async () => ({ providerId: "dnslin", modelId: "gpt-5.6-sol" }),
   deleteModel: async () => ({ providerId: "dnslin", modelId: "gpt-5.6-sol" }),
+  deleteProvider: async () => ({ providerId: "dnslin", modelCount: 1 }),
   saveModelRoles: async () => ({ changedRoleCount: 0 }),
   testModel: async () => ({ success: true, providerId: "dnslin", modelId: "gpt-5.6-sol", protocol: "openai-responses" as const, latencyMs: 12, status: 200, message: "模型连接成功" }),
   cancelModelTest: async () => true,
@@ -1604,9 +1605,9 @@ describe("React page seam", () => {
   it("keeps incomplete models repairable, locks read-only models, and confirms deletion", async () => {
     const user = userEvent.setup();
     const base = overviewDto();
-    const incomplete: OverviewModel = { ...base.models[0], id: "incomplete", name: null, contextWindow: null, maxTokens: null, input: [], complete: false, status: "incomplete", editable: true, referenceCount: 0, referencePaths: [], readOnlyReason: null };
-    const locked: OverviewModel = { ...base.models[0], id: "locked", name: "Locked", complete: false, status: "read-only", editable: false, referenceCount: 1, referencePaths: ["modelRoles[\"default\"]"], readOnlyReason: "Model definition 包含当前版本不支持的配置，只能查看。" };
-    const referenced = { ...base.models[0], referenceCount: 1, referencePaths: ["modelRoles[\"default\"]"] };
+    const incomplete: OverviewModel = { ...base.models[0], id: "incomplete", name: null, contextWindow: null, maxTokens: null, input: [], complete: false, status: "incomplete", editable: true, referenceCount: 0, referencePaths: [], roleReferencePaths: [], otherReferencePaths: [], readOnlyReason: null };
+    const locked: OverviewModel = { ...base.models[0], id: "locked", name: "Locked", complete: false, status: "read-only", editable: false, referenceCount: 1, referencePaths: ['config.yml:modelRoles["default"]'], roleReferencePaths: ['config.yml:modelRoles["default"]'], otherReferencePaths: [], readOnlyReason: "Model definition 包含当前版本不支持的配置，只能查看。" };
+    const referenced = { ...base.models[0], referenceCount: 1, referencePaths: ['config.yml:modelRoles["default"]'], roleReferencePaths: ['config.yml:modelRoles["default"]'], otherReferencePaths: [] };
     const overview = overviewDto({
       providers: [{ ...base.providers[0], modelCount: 3, models: [referenced, incomplete, locked] }],
       models: [referenced, incomplete, locked],
@@ -1614,6 +1615,7 @@ describe("React page seam", () => {
     });
     const createModel = vi.fn(async () => ({ providerId: "dnslin", modelId: "copied-model" }));
     const editModel = vi.fn(async () => ({ providerId: "dnslin", modelId: "incomplete" }));
+    const openTargetConfigurationDirectory = vi.fn(async () => undefined);
     const deleteModel = vi.fn(async () => {
       throw { code: "model-delete-referenced", message: "无法删除 Model：仍有配置引用。", action: "请先处理引用。" };
     });
@@ -1622,6 +1624,7 @@ describe("React page seam", () => {
       getOverviewLoad: async () => overviewLoad(overview, readyState),
       createModel,
       editModel,
+      openTargetConfigurationDirectory,
       deleteModel,
     });
 
@@ -1661,11 +1664,119 @@ describe("React page seam", () => {
     await user.click(screen.getByRole("button", { name: "Model 操作 gpt-5.6-sol" }));
     await user.click(screen.getByRole("menuitem", { name: "删除" }));
     const confirmation = await screen.findByRole("heading", { name: "删除模型？" });
-    expect(confirmation.closest('[role="dialog"]')).toHaveTextContent("此操作会创建备份");
-    expect(confirmation.closest('[role="dialog"]')).toHaveTextContent("modelRoles[\"default\"]");
-    await user.click(within(confirmation.closest('[role="dialog"]') as HTMLElement).getByRole("button", { name: "删除模型" }));
-    expect(await screen.findByText("无法删除 Model：仍有配置引用。")).toBeVisible();
-    expect(deleteModel).toHaveBeenCalledTimes(1);
+    const dialog = confirmation.closest('[role="dialog"]') as HTMLElement;
+    expect(dialog).toHaveTextContent("当前不会部分删除；需要 Configuration transaction 同时更新 models.yml 和 config.yml。");
+    expect(dialog).toHaveTextContent('config.yml:modelRoles["default"]');
+    expect(within(dialog).getByRole("button", { name: "删除模型" })).toBeDisabled();
+    expect(dialog).toHaveTextContent("不会写入配置，也不会创建备份。");
+    await user.click(within(dialog).getByRole("button", { name: "打开配置目录" }));
+    expect(openTargetConfigurationDirectory).toHaveBeenCalledWith("/usr/local/bin/omp");
+    expect(deleteModel).not.toHaveBeenCalled();
+  });
+  it("shows a complete model deletion impact and refreshes after a safe delete", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const second: OverviewModel = { ...base.models[0], id: "second", name: "Second", referenceCount: 0, referencePaths: [], roleReferencePaths: [], otherReferencePaths: [] };
+    const provider: OverviewProvider = { ...base.providers[0], modelCount: 2, models: [base.models[0], second] };
+    const initial = overviewDto({ providers: [provider], models: [base.models[0], second], counts: { providerCount: 1, modelCount: 2, roleCount: 0 }, roles: [] });
+    const remainingProvider: OverviewProvider = { ...base.providers[0], modelCount: 1, models: [base.models[0]] };
+    const after = overviewDto({ providers: [remainingProvider], models: [base.models[0]], counts: { providerCount: 1, modelCount: 1, roleCount: 0 }, roles: [] });
+    const getOverviewLoad = vi.fn().mockResolvedValueOnce(overviewLoad(initial, readyState)).mockResolvedValueOnce(overviewLoad(after, readyState));
+    const deleteModel = vi.fn().mockResolvedValue({ providerId: "dnslin", modelId: "second" });
+    renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad, deleteModel });
+
+    await screen.findByText("Second");
+    await user.click(screen.getByRole("button", { name: "Model 操作 second" }));
+    await user.click(screen.getByRole("menuitem", { name: "删除" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("dnslin/second");
+    expect(dialog).toHaveTextContent("受影响 Model role");
+    expect(dialog).toHaveTextContent("无");
+    expect(dialog).toHaveTextContent("此操作会创建备份");
+    await user.click(within(dialog).getByRole("button", { name: "删除模型" }));
+    await waitFor(() => expect(deleteModel).toHaveBeenCalledWith({ openedModelsHash: "models-hash", openedConfigHash: "config-hash", providerId: "dnslin", modelId: "second" }));
+    await waitFor(() => expect(screen.queryByText("Second")).not.toBeInTheDocument());
+  });
+
+  it("shows Provider deletion impact and blocks unmanaged references", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const referenced = { ...base.models[0], referenceCount: 1, referencePaths: ['config.yml:retry["fallback"]'], roleReferencePaths: [], otherReferencePaths: ['config.yml:retry["fallback"]'] };
+    const provider: OverviewProvider = { ...base.providers[0], modelCount: 1, roleReferencePaths: [], otherReferencePaths: ['config.yml:retry["fallback"]'], models: [referenced] };
+    const overview = overviewDto({ providers: [provider], models: [referenced], roles: [], counts: { providerCount: 1, modelCount: 1, roleCount: 0 } });
+    const openTargetConfigurationDirectory = vi.fn(async () => undefined);
+    const deleteProvider = vi.fn().mockResolvedValue({ providerId: "dnslin", modelCount: 1 });
+    renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview, readyState), openTargetConfigurationDirectory, deleteProvider });
+
+    await screen.findByText("Sol");
+    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("包含模型");
+    expect(dialog).toHaveTextContent("gpt-5.6-sol");
+    expect(dialog).toHaveTextContent("config.yml:retry[\"fallback\"]");
+    expect(dialog).toHaveTextContent("不会修改");
+    expect(dialog).toHaveTextContent("不会写入配置，也不会创建备份。");
+    await user.click(within(dialog).getByRole("button", { name: "打开配置目录" }));
+    expect(openTargetConfigurationDirectory).toHaveBeenCalledWith("/usr/local/bin/omp");
+    expect(within(dialog).getByRole("button", { name: "删除 Provider" })).toBeDisabled();
+    expect(deleteProvider).not.toHaveBeenCalled();
+  });
+  it("blocks Provider deletion when an included Model is read-only", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const readOnlyModel: OverviewModel = {
+      ...base.models[0],
+      id: "advanced-model",
+      name: "Advanced model",
+      editable: false,
+      status: "read-only",
+      readOnlyReason: "Model definition 包含当前版本不支持的配置，只能查看。",
+      referenceCount: 0,
+      referencePaths: [],
+      roleReferencePaths: [],
+      otherReferencePaths: [],
+    };
+    const provider: OverviewProvider = {
+      ...base.providers[0],
+      modelCount: 1,
+      models: [readOnlyModel],
+      roleReferencePaths: [],
+      otherReferencePaths: [],
+    };
+    const overview = overviewDto({ providers: [provider], models: [readOnlyModel], roles: [], counts: { providerCount: 1, modelCount: 1, roleCount: 0 } });
+    const deleteProvider = vi.fn().mockResolvedValue({ providerId: "dnslin", modelCount: 1 });
+    renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview, readyState), deleteProvider });
+
+    await screen.findByText("Advanced model");
+    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Provider 包含只读 Model definition advanced-model");
+    expect(within(dialog).getByRole("button", { name: "删除 Provider" })).toBeDisabled();
+    expect(deleteProvider).not.toHaveBeenCalled();
+  });
+
+  it("deletes an unreferenced Provider and returns to the Provider list", async () => {
+    const user = userEvent.setup();
+    const base = overviewDto();
+    const second = { ...base.models[0], id: "second", name: "Second", referenceCount: 0, referencePaths: [], roleReferencePaths: [], otherReferencePaths: [] };
+    const provider: OverviewProvider = { ...base.providers[0], modelCount: 2, roleReferencePaths: [], otherReferencePaths: [], models: [base.models[0], second] };
+    const initial = overviewDto({ providers: [provider], models: [base.models[0], second], counts: { providerCount: 1, modelCount: 2, roleCount: 0 }, roles: [] });
+    const after = overviewDto({ state: "empty", providers: [], models: [], counts: { providerCount: 0, modelCount: 0, roleCount: 0 }, roles: [] });
+    const getOverviewLoad = vi.fn().mockResolvedValueOnce(overviewLoad(initial, readyState)).mockResolvedValue(overviewLoad(after, readyState));
+    const deleteProvider = vi.fn().mockResolvedValue({ providerId: "dnslin", modelCount: 2 });
+    renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad, deleteProvider });
+
+    await screen.findByText("Sol");
+    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("dnslin");
+    expect(dialog).toHaveTextContent("gpt-5.6-sol");
+    expect(dialog).toHaveTextContent("second");
+    expect(dialog).toHaveTextContent("此操作会创建备份");
+    await user.click(within(dialog).getByRole("button", { name: "删除 Provider" }));
+
+    await waitFor(() => expect(deleteProvider).toHaveBeenCalledWith({ openedModelsHash: "models-hash", openedConfigHash: "config-hash", providerId: "dnslin" }));
+    expect(await screen.findByText("尚未配置 Provider。")).toBeVisible();
   });
 
   it("renders the ten built-in roles with the approved page skeleton", async () => {
@@ -2208,6 +2319,8 @@ function overviewDto(overrides: Partial<OverviewDto> = {}): OverviewDto {
     editable: true,
     referenceCount: 0,
     referencePaths: [],
+    roleReferencePaths: [],
+    otherReferencePaths: [],
     readOnlyReason: null,
   };
   return {
@@ -2219,7 +2332,7 @@ function overviewDto(overrides: Partial<OverviewDto> = {}): OverviewDto {
       config: { canonicalPath: "/Users/username/.omp/agent/config.yml", resolvedPath: "/Users/username/.omp/agent/config.yml", status: "normal", contentHash: "config-hash" },
     },
     counts: { providerCount: 1, modelCount: 1, roleCount: 2 },
-    providers: [{ id: "dnslin", name: "Local", baseUrl: "https://example.com", defaultApi: "openai-responses", authMode: "api-key", hasApiKey: true, modelCount: 1, classification: "custom", editable: true, readOnlyReason: null, models: [model] }],
+    providers: [{ id: "dnslin", name: "Local", baseUrl: "https://example.com", defaultApi: "openai-responses", authMode: "api-key", hasApiKey: true, modelCount: 1, classification: "custom", editable: true, readOnlyReason: null, roleReferencePaths: [], otherReferencePaths: [], models: [model] }],
     models: [model],
     roles: [{ id: "default", status: "configured", selector: "dnslin/gpt-5.6-sol:max", providerId: "dnslin", modelId: "gpt-5.6-sol", thinkingLevel: "max" }, { id: "task", status: "configured", selector: "dnslin/gpt-5.6-sol", providerId: "dnslin", modelId: "gpt-5.6-sol", thinkingLevel: null }],
     rolesEditable: true,

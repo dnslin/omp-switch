@@ -14,10 +14,10 @@ mod target_configuration;
 
 use application::{
     AppService, accept_model_test_cost_notice, cancel_model_test, confirm_selected_omp,
-    create_custom_provider, create_model, delete_model, detect_omp, edit_custom_provider,
-    edit_model, get_model_test_state, get_overview_load, get_startup_state, get_ui_settings,
-    initialize_target_configuration, open_target_configuration_directory, save_model_roles,
-    save_ui_settings, test_model, validate_selected_omp,
+    create_custom_provider, create_model, delete_model, delete_provider, detect_omp,
+    edit_custom_provider, edit_model, get_model_test_state, get_overview_load, get_startup_state,
+    get_ui_settings, initialize_target_configuration, open_target_configuration_directory,
+    save_model_roles, save_ui_settings, test_model, validate_selected_omp,
 };
 
 use tauri::Manager;
@@ -57,6 +57,7 @@ pub fn run() {
             accept_model_test_cost_notice,
             create_custom_provider,
             edit_custom_provider,
+            delete_provider,
             create_model,
             edit_model,
             delete_model,

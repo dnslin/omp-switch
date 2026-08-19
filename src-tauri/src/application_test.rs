@@ -22,10 +22,10 @@ use std::ffi::CString;
 use crate::{
     application::{
         AppService, AppSettings, CreateCustomProviderInput, CreateModelFields, CreateModelInput,
-        CreateProviderFields, DeleteModelInput, DirectApiKeyIntent, EditCustomProviderInput,
-        EditModelInput, ModelDefinitionFields, ModelEditFields, ModelsWriteFailurePoint,
-        OverviewLoadDto, ProviderAuthMode, StartupState, SupportedApi, SupportedInput, Theme,
-        UiSettingsUpdate,
+        CreateProviderFields, DeleteModelInput, DeleteProviderInput, DirectApiKeyIntent,
+        EditCustomProviderInput, EditModelInput, ModelDefinitionFields, ModelEditFields,
+        ModelsWriteFailurePoint, OverviewLoadDto, ProviderAuthMode, StartupState, SupportedApi,
+        SupportedInput, Theme, UiSettingsUpdate,
     },
     omp_environment::{CommandOutput, CommandRunError, OmpEnvironment, SystemOmpEnvironment},
     overview::{ModelTestConfiguration, OverviewAuthMode},
@@ -4073,6 +4073,89 @@ providers:
             .len(),
         1
     );
+    let models_before_unknown_suffix = fs::read(target.join("models.yml")).unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  ambiguous: EDITABLE/FIRST:ultra\n",
+    )
+    .unwrap();
+    let unknown_suffix = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash: opened_models_hash(&service),
+            opened_config_hash: service
+                .get_overview_load()
+                .overview
+                .unwrap()
+                .files
+                .config
+                .content_hash
+                .unwrap(),
+            provider_id: "editable".to_owned(),
+            model_id: "first".to_owned(),
+        })
+        .unwrap_err();
+    assert_eq!(unknown_suffix.code, "model-delete-unmanaged-reference");
+    assert!(
+        unknown_suffix
+            .message
+            .contains("config.yml:modelRoles[\"ambiguous\"]")
+    );
+    assert_eq!(
+        fs::read(target.join("models.yml")).unwrap(),
+        models_before_unknown_suffix
+    );
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  candidates: editable/first,editable/second\n",
+    )
+    .unwrap();
+    let comma_blocked = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash: opened_models_hash(&service),
+            opened_config_hash: service
+                .get_overview_load()
+                .overview
+                .unwrap()
+                .files
+                .config
+                .content_hash
+                .unwrap(),
+            provider_id: "editable".to_owned(),
+            model_id: "first".to_owned(),
+        })
+        .unwrap_err();
+    assert_eq!(comma_blocked.code, "model-delete-unmanaged-reference");
+    assert!(
+        comma_blocked
+            .message
+            .contains("config.yml:modelRoles[\"candidates\"]")
+    );
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  tagged: !selector editable/first\n",
+    )
+    .unwrap();
+    let tagged_blocked = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash: opened_models_hash(&service),
+            opened_config_hash: service
+                .get_overview_load()
+                .overview
+                .unwrap()
+                .files
+                .config
+                .content_hash
+                .unwrap(),
+            provider_id: "editable".to_owned(),
+            model_id: "first".to_owned(),
+        })
+        .unwrap_err();
+    assert_eq!(tagged_blocked.code, "model-delete-unmanaged-reference");
+    assert!(
+        tagged_blocked
+            .message
+            .contains("config.yml:modelRoles[\"tagged\"]")
+    );
 
     fs::write(target.join("config.yml"), "modelRoles:\n  default: Editable/FIRST:high\notherSettings:\n  candidates:\n    - editable/first\n    - EDITABLE/*\n").unwrap();
     let blocked = service
@@ -4090,8 +4173,12 @@ providers:
             model_id: "first".to_owned(),
         })
         .unwrap_err();
-    assert_eq!(blocked.code, "model-delete-referenced");
-    assert!(blocked.message.contains("modelRoles[\"default\"]"));
+    assert_eq!(blocked.code, "model-delete-unmanaged-reference");
+    assert!(
+        blocked
+            .message
+            .contains("config.yml:otherSettings[\"candidates\"][0]")
+    );
 
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
     let last = service
@@ -4111,6 +4198,53 @@ providers:
         .unwrap_err();
     assert_eq!(last.code, "model-last-definition");
 }
+#[test]
+fn model_delete_treats_provider_wildcard_before_literal_model_id() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_models = r#"providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: first
+        name: First
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+      - id: "*"
+        name: Wildcard ID
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#;
+    fs::write(target.join("models.yml"), original_models).unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles: {}\nretry:\n  fallback: editable/*\n",
+    )
+    .unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+
+    let error = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash: overview.files.models.content_hash.unwrap(),
+            opened_config_hash: overview.files.config.content_hash.unwrap(),
+            provider_id: "editable".to_owned(),
+            model_id: "first".to_owned(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.code, "model-delete-unmanaged-reference");
+    assert!(error.message.contains("config.yml:retry[\"fallback\"]"));
+    assert_eq!(
+        fs::read(target.join("models.yml")).unwrap(),
+        original_models.as_bytes()
+    );
+}
+
 #[test]
 fn model_delete_rechecks_config_hash_before_atomic_replacement() {
     let app_data = tempdir().unwrap();
@@ -4141,6 +4275,593 @@ fn model_delete_rechecks_config_hash_before_atomic_replacement() {
         String::from_utf8(fs::read(target.join("config.yml")).unwrap())
             .unwrap()
             .contains("editable/second")
+    );
+}
+#[test]
+fn deletion_reference_scan_classifies_roles_and_other_paths_across_both_trees() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"unrecognized:
+  selector: editable/second
+  unrelated: https://editable/second
+providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: first
+        name: First
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+      - id: second
+        name: Second
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        r#"modelRoles:
+  default: EDITABLE/SECOND:high
+  ambiguous: editable/second:ultra
+  tagged: !selector editable/second
+otherSettings:
+  fallback: editable/second
+  candidates:
+    - editable/*
+  comma: editable/first,editable/second
+  unrelated: editable/not-the-model
+"#,
+    )
+    .unwrap();
+
+    let dto = serde_json::to_value(
+        service_for_target(&target)
+            .get_overview_load()
+            .overview
+            .unwrap(),
+    )
+    .unwrap();
+    let second = dto["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "second")
+        .unwrap();
+    assert_eq!(second["referenceCount"], 7);
+    assert_eq!(
+        second["roleReferencePaths"],
+        serde_json::json!(["config.yml:modelRoles[\"default\"]"])
+    );
+    assert_eq!(second["otherReferencePaths"].as_array().unwrap().len(), 6);
+
+    assert!(
+        second["otherReferencePaths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "config.yml:modelRoles[\"ambiguous\"]")
+    );
+    assert!(
+        second["otherReferencePaths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "config.yml:otherSettings[\"comma\"]")
+    );
+    assert!(
+        second["otherReferencePaths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "config.yml:modelRoles[\"tagged\"]")
+    );
+    assert!(
+        second["otherReferencePaths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "models.yml:unrecognized[\"selector\"]")
+    );
+    assert!(
+        !second["referencePaths"]
+            .to_string()
+            .contains("https://editable/second")
+    );
+    assert!(
+        !second["referencePaths"]
+            .to_string()
+            .contains("not-the-model")
+    );
+    let provider = dto["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["id"] == "editable")
+        .unwrap();
+    assert_eq!(
+        provider["roleReferencePaths"],
+        serde_json::json!(["config.yml:modelRoles[\"default\"]"])
+    );
+    assert_eq!(provider["otherReferencePaths"].as_array().unwrap().len(), 7);
+}
+
+#[test]
+fn deletion_reference_scan_treats_invalid_role_keys_as_other_paths() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: second
+        name: Second
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  42: editable/second\n",
+    )
+    .unwrap();
+
+    let dto = serde_json::to_value(
+        service_for_target(&target)
+            .get_overview_load()
+            .overview
+            .unwrap(),
+    )
+    .unwrap();
+    let second = dto["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "second")
+        .unwrap();
+
+    assert_eq!(second["roleReferencePaths"], serde_json::json!([]));
+    assert_eq!(
+        second["otherReferencePaths"],
+        serde_json::json!(["config.yml:modelRoles[\"42\"]"])
+    );
+}
+
+#[test]
+fn model_delete_blocks_reference_under_non_string_yaml_key() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_models = r#"providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: first
+        name: First
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+      - id: second
+        name: Second
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#;
+    fs::write(target.join("models.yml"), original_models).unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles: {}\nfallbacks:\n  42: editable/second\n",
+    )
+    .unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+
+    let error = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash: overview.files.models.content_hash.unwrap(),
+            opened_config_hash: overview.files.config.content_hash.unwrap(),
+            provider_id: "editable".to_owned(),
+            model_id: "second".to_owned(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.code, "model-delete-unmanaged-reference");
+    assert!(error.message.contains("config.yml:fallbacks[\"42\"]"));
+    assert_eq!(
+        fs::read(target.join("models.yml")).unwrap(),
+        original_models.as_bytes()
+    );
+}
+
+#[test]
+fn provider_delete_blocks_reference_under_non_string_yaml_key() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_models = r#"fallbacks:
+  42: editable/first
+providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: first
+        name: First
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#;
+    fs::write(target.join("models.yml"), original_models).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+
+    let error = service
+        .delete_provider(DeleteProviderInput {
+            opened_models_hash: overview.files.models.content_hash.unwrap(),
+            opened_config_hash: overview.files.config.content_hash.unwrap(),
+            provider_id: "editable".to_owned(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.code, "provider-delete-unmanaged-reference");
+    assert!(error.message.contains("models.yml:fallbacks[\"42\"]"));
+    assert_eq!(
+        fs::read(target.join("models.yml")).unwrap(),
+        original_models.as_bytes()
+    );
+}
+
+#[test]
+fn deletion_reference_scan_prefers_existing_full_model_id() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        r#"providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: first
+        name: First
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+      - id: second
+        name: Second
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+      - id: "second:ultra"
+        name: Full ID
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#,
+    )
+    .unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  exact: editable/second:ultra\n",
+    )
+    .unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let dto = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    let second = dto["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "second")
+        .unwrap();
+    assert_eq!(second["referenceCount"], 0);
+    let full_id = dto["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "second:ultra")
+        .unwrap();
+    assert_eq!(
+        full_id["roleReferencePaths"],
+        serde_json::json!(["config.yml:modelRoles[\"exact\"]"])
+    );
+
+    let overview = service.get_overview_load().overview.unwrap();
+    service
+        .delete_model(DeleteModelInput {
+            opened_models_hash: overview.files.models.content_hash.unwrap(),
+            opened_config_hash: overview.files.config.content_hash.unwrap(),
+            provider_id: "editable".to_owned(),
+            model_id: "second".to_owned(),
+        })
+        .unwrap();
+}
+
+#[test]
+fn model_delete_hands_supported_role_references_to_configuration_transaction() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_models = r#"providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: first
+        name: First
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+      - id: second
+        name: Second
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#;
+    fs::write(target.join("models.yml"), original_models).unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: editable/second\n",
+    )
+    .unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+
+    let error = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash: overview.files.models.content_hash.unwrap(),
+            opened_config_hash: overview.files.config.content_hash.unwrap(),
+            provider_id: "editable".to_owned(),
+            model_id: "second".to_owned(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.code, "model-delete-role-reference");
+    assert!(error.message.contains("config.yml:modelRoles[\"default\"]"));
+    assert!(error.action.contains("Configuration transaction"));
+    assert_eq!(
+        fs::read(target.join("models.yml")).unwrap(),
+        original_models.as_bytes()
+    );
+}
+
+#[test]
+fn provider_delete_removes_only_the_provider_node_when_reference_free() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_models = r#"unrecognizedRoot:
+  keep: value
+providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: first
+        name: First
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+      - id: second
+        name: Second
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+  sibling:
+    baseUrl: https://sibling.example/v1
+    api: openai-responses
+    models:
+      - id: sibling
+        name: Sibling
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#;
+    fs::write(target.join("models.yml"), original_models).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+
+    let result = service
+        .delete_provider(DeleteProviderInput {
+            opened_models_hash: overview.files.models.content_hash.unwrap(),
+            opened_config_hash: overview.files.config.content_hash.unwrap(),
+            provider_id: "editable".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(result.provider_id, "editable");
+    let after: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(target.join("models.yml")).unwrap()).unwrap();
+    assert_eq!(after["unrecognizedRoot"]["keep"], "value");
+    assert!(after["providers"]["editable"].is_null());
+    assert_eq!(after["providers"]["sibling"]["models"][0]["id"], "sibling");
+    assert_eq!(
+        fs::read_to_string(target.join("config.yml")).unwrap(),
+        "modelRoles: {}\n"
+    );
+}
+
+#[test]
+fn provider_delete_blocks_model_reference_in_other_configuration_path() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_models = r#"providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: first
+        name: First
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#;
+    fs::write(target.join("models.yml"), original_models).unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles: {}\nretry:\n  fallback: editable/*\n",
+    )
+    .unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+
+    let error = service
+        .delete_provider(DeleteProviderInput {
+            opened_models_hash: overview.files.models.content_hash.unwrap(),
+            opened_config_hash: overview.files.config.content_hash.unwrap(),
+            provider_id: "editable".to_owned(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.code, "provider-delete-unmanaged-reference");
+    assert!(error.message.contains("config.yml:retry[\"fallback\"]"));
+    assert_eq!(
+        fs::read(target.join("models.yml")).unwrap(),
+        original_models.as_bytes()
+    );
+    assert!(error.action.contains("非受管配置"));
+}
+#[test]
+fn provider_delete_hands_supported_role_references_to_configuration_transaction() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_models = r#"providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: first
+        name: First
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+      - id: second
+        name: Second
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#;
+    fs::write(target.join("models.yml"), original_models).unwrap();
+    fs::write(
+        target.join("config.yml"),
+        "modelRoles:\n  default: editable/first\n",
+    )
+    .unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+
+    let error = service
+        .delete_provider(DeleteProviderInput {
+            opened_models_hash: overview.files.models.content_hash.unwrap(),
+            opened_config_hash: overview.files.config.content_hash.unwrap(),
+            provider_id: "editable".to_owned(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.code, "provider-delete-role-reference");
+    assert!(error.message.contains("config.yml:modelRoles[\"default\"]"));
+    assert!(error.action.contains("Configuration transaction"));
+    assert_eq!(
+        fs::read(target.join("models.yml")).unwrap(),
+        original_models.as_bytes()
+    );
+}
+#[test]
+fn provider_delete_rejects_provider_with_read_only_model_without_bypass() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_models = r#"providers:
+  editable:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    models:
+      - id: advanced-model
+        name: Advanced model
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+        baseUrl: https://model.example/v1
+      - id: ordinary
+        name: Ordinary
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#;
+    fs::write(target.join("models.yml"), original_models).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+
+    let error = service
+        .delete_provider(DeleteProviderInput {
+            opened_models_hash: overview.files.models.content_hash.unwrap(),
+            opened_config_hash: overview.files.config.content_hash.unwrap(),
+            provider_id: "editable".to_owned(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.code, "provider-delete-unavailable");
+    assert!(error.message.contains("advanced-model"));
+    assert!(error.action.contains("绕过只读边界"));
+    assert_eq!(
+        fs::read(target.join("models.yml")).unwrap(),
+        original_models.as_bytes()
+    );
+}
+
+#[test]
+fn provider_delete_rejects_advanced_provider_without_bypass() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original = r#"providers:
+  advanced:
+    baseUrl: https://example.com/v1
+    api: openai-responses
+    headers:
+      x-test: value
+    models:
+      - id: first
+        name: First
+        input: [text]
+        contextWindow: 100000
+        maxTokens: 1000
+"#;
+    fs::write(target.join("models.yml"), original).unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = provider_mutation_service(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+
+    let error = service
+        .delete_provider(DeleteProviderInput {
+            opened_models_hash: overview.files.models.content_hash.unwrap(),
+            opened_config_hash: overview.files.config.content_hash.unwrap(),
+            provider_id: "advanced".to_owned(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.code, "provider-delete-unavailable");
+    assert_eq!(
+        fs::read(target.join("models.yml")).unwrap(),
+        original.as_bytes()
     );
 }
 #[test]

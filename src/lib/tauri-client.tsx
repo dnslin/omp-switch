@@ -116,6 +116,13 @@ export type DeleteModelInput = {
   providerId: string;
   modelId: string;
 };
+export type DeleteProviderInput = {
+  openedModelsHash: string;
+  openedConfigHash: string;
+  providerId: string;
+};
+
+export type DeleteProviderResult = { providerId: string; modelCount: number };
 
 export type ModelMutationResult = { providerId: string; modelId: string };
 
@@ -160,6 +167,8 @@ export type OverviewModel = {
   editable: boolean;
   referenceCount: number;
   referencePaths: string[];
+  roleReferencePaths: string[];
+  otherReferencePaths: string[];
   readOnlyReason: string | null;
 };
 export type OverviewAuthMode = "api-key" | "none" | "unsupported";
@@ -184,6 +193,8 @@ export type OverviewProvider = {
   classification: OverviewProviderClassification;
   editable: boolean;
   readOnlyReason: string | null;
+  roleReferencePaths: string[];
+  otherReferencePaths: string[];
   models: OverviewModel[];
 };
 export type OverviewRole = { id: string; status: OverviewRoleStatus; selector: string | null; providerId: string | null; modelId: string | null; thinkingLevel: SupportedThinkingLevel | null };
@@ -275,6 +286,7 @@ export interface TauriClient {
   createModel(input: CreateModelInput): Promise<ModelMutationResult>;
   editModel(input: EditModelInput): Promise<ModelMutationResult>;
   deleteModel(input: DeleteModelInput): Promise<ModelMutationResult>;
+  deleteProvider(input: DeleteProviderInput): Promise<DeleteProviderResult>;
   saveModelRoles(input: SaveModelRolesInput): Promise<SaveModelRolesResult>;
   testModel(input: ModelTestInput): Promise<ModelTestResult>;
   cancelModelTest(): Promise<boolean>;
@@ -297,6 +309,7 @@ export const tauriClient: TauriClient = {
   createModel: (input) => invoke<ModelMutationResult>("create_model", { input }),
   editModel: (input) => invoke<ModelMutationResult>("edit_model", { input }),
   deleteModel: (input) => invoke<ModelMutationResult>("delete_model", { input }),
+  deleteProvider: (input) => invoke<DeleteProviderResult>("delete_provider", { input }),
   saveModelRoles: (input) => invoke<SaveModelRolesResult>("save_model_roles", { input }),
   testModel: (input) => invoke<ModelTestResult>("test_model", { input }),
   cancelModelTest: () => invoke<boolean>("cancel_model_test"),
