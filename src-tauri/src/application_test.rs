@@ -4753,6 +4753,325 @@ fn configuration_transaction_failure_points_commit_or_restore_as_a_unit() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn configuration_transaction_recovers_file_symlink_after_first_replacement() {
+    use std::os::unix::fs::symlink;
+
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let real_models = target.join("real-models.yml");
+    let models_link = target.join("models.yml");
+    let original_models = b"providers:\n  editable:\n    baseUrl: https://example.com/v1\n    api: openai-responses\n    models:\n      - id: first\n        name: First\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n      - id: second\n        name: Second\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n";
+    let original_config = b"modelRoles:\n  default: editable/second\n";
+    fs::write(&real_models, original_models).unwrap();
+    symlink(&real_models, &models_link).unwrap();
+    fs::write(target.join("config.yml"), original_config).unwrap();
+
+    let service = service_for_target_with_app_data(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+    let opened_models_hash = overview.files.models.content_hash.clone().unwrap();
+    let opened_config_hash = overview.files.config.content_hash.clone().unwrap();
+    service.set_configuration_transaction_failure_for_test(
+        ConfigurationTransactionFailurePoint::AfterFirstReplacement,
+    );
+
+    let error = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash,
+            opened_config_hash,
+            provider_id: "editable".to_owned(),
+            model_id: "second".to_owned(),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, "configuration-transaction-interrupted");
+
+    let StartupState::OmpReady {
+        target_configuration,
+        ..
+    } = service.detect_omp()
+    else {
+        panic!("file symlink transaction recovery did not return OMP ready state");
+    };
+    assert!(target_configuration.writable);
+    assert!(
+        target_configuration
+            .recovery_notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("整体恢复"))
+    );
+    assert_eq!(fs::read(&real_models).unwrap(), original_models);
+    assert_eq!(
+        fs::read(target.join("config.yml")).unwrap(),
+        original_config
+    );
+    assert!(
+        fs::symlink_metadata(&models_link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+#[cfg(unix)]
+#[test]
+fn configuration_transaction_recovers_external_file_symlink_after_first_replacement() {
+    use std::os::unix::fs::symlink;
+
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    let external_models = app_data.path().join("external-models.yml");
+    let models_link = target.join("models.yml");
+    fs::create_dir_all(&target).unwrap();
+    let original_models = b"providers:\n  editable:\n    baseUrl: https://example.com/v1\n    api: openai-responses\n    models:\n      - id: first\n        name: First\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n      - id: second\n        name: Second\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n";
+    let original_config = b"modelRoles:\n  default: editable/second\n";
+    fs::write(&external_models, original_models).unwrap();
+    symlink(&external_models, &models_link).unwrap();
+    fs::write(target.join("config.yml"), original_config).unwrap();
+
+    let service = service_for_target_with_app_data(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+    let opened_models_hash = overview.files.models.content_hash.clone().unwrap();
+    let opened_config_hash = overview.files.config.content_hash.clone().unwrap();
+    service.set_configuration_transaction_failure_for_test(
+        ConfigurationTransactionFailurePoint::AfterFirstReplacement,
+    );
+
+    let error = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash,
+            opened_config_hash,
+            provider_id: "editable".to_owned(),
+            model_id: "second".to_owned(),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, "configuration-transaction-interrupted");
+
+    let StartupState::OmpReady {
+        target_configuration,
+        ..
+    } = service.detect_omp()
+    else {
+        panic!("external file symlink transaction recovery did not return OMP ready state");
+    };
+    assert!(target_configuration.writable);
+    assert!(
+        target_configuration
+            .recovery_notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("整体恢复"))
+    );
+    assert_eq!(fs::read(&external_models).unwrap(), original_models);
+    assert_eq!(
+        fs::read(target.join("config.yml")).unwrap(),
+        original_config
+    );
+    assert!(
+        fs::symlink_metadata(&models_link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let fingerprint = crate::models_write::target_fingerprint(&target.canonicalize().unwrap());
+    assert!(
+        app_data
+            .path()
+            .join("target-configuration-backups")
+            .join(fingerprint)
+            .join("models")
+            .is_dir()
+    );
+    assert!(
+        !app_data
+            .path()
+            .join("target-configuration-backups")
+            .join(crate::models_write::target_fingerprint(
+                &target.canonicalize().unwrap()
+            ))
+            .join("configuration")
+            .exists()
+    );
+}
+#[cfg(unix)]
+#[test]
+fn configuration_transaction_recovers_original_target_after_logical_target_retarget() {
+    use std::os::unix::fs::symlink;
+
+    let app_data = tempdir().unwrap();
+    let real_a = app_data.path().join("real-a");
+    let real_b = app_data.path().join("real-b");
+    let logical_target = app_data.path().join("agent");
+    fs::create_dir_all(&real_a).unwrap();
+    fs::create_dir_all(&real_b).unwrap();
+    symlink(&real_a, &logical_target).unwrap();
+    let original_models = b"providers:\n  editable:\n    baseUrl: https://example.com/v1\n    api: openai-responses\n    models:\n      - id: first\n        name: First\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n      - id: second\n        name: Second\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n";
+    let original_config = b"modelRoles:\n  default: editable/second\n";
+    fs::write(real_a.join("models.yml"), original_models).unwrap();
+    fs::write(real_a.join("config.yml"), original_config).unwrap();
+    fs::write(real_b.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(real_b.join("config.yml"), "modelRoles: {}\n").unwrap();
+
+    let service = service_for_target_with_app_data(&logical_target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+    let opened_models_hash = overview.files.models.content_hash.clone().unwrap();
+    let opened_config_hash = overview.files.config.content_hash.clone().unwrap();
+    service.set_configuration_transaction_failure_for_test(
+        ConfigurationTransactionFailurePoint::AfterFirstReplacement,
+    );
+
+    let error = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash,
+            opened_config_hash,
+            provider_id: "editable".to_owned(),
+            model_id: "second".to_owned(),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, "configuration-transaction-interrupted");
+
+    fs::remove_file(&logical_target).unwrap();
+    symlink(&real_b, &logical_target).unwrap();
+
+    let StartupState::OmpReady {
+        target_configuration,
+        ..
+    } = service.detect_omp()
+    else {
+        panic!("logical Target retarget recovery did not return OMP ready state");
+    };
+    assert!(target_configuration.writable);
+    assert!(
+        target_configuration
+            .recovery_notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("整体恢复"))
+    );
+    assert_eq!(
+        fs::read(real_a.join("models.yml")).unwrap(),
+        original_models
+    );
+    assert_eq!(
+        fs::read(real_a.join("config.yml")).unwrap(),
+        original_config
+    );
+    assert_eq!(
+        fs::read(real_b.join("models.yml")).unwrap(),
+        b"providers: {}\n"
+    );
+    assert_eq!(
+        fs::read(real_b.join("config.yml")).unwrap(),
+        b"modelRoles: {}\n"
+    );
+}
+#[cfg(unix)]
+#[test]
+fn configuration_transaction_rejects_cached_target_after_logical_target_retarget() {
+    use std::os::unix::fs::symlink;
+
+    let app_data = tempdir().unwrap();
+    let real_a = app_data.path().join("real-a");
+    let real_b = app_data.path().join("real-b");
+    let logical_target = app_data.path().join("agent");
+    fs::create_dir_all(&real_a).unwrap();
+    fs::create_dir_all(&real_b).unwrap();
+    symlink(&real_a, &logical_target).unwrap();
+    let original_models = b"providers:\n  editable:\n    baseUrl: https://example.com/v1\n    api: openai-responses\n    models:\n      - id: first\n        name: First\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n      - id: second\n        name: Second\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n";
+    let original_config = b"modelRoles:\n  default: editable/second\n";
+    fs::write(real_a.join("models.yml"), original_models).unwrap();
+    fs::write(real_a.join("config.yml"), original_config).unwrap();
+    fs::write(real_b.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(real_b.join("config.yml"), "modelRoles: {}\n").unwrap();
+
+    let service = service_for_target_with_app_data(&logical_target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+    let opened_models_hash = overview.files.models.content_hash.clone().unwrap();
+    let opened_config_hash = overview.files.config.content_hash.clone().unwrap();
+    let cached_target = discover_target_configuration(&logical_target).unwrap();
+    let catalog = crate::bundled_catalog::for_version("17.2.15")
+        .unwrap()
+        .unwrap();
+    fs::remove_file(&logical_target).unwrap();
+    symlink(&real_b, &logical_target).unwrap();
+
+    let error = crate::model_mutation::delete_model(
+        &cached_target,
+        &app_data.path().join("target-configuration-backups"),
+        catalog,
+        &DeleteModelInput {
+            opened_models_hash,
+            opened_config_hash,
+            provider_id: "editable".to_owned(),
+            model_id: "second".to_owned(),
+        },
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "configuration-transaction-target-changed");
+    assert_eq!(
+        fs::read(real_a.join("models.yml")).unwrap(),
+        original_models
+    );
+    assert_eq!(
+        fs::read(real_a.join("config.yml")).unwrap(),
+        original_config
+    );
+    assert_eq!(
+        fs::read(real_b.join("models.yml")).unwrap(),
+        b"providers: {}\n"
+    );
+    assert_eq!(
+        fs::read(real_b.join("config.yml")).unwrap(),
+        b"modelRoles: {}\n"
+    );
+}
+#[test]
+fn corrupted_logical_target_manifest_is_not_silently_skipped() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_models = b"providers: {}\n";
+    let original_config = b"modelRoles: {}\n";
+    fs::write(target.join("models.yml"), original_models).unwrap();
+    fs::write(target.join("config.yml"), original_config).unwrap();
+    let logical_fingerprint = crate::models_write::target_fingerprint(&target);
+    let transaction_directory = app_data
+        .path()
+        .join("target-configuration-backups")
+        .join(crate::models_write::target_fingerprint(
+            &target.canonicalize().unwrap(),
+        ))
+        .join("transactions");
+    fs::create_dir_all(&transaction_directory).unwrap();
+    let manifest_path = transaction_directory.join(format!("{logical_fingerprint}-corrupt.json"));
+    fs::write(&manifest_path, b"{not-json").unwrap();
+
+    let service = service_for_target_with_app_data(&target, app_data.path());
+    let StartupState::OmpReady {
+        target_configuration,
+        ..
+    } = service.detect_omp()
+    else {
+        panic!("corrupted transaction recovery did not return OMP ready state");
+    };
+    assert_eq!(
+        target_configuration.status,
+        TargetConfigurationStatus::Unsafe
+    );
+    assert!(!target_configuration.writable);
+    let notice = target_configuration.recovery_notice.unwrap();
+    assert!(notice.contains("人工处理"));
+    assert!(notice.contains(manifest_path.to_string_lossy().as_ref()));
+    assert_eq!(
+        fs::read(target.join("models.yml")).unwrap(),
+        original_models
+    );
+    assert_eq!(
+        fs::read(target.join("config.yml")).unwrap(),
+        original_config
+    );
+}
+
 #[test]
 fn configuration_transaction_recovery_distinguishes_final_commit_without_backups_from_non_final_recovery()
  {
@@ -4774,15 +5093,20 @@ fn configuration_transaction_recovery_distinguishes_final_commit_without_backups
         let target_root = backup_root.join(&fingerprint);
         let transactions = target_root.join("transactions");
         fs::create_dir_all(&transactions).unwrap();
-        let manifest_path = transactions.join(format!("{transaction_id}.json"));
+        let manifest_path = transactions.join(format!(
+            "{}-{transaction_id}.json",
+            crate::models_write::target_fingerprint(&target)
+        ));
         let manifest = serde_json::json!({
             "version": 1,
             "transactionId": transaction_id,
+            "logicalTarget": target,
             "targetFingerprint": fingerprint,
             "targetConfiguration": resolved_target,
             "entries": [
                 {
                     "name": "models.yml",
+                    "partition": "models",
                     "targetPath": resolved_target.join("models.yml"),
                     "backupPath": target_root.join("models").join(format!("tx-{transaction_id}.yml")),
                     "originalHash": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -4790,6 +5114,7 @@ fn configuration_transaction_recovery_distinguishes_final_commit_without_backups
                 },
                 {
                     "name": "config.yml",
+                    "partition": "config",
                     "targetPath": resolved_target.join("config.yml"),
                     "backupPath": target_root.join("config").join(format!("tx-{transaction_id}.yml")),
                     "originalHash": "0000000000000000000000000000000000000000000000000000000000000000",

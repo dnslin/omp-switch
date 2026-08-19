@@ -397,6 +397,7 @@ fn loaded_config_from_transaction(
             .map(std::path::Path::to_path_buf)
             .unwrap_or_default(),
         models_path: file.path.clone(),
+        backup_partition: "config",
         original_bytes: Vec::new(),
         original_hash: file.original_hash.clone(),
         original_tree: file.original_tree.clone(),

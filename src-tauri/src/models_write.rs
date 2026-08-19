@@ -67,6 +67,7 @@ pub(crate) trait ModelsMutation {
 pub(crate) struct LoadedModels {
     pub(crate) expected_target: PathBuf,
     pub(crate) models_path: PathBuf,
+    pub(crate) backup_partition: &'static str,
     pub(crate) original_bytes: Vec<u8>,
     pub(crate) original_hash: String,
     pub(crate) original_tree: Value,
@@ -98,6 +99,7 @@ pub(crate) fn load_models_for_write(
     Ok(LoadedModels {
         expected_target,
         models_path,
+        backup_partition: "models",
         original_bytes,
         original_hash,
         original_tree,
@@ -109,7 +111,9 @@ pub(crate) fn load_config_for_write(
 ) -> Result<LoadedModels, AppError> {
     let mut config_target = target.clone();
     config_target.models = target.config.clone();
-    load_models_for_write(&config_target, opened_config_hash)
+    let mut loaded = load_models_for_write(&config_target, opened_config_hash)?;
+    loaded.backup_partition = "config";
+    Ok(loaded)
 }
 
 pub(crate) fn write_models_mutation<M: ModelsMutation>(
@@ -127,7 +131,7 @@ pub(crate) fn write_models_mutation<M: ModelsMutation>(
     create_current_backup(
         backup_root,
         &loaded.expected_target,
-        &loaded.models_path,
+        loaded.backup_partition,
         &loaded.original_bytes,
         failure,
     )?;
@@ -472,22 +476,21 @@ pub(crate) fn ensure_resolved_file_path(
     }
     Ok(())
 }
-fn backup_partition(resolved_file: &Path) -> &'static str {
-    match resolved_file.file_name().and_then(|value| value.to_str()) {
-        Some("models.yml") => "models",
-        Some("config.yml") => "config",
-        _ => "configuration",
+fn backup_partition(partition: &str) -> Result<&str, AppError> {
+    match partition {
+        "models" | "config" => Ok(partition),
+        _ => Err(AppError::internal("Configuration transaction 备份分区无效")),
     }
 }
 fn create_current_backup(
     backup_root: &Path,
     target_configuration: &Path,
-    resolved_file: &Path,
+    partition: &str,
     original_bytes: &[u8],
     failure: Option<ModelsWriteFailurePoint>,
 ) -> Result<(), AppError> {
     let target_directory = backup_root.join(target_fingerprint(target_configuration));
-    let directory = target_directory.join(backup_partition(resolved_file));
+    let directory = target_directory.join(backup_partition(partition)?);
     for path in [backup_root, target_directory.as_path(), directory.as_path()] {
         create_private_backup_directory(path, failure)
             .map_err(|error| write_error("create_backup_directory", error))?;
@@ -530,8 +533,8 @@ fn create_current_backup(
 pub(crate) fn create_transaction_backup(
     backup_root: &Path,
     target_configuration: &Path,
-    resolved_file: &Path,
     original_bytes: &[u8],
+    partition: &str,
     transaction_id: &str,
 ) -> Result<PathBuf, AppError> {
     if transaction_id.is_empty()
@@ -542,7 +545,7 @@ pub(crate) fn create_transaction_backup(
         return Err(AppError::internal("Configuration transaction ID 无效"));
     }
     let target_directory = backup_root.join(target_fingerprint(target_configuration));
-    let directory = target_directory.join(backup_partition(resolved_file));
+    let directory = target_directory.join(backup_partition(partition)?);
     for path in [backup_root, target_directory.as_path(), directory.as_path()] {
         create_private_backup_directory(path, None)
             .map_err(|error| write_error("create_transaction_backup_directory", error))?;
@@ -901,7 +904,6 @@ mod tests {
         let temporary = tempdir().unwrap();
         let backup_root = temporary.path().join("backups");
         let target_configuration = temporary.path().join("agent");
-        let target_file = target_configuration.join("models.yml");
         let original = b"original models";
         let directory = backup_root
             .join(content_hash(
@@ -915,7 +917,7 @@ mod tests {
         create_current_backup(
             &backup_root,
             &target_configuration,
-            &target_file,
+            "models",
             original,
             None,
         )
@@ -932,7 +934,6 @@ mod tests {
         let temporary = tempdir().unwrap();
         let backup_root = temporary.path().join("backups");
         let target_configuration = temporary.path().join("agent");
-        let target_file = target_configuration.join("config.yml");
         let directory = backup_root
             .join(content_hash(
                 target_configuration.to_string_lossy().as_bytes(),
@@ -943,7 +944,7 @@ mod tests {
             create_current_backup(
                 &backup_root,
                 &target_configuration,
-                &target_file,
+                "config",
                 b"original config",
                 None,
             )
@@ -1041,6 +1042,7 @@ mod tests {
         let loaded = LoadedModels {
             expected_target: target.clone(),
             models_path: target.join("models.yml"),
+            backup_partition: "models",
             original_hash: content_hash(&original_bytes),
             original_tree: serde_yaml::from_slice(&original_bytes).unwrap(),
             original_bytes,
@@ -1053,6 +1055,28 @@ mod tests {
             fs::read(target.join("models.yml")).unwrap(),
             b"providers: {}\n"
         );
+    }
+
+    #[test]
+    fn config_write_uses_config_backup_partition() {
+        let temporary = tempdir().unwrap();
+        let target = temporary.path().join("agent");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+        let config_path = target.join("config.yml");
+        let config_bytes = b"modelRoles: {}\n";
+        fs::write(&config_path, config_bytes).unwrap();
+        let discovery =
+            crate::target_configuration::discover_target_configuration(&target).unwrap();
+        let loaded = load_config_for_write(&discovery, &content_hash(config_bytes)).unwrap();
+        let backup_root = temporary.path().join("backups");
+        let fingerprint = target_fingerprint(&loaded.expected_target);
+
+        write_models_mutation(&backup_root, &loaded, &PendingTestMutation, None).unwrap();
+
+        let target_root = backup_root.join(fingerprint);
+        assert_eq!(fs::read_dir(target_root.join("config")).unwrap().count(), 1);
+        assert!(!target_root.join("models").exists());
     }
 
     #[test]

@@ -361,7 +361,9 @@ function uniqueReferences(paths: string[]): string[] {
   return [...new Set(paths)];
 }
 function isHashConflict(error: AppError | null): boolean {
-  return error?.code === "models-hash-conflict" || error?.code === "config-hash-conflict";
+  return error?.code === "models-hash-conflict"
+    || error?.code === "config-hash-conflict"
+    || error?.code === "configuration-transaction-target-changed";
 }
 
 function DeletionImpact({

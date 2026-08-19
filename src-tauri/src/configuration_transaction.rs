@@ -50,20 +50,22 @@ struct TemporaryFile {
     hash: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct TransactionManifest {
     version: u8,
     transaction_id: String,
+    logical_target: PathBuf,
     target_fingerprint: String,
     target_configuration: PathBuf,
     entries: Vec<TransactionManifestEntry>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct TransactionManifestEntry {
     name: String,
+    partition: String,
     target_path: PathBuf,
     backup_path: PathBuf,
     original_hash: String,
@@ -114,6 +116,7 @@ where
                 .map_err(|error| map_lock_error(error, path))?,
         );
     }
+    ensure_current_target_identity(target, &expected_target, &models_path, &config_path)?;
 
     let models = load_locked_file(&models_path, opened_models_hash, "models.yml")?;
     let config = load_locked_file(&config_path, opened_config_hash, "config.yml")?;
@@ -125,16 +128,16 @@ where
     let models_backup = models_write::create_transaction_backup(
         backup_root,
         &expected_target,
-        &models_path,
         &models.original_bytes,
+        "models",
         &transaction_id,
     )
     .map_err(map_backup_error)?;
     let config_backup = match models_write::create_transaction_backup(
         backup_root,
         &expected_target,
-        &config_path,
         &config.original_bytes,
+        "config",
         &transaction_id,
     ) {
         Ok(path) => path,
@@ -182,15 +185,18 @@ where
         .map_err(|_| transaction_unavailable())?;
     models_write::ensure_resolved_file_path(&config_path, &expected_target, "config.yml")
         .map_err(|_| transaction_unavailable())?;
+    ensure_current_target_identity(target, &expected_target, &models_path, &config_path)?;
 
     let manifest = TransactionManifest {
         version: 1,
         transaction_id: transaction_id.clone(),
+        logical_target: PathBuf::from(&target.path),
         target_fingerprint: models_write::target_fingerprint(&expected_target),
         target_configuration: expected_target.clone(),
         entries: vec![
             TransactionManifestEntry {
                 name: "models.yml".to_owned(),
+                partition: "models".to_owned(),
                 target_path: models_path.clone(),
                 backup_path: models_backup,
                 original_hash: models.original_hash.clone(),
@@ -198,6 +204,7 @@ where
             },
             TransactionManifestEntry {
                 name: "config.yml".to_owned(),
+                partition: "config".to_owned(),
                 target_path: config_path.clone(),
                 backup_path: config_backup,
                 original_hash: config.original_hash.clone(),
@@ -248,6 +255,46 @@ fn validate_transaction_target(target: &TargetConfigurationDiscovery) -> Result<
         return Err(transaction_unavailable());
     }
     Ok(())
+}
+fn ensure_current_target_identity(
+    target: &TargetConfigurationDiscovery,
+    expected_target: &Path,
+    expected_models: &Path,
+    expected_config: &Path,
+) -> Result<(), AppError> {
+    for (label, logical_path, expected_path) in [
+        (
+            "Target configuration",
+            PathBuf::from(&target.path),
+            expected_target.to_path_buf(),
+        ),
+        (
+            "models.yml",
+            PathBuf::from(&target.models.canonical_path),
+            expected_models.to_path_buf(),
+        ),
+        (
+            "config.yml",
+            PathBuf::from(&target.config.canonical_path),
+            expected_config.to_path_buf(),
+        ),
+    ] {
+        let current_path = logical_path
+            .canonicalize()
+            .map_err(|_| target_identity_conflict(label))?;
+        if current_path != expected_path {
+            return Err(target_identity_conflict(label));
+        }
+    }
+    Ok(())
+}
+
+fn target_identity_conflict(label: &str) -> AppError {
+    AppError::new(
+        "configuration-transaction-target-changed",
+        format!("{label} 的真实文件系统目标已变化。"),
+        "请重新读取配置并重新打开删除确认；本次操作没有修改两个目标文件。",
+    )
 }
 
 fn load_locked_file(
@@ -362,6 +409,13 @@ fn ensure_hashes_unchanged(
     Ok(())
 }
 
+fn transaction_manifest_file_name(logical_target: &Path, transaction_id: &str) -> String {
+    format!(
+        "{}-{transaction_id}.json",
+        models_write::target_fingerprint(logical_target)
+    )
+}
+
 fn persist_manifest(
     backup_root: &Path,
     target: &Path,
@@ -372,7 +426,10 @@ fn persist_manifest(
         .join("transactions");
     fs::create_dir_all(&directory)
         .map_err(|error| transaction_io_error("创建 Configuration transaction 清单目录", error))?;
-    let path = directory.join(format!("{}.json", manifest.transaction_id));
+    let path = directory.join(transaction_manifest_file_name(
+        &manifest.logical_target,
+        &manifest.transaction_id,
+    ));
     let bytes = serde_json::to_vec(manifest).map_err(|error| {
         AppError::new(
             "configuration-transaction-manifest-error",
@@ -497,70 +554,78 @@ fn transaction_io_error(operation: &str, error: std::io::Error) -> AppError {
     )
 }
 
+enum ManifestCandidate {
+    Valid {
+        path: PathBuf,
+        directory: PathBuf,
+        manifest: TransactionManifest,
+        bytes: Vec<u8>,
+    },
+    Invalid {
+        path: PathBuf,
+        detail: String,
+    },
+}
+
 pub(crate) fn recover_for_target(
     backup_root: &Path,
     logical_target: &Path,
 ) -> std::io::Result<Option<RecoveryResult>> {
-    let Some(target) = logical_target.canonicalize().ok() else {
-        return Ok(None);
-    };
-    let fingerprint = models_write::target_fingerprint(&target);
-    let directory = backup_root.join(fingerprint).join("transactions");
-    if !directory.exists() {
+    let mut candidates = find_manifests_for_logical_target(backup_root, logical_target)?;
+    if candidates.is_empty() {
         return Ok(None);
     }
-    let mut manifests = fs::read_dir(&directory)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<std::io::Result<Vec<_>>>()?;
-    manifests.retain(|path| path.extension().and_then(|value| value.to_str()) == Some("json"));
-    manifests.sort();
-    if manifests.is_empty() {
-        return Ok(None);
-    }
-    let _target_lock = models_write::acquire_configuration_lock(backup_root, &target)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let _models_lock = models_write::acquire_configuration_file_lock(
-        backup_root,
-        &target,
-        &target.join("models.yml"),
-    )
-    .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let _config_lock = models_write::acquire_configuration_file_lock(
-        backup_root,
-        &target,
-        &target.join("config.yml"),
-    )
-    .map_err(|error| std::io::Error::other(error.to_string()))?;
-    if manifests.len() > 1 {
-        let scene = preserve_current_scene(&target, &manifests[0])?;
-        return Ok(Some(manual_recovery(
-            &scene,
-            format!(
-                "发现 {} 份未完成 Configuration transaction 清单，无法确定恢复顺序。",
-                manifests.len()
-            ),
-        )));
-    }
-    let manifest_path = manifests.pop().expect("manifest list is non-empty");
-    let manifest_bytes = match fs::read(&manifest_path) {
-        Ok(bytes) => bytes,
-        Err(error) => return Ok(Some(manual_recovery(&manifest_path, error.to_string()))),
-    };
-    let manifest: TransactionManifest = match serde_json::from_slice(&manifest_bytes) {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            let scene = preserve_current_scene(&target, &manifest_path)?;
+    candidates.sort_by_key(|candidate| match candidate {
+        ManifestCandidate::Valid { path, .. } | ManifestCandidate::Invalid { path, .. } => {
+            path.clone()
+        }
+    });
+    let candidate = candidates.remove(0);
+    let (manifest_path, directory, manifest, manifest_bytes) = match candidate {
+        ManifestCandidate::Valid {
+            path,
+            directory,
+            manifest,
+            bytes,
+        } => (path, directory, manifest, bytes),
+        ManifestCandidate::Invalid { path, detail } => {
+            let scene = preserve_current_scene(logical_target, &path)?;
             return Ok(Some(manual_recovery(
                 &scene,
-                format!(
-                    "事务清单无法解析：{}；原清单：{}",
-                    redact_diagnostic(&error.to_string()),
-                    manifest_path.display()
-                ),
+                format!("{detail}；原清单：{}", path.display()),
             )));
         }
     };
-    if let Err(error) = validate_manifest(&manifest, &target, &directory) {
+    let target = manifest.target_configuration.clone();
+    if !candidates.is_empty() {
+        let invalid_paths = candidates
+            .iter()
+            .filter_map(|candidate| match candidate {
+                ManifestCandidate::Invalid { path, .. } => Some(path.display().to_string()),
+                ManifestCandidate::Valid { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let detail = if invalid_paths.is_empty() {
+            String::new()
+        } else {
+            format!(" 无法读取或解析的清单：{}。", invalid_paths.join("、"))
+        };
+        let scene = preserve_current_scene(&target, &manifest_path)?;
+        return Ok(Some(manual_recovery(
+            &scene,
+            format!(
+                "发现 {} 份未完成 Configuration transaction 清单，无法确定恢复顺序。{detail}",
+                candidates.len() + 1
+            ),
+        )));
+    }
+    if let Err(error) = validate_manifest(
+        &manifest,
+        &target,
+        &directory,
+        logical_target,
+        &manifest_path,
+    ) {
         let scene = preserve_current_scene(&target, &manifest_path)?;
         return Ok(Some(manual_recovery(
             &scene,
@@ -571,6 +636,79 @@ pub(crate) fn recover_for_target(
             ),
         )));
     }
+
+    let _target_lock = models_write::acquire_configuration_lock(backup_root, &target)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let mut lock_paths = manifest
+        .entries
+        .iter()
+        .map(|entry| entry.target_path.clone())
+        .collect::<Vec<_>>();
+    lock_paths.sort();
+    lock_paths.dedup();
+    let mut locks = Vec::with_capacity(lock_paths.len());
+    for path in &lock_paths {
+        locks.push(
+            models_write::acquire_configuration_file_lock(backup_root, &target, path)
+                .map_err(|error| std::io::Error::other(error.to_string()))?,
+        );
+    }
+    if let Err(error) = validate_manifest(
+        &manifest,
+        &target,
+        &directory,
+        logical_target,
+        &manifest_path,
+    ) {
+        let scene = preserve_current_scene(&target, &manifest_path)?;
+        return Ok(Some(manual_recovery(
+            &scene,
+            format!(
+                "事务清单锁定后验证失败：{}；原清单：{}",
+                redact_diagnostic(&error),
+                manifest_path.display()
+            ),
+        )));
+    }
+    let locked_bytes = match fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let scene = preserve_current_scene(&target, &manifest_path)?;
+            return Ok(Some(manual_recovery(
+                &scene,
+                format!(
+                    "事务清单锁定后无法重新读取：{}；原清单：{}",
+                    redact_diagnostic(&error.to_string()),
+                    manifest_path.display()
+                ),
+            )));
+        }
+    };
+    let locked_manifest = match serde_json::from_slice::<TransactionManifest>(&locked_bytes) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            let scene = preserve_current_scene(&target, &manifest_path)?;
+            return Ok(Some(manual_recovery(
+                &scene,
+                format!(
+                    "事务清单锁定后无法解析：{}；原清单：{}",
+                    redact_diagnostic(&error.to_string()),
+                    manifest_path.display()
+                ),
+            )));
+        }
+    };
+    if locked_bytes != manifest_bytes || locked_manifest != manifest {
+        let scene = preserve_current_scene(&target, &manifest_path)?;
+        return Ok(Some(manual_recovery(
+            &scene,
+            format!(
+                "事务清单锁定后内容发生变化；原清单：{}",
+                manifest_path.display()
+            ),
+        )));
+    }
+    let manifest = locked_manifest;
     let all_final = manifest.entries.iter().all(|entry| {
         fs::read(&entry.target_path)
             .map(|bytes| models_write::content_hash(&bytes) == entry.final_hash)
@@ -640,6 +778,7 @@ pub(crate) fn recover_for_target(
             ),
         )));
     }
+    drop(locks);
     Ok(Some(RecoveryResult {
         notice: format!(
             "上次 Configuration transaction 未完整提交；已将现场保存到 {}，并从同一事务备份整体恢复 models.yml 与 config.yml。",
@@ -647,6 +786,67 @@ pub(crate) fn recover_for_target(
         ),
         manual: false,
     }))
+}
+fn find_manifests_for_logical_target(
+    backup_root: &Path,
+    logical_target: &Path,
+) -> std::io::Result<Vec<ManifestCandidate>> {
+    let target_roots = match fs::read_dir(backup_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let prefix = format!("{}-", models_write::target_fingerprint(logical_target));
+    let mut matches = Vec::new();
+    for entry in target_roots {
+        let target_root = entry?.path();
+        if !target_root.is_dir() {
+            continue;
+        }
+        let transaction_directory = target_root.join("transactions");
+        let manifests = match fs::read_dir(&transaction_directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for manifest_entry in manifests {
+            let manifest_path = manifest_entry?.path();
+            let Some(file_name) = manifest_path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !file_name.starts_with(&prefix)
+                || manifest_path.extension().and_then(|value| value.to_str()) != Some("json")
+            {
+                continue;
+            }
+            let bytes = match fs::read(&manifest_path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    matches.push(ManifestCandidate::Invalid {
+                        path: manifest_path,
+                        detail: format!("事务清单读取失败：{}", error.kind()),
+                    });
+                    continue;
+                }
+            };
+            match serde_json::from_slice::<TransactionManifest>(&bytes) {
+                Ok(manifest) => matches.push(ManifestCandidate::Valid {
+                    path: manifest_path,
+                    directory: transaction_directory.clone(),
+                    manifest,
+                    bytes,
+                }),
+                Err(error) => matches.push(ManifestCandidate::Invalid {
+                    path: manifest_path,
+                    detail: format!(
+                        "事务清单无法解析：{}",
+                        redact_diagnostic(&error.to_string())
+                    ),
+                }),
+            }
+        }
+    }
+    Ok(matches)
 }
 
 pub(crate) fn remove_model_role_ids(tree: &mut Value, role_ids: &[String]) -> Result<(), AppError> {
@@ -716,9 +916,19 @@ fn validate_manifest(
     manifest: &TransactionManifest,
     target: &Path,
     transaction_directory: &Path,
+    logical_target: &Path,
+    manifest_path: &Path,
 ) -> Result<(), String> {
     if manifest.version != 1 || manifest.transaction_id.is_empty() {
         return Err("事务版本或 ID 无效".to_owned());
+    }
+    if manifest.logical_target != logical_target
+        || manifest_path.file_name().and_then(|value| value.to_str())
+            != Some(
+                transaction_manifest_file_name(logical_target, &manifest.transaction_id).as_str(),
+            )
+    {
+        return Err("事务逻辑 Target 或清单文件名不匹配".to_owned());
     }
     if manifest.target_configuration != target
         || manifest.target_fingerprint != models_write::target_fingerprint(target)
@@ -726,7 +936,11 @@ fn validate_manifest(
     {
         return Err("事务目标不匹配".to_owned());
     }
-    for (expected_name, partition) in [("models.yml", "models"), ("config.yml", "config")] {
+    let backup_root = transaction_directory
+        .parent()
+        .ok_or_else(|| "事务备份根目录无效".to_owned())?;
+    for (expected_name, expected_partition) in [("models.yml", "models"), ("config.yml", "config")]
+    {
         let Some(entry) = manifest
             .entries
             .iter()
@@ -734,17 +948,26 @@ fn validate_manifest(
         else {
             return Err(format!("事务缺少 {expected_name}"));
         };
-        if entry.target_path != target.join(expected_name)
+        let expected_target_path = target
+            .join(expected_name)
+            .canonicalize()
+            .map_err(|error| format!("{expected_name} 真实路径无法解析：{}", error.kind()))?;
+        if !fs::metadata(&expected_target_path)
+            .map_err(|error| format!("{expected_name} 真实路径无法读取：{}", error.kind()))?
+            .is_file()
+        {
+            return Err(format!("{expected_name} 真实路径不是普通文件"));
+        }
+        if entry.partition != expected_partition
+            || entry.target_path != expected_target_path
             || entry.backup_path
-                != transaction_directory
-                    .parent()
-                    .unwrap()
-                    .join(partition)
+                != backup_root
+                    .join(expected_partition)
                     .join(format!("tx-{}.yml", manifest.transaction_id))
             || !is_hash(&entry.original_hash)
             || !is_hash(&entry.final_hash)
         {
-            return Err(format!("{expected_name} 的路径或 Hash 无效"));
+            return Err(format!("{expected_name} 的路径、分区或 Hash 无效"));
         }
     }
     Ok(())

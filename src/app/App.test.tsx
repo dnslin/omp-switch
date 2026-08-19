@@ -1727,7 +1727,7 @@ describe("React page seam", () => {
     const provider: OverviewProvider = { ...base.providers[0], modelCount: 2, models: [referenced, second] };
     const overview = overviewDto({ providers: [provider], models: [referenced, second], counts: { providerCount: 1, modelCount: 2, roleCount: 1 } });
     const getOverviewLoad = vi.fn(async () => overviewLoad(overview, readyState));
-    const deleteModel = vi.fn().mockRejectedValue({ code: "config-hash-conflict", message: "config.yml 在删除提交前已被外部修改。", action: "请重新读取配置。" });
+    const deleteModel = vi.fn().mockRejectedValue({ code: "configuration-transaction-target-changed", message: "Target configuration 的真实文件系统目标已变化。", action: "请重新读取配置。" });
     renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad, deleteModel });
 
     await screen.findByText("Sol");
@@ -1738,7 +1738,7 @@ describe("React page seam", () => {
 
     const conflict = await within(dialog).findByRole("alert");
     expect(conflict).toHaveTextContent("配置冲突");
-    expect(conflict).toHaveTextContent("config.yml 在删除提交前已被外部修改。");
+    expect(conflict).toHaveTextContent("Target configuration 的真实文件系统目标已变化。");
     expect(within(dialog).getByRole("button", { name: "重新读取" })).toBeVisible();
     expect(within(dialog).getByRole("button", { name: "取消" })).toBeEnabled();
     expect(within(dialog).getByRole("button", { name: "删除模型" })).toBeDisabled();
