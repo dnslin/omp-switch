@@ -1,0 +1,31 @@
+Issue #12 visual acceptance — 2026-08-19
+
+Reference exports:
+- pencil-reference/chFfk.png (Pencil node chFfk, 03 Page / Overview, 1536x1024)
+- pencil-reference/vz6sg.png (Pencil node vz6sg, 05 Page / Provider Detail, 1536x1024)
+
+Real Tauri captures:
+- overview-tauri-1536x1024.png
+- provider-detail-tauri-1536x1024.png
+- provider-detail-test-failure-tauri-1536x1024.png
+- overview-tauri-native-final-1536x961.png
+- provider-detail-tauri-native-final-1536x961.png
+
+- The state captures listed below were regenerated from the final Tauri build after the result panel settled on the six-row layout: model, effective protocol, final URL, latency, status code, and time.
+- Overview preserves the approved sidebar, sync strip, environment grid, metrics strip, two-column quick-test/result area, and shared controls.
+- Provider Detail preserves the approved sidebar, provider header/actions, search row, summary strip, model table, and latest-test strip.
+- Test failure uses the existing latest-test/status language and card geometry; no separate visual language or raw response/body is shown.
+- The only intentional geometry difference is the native Tauri title bar/decorations; the page content begins below the OS-provided title bar as required by the specification.
+- `model-test-cost-notice-tauri-1536x1024.png`: first-run cost notice.
+- `overview-model-test-running-tauri-1536x1024.png`: Overview running/cancel state.
+- `overview-model-test-success-tauri-1536x1024.png`: Overview success result and toast.
+- `overview-model-test-running-selection-tauri-1536x1024.png`: after changing the Overview selection to gpt-5.6-terra, the active gpt-5.6-luna request remains visible, the Terra test button is disabled, and the result-panel cancel button remains available.
+- `overview-model-test-cancelled-tauri-1536x1024.png`: Overview cancellation result.
+- `provider-detail-test-running-tauri-1536x1024.png`: Provider Detail running state with visible cancel action.
+- `provider-detail-test-cancelled-tauri-1536x1024.png`: Provider Detail cancellation result.
+- `provider-detail-test-success-tauri-1536x1024.png`: Provider Detail success result.
+- `model-edit-sheet-test-tauri-1536x1024.png`: saved-model edit Sheet with test entry.
+
+- State coverage: cost notice, running, cancel, success, failure, saved-model edit Sheet and idle page states were exercised through the real Tauri window. The Overview running, success, and cancelled artifacts above are final-build captures with the six-row result layout.
+- The external configuration change path was exercised with a local hanging/success Mock HTTP service; completion triggers a silent overview refresh without closing the dirty edit Sheet.
+- The final native Tauri captures are 1536×961 logical pixels / 3072×1922 Retina pixels on this macOS display. `src-tauri/tauri.conf.json` requests a 1536×1024 window; macOS reserves 63 logical pixels for native window/system chrome. The comparison therefore uses the real Tauri pixels at the approved 1536 width, excludes native chrome, and checks the page anchors against the 1536×1024 Pencil canvas. No synthetic resize or cross-compiled binary was used.

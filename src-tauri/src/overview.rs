@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs};
+use std::{collections::HashSet, fs, io, time::Instant};
 
 use serde::{Serialize, Serializer};
 use serde_yaml::{Mapping, Value};
@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     bundled_catalog::{self, BundledCatalog},
     error::AppError,
+    provider_mutation::SupportedApi,
     redaction::{redact_diagnostic, redact_projection, url_projection_is_lossless},
     target_configuration::{
         ConfigurationFileStatus, TargetConfigurationDiscovery, TargetConfigurationStatus,
@@ -203,6 +204,17 @@ pub(crate) struct OverviewReadResult {
     pub(crate) snapshot: Option<ConfigurationSnapshot>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ModelTestConfiguration {
+    pub(crate) provider_id: String,
+    pub(crate) model_id: String,
+    pub(crate) base_url: String,
+    pub(crate) protocol: SupportedApi,
+    pub(crate) auth_mode: OverviewAuthMode,
+    pub(crate) api_key: Option<String>,
+    pub(crate) target_path: String,
+    pub(crate) models_hash: String,
+}
 pub(crate) fn read_overview(
     executable_path: &str,
     version: &str,
@@ -466,16 +478,168 @@ fn sanitized_target_configuration(
 }
 
 fn read_document(path: &str, label: &str) -> Result<ParsedConfiguration, AppError> {
-    let bytes = fs::read(path).map_err(|error| {
-        AppError::new(
-            "overview-read-failed",
-            format!(
-                "无法读取 {label}。诊断代码：{}。",
-                crate::error::io_error_cause(error.kind())
-            ),
-            "请检查配置文件路径和权限后重新读取。",
-        )
-    })?;
+    let mut file =
+        open_configuration_file(path).map_err(|error| document_read_error(label, error))?;
+    ensure_regular_file(&file, label)?;
+    let mut bytes = Vec::new();
+    use std::io::Read;
+    file.read_to_end(&mut bytes)
+        .map_err(|error| document_read_error(label, error))?;
+    parse_document(bytes, label)
+}
+
+fn open_configuration_file(path: &str) -> io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::File::open(path)
+    }
+}
+
+fn ensure_regular_file(file: &fs::File, label: &str) -> Result<(), AppError> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| document_read_error(label, error))?;
+    if metadata.is_file() {
+        return Ok(());
+    }
+    Err(document_read_error(
+        label,
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "configuration path is not a file",
+        ),
+    ))
+}
+
+fn read_document_with_deadline(
+    path: &str,
+    label: &str,
+    cancellation: &tokio_util::sync::CancellationToken,
+    deadline: Instant,
+) -> Result<ParsedConfiguration, AppError> {
+    let bytes = read_bytes_with_deadline(path, label, cancellation, deadline)?;
+    parse_document(bytes, label)
+}
+
+fn read_bytes_with_deadline(
+    path: &str,
+    label: &str,
+    cancellation: &tokio_util::sync::CancellationToken,
+    deadline: Instant,
+) -> Result<Vec<u8>, AppError> {
+    if cancellation.is_cancelled() {
+        return Err(AppError::new(
+            "model-test-cancelled",
+            "模型测试已取消。",
+            "无需继续操作。",
+        ));
+    }
+    if Instant::now() >= deadline {
+        return Err(AppError::new(
+            "model-test-timeout",
+            "模型测试准备超时。",
+            "请检查 OMP 可执行文件和配置目录后重试。",
+        ));
+    }
+    let mut file =
+        open_configuration_file(path).map_err(|error| document_read_error(label, error))?;
+    ensure_regular_file(&file, label)?;
+    if cancellation.is_cancelled() {
+        return Err(AppError::new(
+            "model-test-cancelled",
+            "模型测试已取消。",
+            "无需继续操作。",
+        ));
+    }
+    if Instant::now() >= deadline {
+        return Err(AppError::new(
+            "model-test-timeout",
+            "模型测试准备超时。",
+            "请检查 OMP 可执行文件和配置目录后重试。",
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::io::{ErrorKind, Read};
+
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(AppError::new(
+                    "model-test-cancelled",
+                    "模型测试已取消。",
+                    "无需继续操作。",
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err(AppError::new(
+                    "model-test-timeout",
+                    "模型测试准备超时。",
+                    "请检查 OMP 可执行文件和配置目录后重试。",
+                ));
+            }
+            match file.read(&mut chunk) {
+                Ok(0) => return Ok(bytes),
+                Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => return Err(document_read_error(label, error)),
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(AppError::new(
+                    "model-test-cancelled",
+                    "模型测试已取消。",
+                    "无需继续操作。",
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err(AppError::new(
+                    "model-test-timeout",
+                    "模型测试准备超时。",
+                    "请检查 OMP 可执行文件和配置目录后重试。",
+                ));
+            }
+            match file.read(&mut chunk) {
+                Ok(0) => return Ok(bytes),
+                Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+                Err(error) => return Err(document_read_error(label, error)),
+            }
+        }
+    }
+}
+
+fn document_read_error(label: &str, error: io::Error) -> AppError {
+    AppError::new(
+        "overview-read-failed",
+        format!(
+            "无法读取 {label}。诊断代码：{}。",
+            crate::error::io_error_cause(error.kind())
+        ),
+        "请检查配置文件路径和权限后重新读取。",
+    )
+}
+
+fn parse_document(bytes: Vec<u8>, label: &str) -> Result<ParsedConfiguration, AppError> {
     let raw_hash = content_hash(&bytes);
     let tree = serde_yaml::from_slice::<Value>(&bytes).map_err(|error| {
         AppError::new(
@@ -488,6 +652,117 @@ fn read_document(path: &str, label: &str) -> Result<ParsedConfiguration, AppErro
         )
     })?;
     Ok(ParsedConfiguration { raw_hash, tree })
+}
+
+pub(crate) fn read_model_test_configuration(
+    target: &TargetConfigurationDiscovery,
+    catalog: &BundledCatalog,
+    provider_id: &str,
+    model_id: &str,
+    cancellation: &tokio_util::sync::CancellationToken,
+    deadline: Instant,
+) -> Result<ModelTestConfiguration, AppError> {
+    if !matches!(target.status, TargetConfigurationStatus::Writable) || !target.writable {
+        return Err(model_test_not_eligible(
+            "当前 Target configuration 只读，不能测试模型。",
+        ));
+    }
+    let path = target
+        .models
+        .resolved_path
+        .as_deref()
+        .unwrap_or(&target.models.canonical_path);
+    let document = read_document_with_deadline(path, "models.yml", cancellation, deadline)?;
+    let (providers, provider_ids_are_safe) = project_providers(&document.tree, Some(catalog));
+    let provider = providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+        .ok_or_else(|| {
+            AppError::new(
+                "model-test-not-eligible",
+                "找不到要测试的 Provider。",
+                "请重新读取配置并选择仍然存在的普通 Provider。",
+            )
+        })?;
+    if !provider_ids_are_safe || !provider.editable {
+        return Err(model_test_not_eligible(
+            provider
+                .read_only_reason
+                .as_deref()
+                .unwrap_or("高级或只读 Provider 不能测试。"),
+        ));
+    }
+    let model = provider
+        .models
+        .iter()
+        .find(|model| model.id == model_id)
+        .ok_or_else(|| {
+            AppError::new(
+                "model-test-not-eligible",
+                "找不到要测试的 Model definition。",
+                "请重新读取配置并选择仍然存在的已保存模型。",
+            )
+        })?;
+    if !model.editable || model.status != ModelStatus::Normal || !model.complete {
+        return Err(model_test_not_eligible(
+            model
+                .read_only_reason
+                .as_deref()
+                .unwrap_or("当前 Model definition 不完整，不能测试。"),
+        ));
+    }
+    if !model
+        .input
+        .iter()
+        .any(|value| matches!(value, OverviewInput::Text))
+    {
+        return Err(model_test_not_eligible(
+            "当前固定文本探针不支持仅图片输入的 Model definition。",
+        ));
+    }
+    let protocol = model
+        .effective_api
+        .as_deref()
+        .and_then(SupportedApi::from_str)
+        .ok_or_else(|| {
+            model_test_not_eligible("当前 Model definition 没有有效的 Supported protocol。")
+        })?;
+    let root = mapping(&document.tree)
+        .ok_or_else(|| model_test_not_eligible("models.yml 结构无法识别。"))?;
+    let providers_value = mapping_get(root, "providers")
+        .ok_or_else(|| model_test_not_eligible("models.yml 缺少 providers。"))?;
+    let providers_map = mapping(providers_value)
+        .ok_or_else(|| model_test_not_eligible("models.yml 的 providers 结构无法识别。"))?;
+    let provider_value = mapping_get(providers_map, provider_id)
+        .ok_or_else(|| model_test_not_eligible("Provider 配置已变化，请重新读取。"))?;
+    let provider_map = mapping(provider_value)
+        .ok_or_else(|| model_test_not_eligible("Provider 配置结构无法识别。"))?;
+    let base_url = mapping_get(provider_map, "baseUrl")
+        .and_then(scalar_string)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| model_test_not_eligible("Provider 没有有效的 Base URL。"))?;
+    let api_key = mapping_get(provider_map, "apiKey").and_then(|value| match value {
+        Value::String(value) if !value.is_empty() => Some(value.clone()),
+        _ => None,
+    });
+    Ok(ModelTestConfiguration {
+        provider_id: provider_id.to_owned(),
+        model_id: model_id.to_owned(),
+        base_url,
+        protocol,
+        auth_mode: provider.auth_mode,
+        api_key,
+        target_path: target.path.clone(),
+        models_hash: document.raw_hash,
+    })
+}
+
+fn model_test_not_eligible(reason: &str) -> AppError {
+    AppError::new(
+        "model-test-not-eligible",
+        "当前 Model definition 不满足测试条件。",
+        reason,
+    )
 }
 
 fn content_hash(bytes: &[u8]) -> String {
@@ -863,6 +1138,7 @@ fn project_model(
             .all(|value| matches!(value, OverviewInput::Text | OverviewInput::Image))
         && context_window.is_some_and(|value| value > 0)
         && max_tokens.is_some_and(|value| value > 0)
+        && matches!((context_window, max_tokens), (Some(context), Some(max)) if max <= context)
         && effective_api.is_some();
     if provider_read_only {
         read_only_reason.get_or_insert_with(|| "所属 Provider 只读。".to_owned());
@@ -1420,5 +1696,40 @@ fn string_list(value: &Value) -> Option<Vec<String>> {
     match value {
         Value::Sequence(values) => values.iter().map(scalar_string).collect(),
         _ => None,
+    }
+}
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{
+        ffi::CString,
+        time::{Duration, Instant},
+    };
+
+    use tempfile::tempdir;
+    use tokio_util::sync::CancellationToken;
+
+    use super::read_document_with_deadline;
+
+    #[test]
+    fn model_test_configuration_read_rejects_non_file_paths() {
+        let root = tempdir().unwrap();
+        let fifo = root.path().join("models.fifo");
+        let fifo_path = CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+
+        let started = Instant::now();
+        let result = read_document_with_deadline(
+            fifo.to_str().unwrap(),
+            "models.yml",
+            &CancellationToken::new(),
+            Instant::now() + Duration::from_secs(5),
+        );
+
+        let error = match result {
+            Ok(_) => panic!("non-file configuration path was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "overview-read-failed");
+        assert!(started.elapsed() < Duration::from_millis(250));
     }
 }

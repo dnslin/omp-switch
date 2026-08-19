@@ -11,7 +11,7 @@ use crate::{
     target_configuration::TargetConfigurationDiscovery,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) enum SupportedApi {
     #[serde(rename = "openai-completions")]
     OpenAiCompletions,
@@ -30,6 +30,16 @@ impl SupportedApi {
             Self::OpenAiResponses => "openai-responses",
             Self::AnthropicMessages => "anthropic-messages",
             Self::GoogleGenerativeAi => "google-generative-ai",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "openai-completions" => Some(Self::OpenAiCompletions),
+            "openai-responses" => Some(Self::OpenAiResponses),
+            "anthropic-messages" => Some(Self::AnthropicMessages),
+            "google-generative-ai" => Some(Self::GoogleGenerativeAi),
+            _ => None,
         }
     }
 }

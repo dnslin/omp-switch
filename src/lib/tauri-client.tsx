@@ -118,6 +118,31 @@ export type DeleteModelInput = {
 };
 
 export type ModelMutationResult = { providerId: string; modelId: string };
+
+export type ModelTestInput = { providerId: string; modelId: string };
+export type ModelTestResult = {
+  success: boolean;
+  providerId: string;
+  modelId: string;
+  protocol: OverviewApi;
+  latencyMs: number;
+  status?: number;
+  message: string;
+  errorCode?: string;
+};
+export type ModelTestTerminal = {
+  providerId: string;
+  modelId: string;
+  message: string;
+  errorCode: string;
+};
+export type ModelTestState = {
+  running: boolean;
+  providerId: string | null;
+  modelId: string | null;
+  result: ModelTestResult | null;
+  terminal: ModelTestTerminal | null;
+};
 export type OverviewModel = {
   providerId: string;
   id: string;
@@ -211,10 +236,10 @@ export type UiSettings = {
   theme: Theme;
   selectedProviderId: string | null;
   selectedModelId: string | null;
-  costNoticeAccepted: boolean;
+  modelTestCostNoticeAccepted: boolean;
 };
 
-export type UiSettingsUpdate = Omit<UiSettings, "ompExecutablePath">;
+export type UiSettingsUpdate = Omit<UiSettings, "ompExecutablePath" | "modelTestCostNoticeAccepted">;
 
 export type AppError = {
   code: string;
@@ -251,6 +276,9 @@ export interface TauriClient {
   editModel(input: EditModelInput): Promise<ModelMutationResult>;
   deleteModel(input: DeleteModelInput): Promise<ModelMutationResult>;
   saveModelRoles(input: SaveModelRolesInput): Promise<SaveModelRolesResult>;
+  testModel(input: ModelTestInput): Promise<ModelTestResult>;
+  cancelModelTest(): Promise<boolean>;
+  getModelTestState(): Promise<ModelTestState>;
   detectOmp(): Promise<StartupState>;
   selectOmpExecutable(): Promise<string | null>;
   validateSelectedOmp(executablePath: string): Promise<StartupState>;
@@ -259,6 +287,7 @@ export interface TauriClient {
   openTargetConfigurationDirectory(executablePath: string): Promise<void>;
   getUiSettings(): Promise<UiSettings>;
   saveUiSettings(settings: UiSettingsUpdate): Promise<UiSettings>;
+  acceptModelTestCostNotice(): Promise<UiSettings>;
 }
 export const tauriClient: TauriClient = {
   getStartupState: () => invoke<StartupState>("get_startup_state"),
@@ -269,6 +298,9 @@ export const tauriClient: TauriClient = {
   editModel: (input) => invoke<ModelMutationResult>("edit_model", { input }),
   deleteModel: (input) => invoke<ModelMutationResult>("delete_model", { input }),
   saveModelRoles: (input) => invoke<SaveModelRolesResult>("save_model_roles", { input }),
+  testModel: (input) => invoke<ModelTestResult>("test_model", { input }),
+  cancelModelTest: () => invoke<boolean>("cancel_model_test"),
+  getModelTestState: () => invoke<ModelTestState>("get_model_test_state"),
   detectOmp: () => invoke<StartupState>("detect_omp"),
   selectOmpExecutable: async () => {
     const selected = await open({ multiple: false, directory: false, title: "选择 OMP 可执行文件" });
@@ -280,6 +312,7 @@ export const tauriClient: TauriClient = {
   openTargetConfigurationDirectory: async (executablePath) => { await invoke("open_target_configuration_directory", { executablePath }); },
   getUiSettings: () => invoke<UiSettings>("get_ui_settings"),
   saveUiSettings: (settings) => invoke<UiSettings>("save_ui_settings", { settings }),
+  acceptModelTestCostNotice: () => invoke<UiSettings>("accept_model_test_cost_notice"),
 };
 
 

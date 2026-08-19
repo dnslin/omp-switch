@@ -4,16 +4,18 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use parking_lot::{Condvar, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_opener::OpenerExt;
+use tokio_util::sync::CancellationToken;
 
 pub(crate) use crate::model_mutation::{
     CreateModelInput, DeleteModelInput, EditModelInput, ModelMutationResult,
 };
+pub(crate) use crate::model_test::{ModelTestInput, ModelTestResult, ModelTestState};
 pub(crate) use crate::models_write::ModelsWriteFailurePoint;
 pub(crate) use crate::provider_mutation::{
     CreateCustomProviderInput, CreateCustomProviderResult, EditCustomProviderInput,
@@ -33,8 +35,9 @@ use crate::{
     bundled_catalog,
     error::{AppError, io_error_cause},
     model_mutation,
-    omp_environment::{OmpEnvironment, SystemOmpEnvironment},
-    overview::{OverviewDto, OverviewReadResult, read_overview},
+    model_test::{self, ModelTestBinding, ModelTestCoordinator},
+    omp_environment::{CommandOutput, CommandRunError, OmpEnvironment, SystemOmpEnvironment},
+    overview::{OverviewDto, OverviewReadResult, read_model_test_configuration, read_overview},
     provider_mutation,
     redaction::redact_diagnostic,
     role_mutation,
@@ -109,7 +112,8 @@ pub struct AppSettings {
     pub theme: Theme,
     pub selected_provider_id: Option<String>,
     pub selected_model_id: Option<String>,
-    pub cost_notice_accepted: bool,
+    #[serde(alias = "costNoticeAccepted")]
+    pub model_test_cost_notice_accepted: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -118,7 +122,6 @@ pub struct UiSettingsUpdate {
     pub theme: Theme,
     pub selected_provider_id: Option<String>,
     pub selected_model_id: Option<String>,
-    pub cost_notice_accepted: bool,
 }
 
 struct OverviewLoadCoordinator {
@@ -239,6 +242,8 @@ pub struct AppService {
     configuration_snapshot: Arc<RwLock<Option<ConfigurationSnapshot>>>,
     detection_lock: Arc<Mutex<()>>,
     overview_load: Arc<OverviewLoadCoordinator>,
+    model_tests: Arc<ModelTestCoordinator>,
+    model_test_timeout: Arc<RwLock<std::time::Duration>>,
     #[cfg(test)]
     models_write_failure: Arc<Mutex<Option<ModelsWriteFailurePoint>>>,
 }
@@ -349,6 +354,20 @@ struct ProviderWriteContext {
     target: Box<TargetConfigurationDiscovery>,
     catalog: &'static bundled_catalog::BundledCatalog,
 }
+struct ModelTestPreparationError {
+    error: AppError,
+    terminal_deferred: bool,
+}
+
+impl From<AppError> for ModelTestPreparationError {
+    fn from(error: AppError) -> Self {
+        Self {
+            error,
+            terminal_deferred: false,
+        }
+    }
+}
+
 impl AppService {
     pub fn new(settings_path: PathBuf) -> Result<Self, AppError> {
         let transaction_root = settings_path
@@ -382,6 +401,8 @@ impl AppService {
             configuration_snapshot: Arc::new(RwLock::new(None)),
             detection_lock: Arc::new(Mutex::new(())),
             overview_load: Arc::new(OverviewLoadCoordinator::default()),
+            model_tests: Arc::new(ModelTestCoordinator::default()),
+            model_test_timeout: Arc::new(RwLock::new(model_test::DEFAULT_TIMEOUT)),
             #[cfg(test)]
             models_write_failure: Arc::new(Mutex::new(None)),
         })
@@ -519,8 +540,18 @@ impl AppService {
                 ));
             }
         };
-        let result = read_overview(&executable_path, &version, &target_configuration)?;
-        Ok(self.finish_overview_read(result))
+        let overview = match read_overview(&executable_path, &version, &target_configuration) {
+            Ok(overview) => overview,
+            Err(error) => {
+                self.model_tests.invalidate();
+                return Err(error);
+            }
+        };
+        self.model_tests.invalidate_if_changed(
+            &overview.dto.target_configuration.path,
+            overview.dto.files.models.content_hash.as_deref(),
+        );
+        Ok(self.finish_overview_read(overview))
     }
 
     #[cfg(test)]
@@ -605,6 +636,74 @@ impl AppService {
         }
     }
 
+    fn ensure_model_test_window(
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<(), AppError> {
+        if cancellation.is_cancelled() {
+            return Err(AppError::new(
+                "model-test-cancelled",
+                "模型测试已取消。",
+                "无需继续操作。",
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(AppError::new(
+                "model-test-timeout",
+                "模型测试准备超时。",
+                "请检查 OMP 可执行文件和配置目录后重试。",
+            ));
+        }
+        Ok(())
+    }
+
+    fn detect_omp_for_model_test(
+        &self,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<StartupState, AppError> {
+        Self::ensure_model_test_window(cancellation, deadline)?;
+        let saved = self.settings.read().omp_executable_path.clone();
+        let mut saved_failure = None;
+        if let Some(path) = saved.as_ref() {
+            let state =
+                self.validate_omp_for_model_test(PathBuf::from(path), cancellation, deadline)?;
+            if matches!(state, StartupState::OmpReady { .. }) {
+                return Ok(state);
+            }
+            saved_failure = Some(state);
+        }
+        Self::ensure_model_test_window(cancellation, deadline)?;
+        let path_result = self.environment.find_in_path();
+        Self::ensure_model_test_window(cancellation, deadline)?;
+        match path_result {
+            Ok(Some(_)) if saved.is_some() => Err(AppError::new(
+                "model-test-omp-confirmation-required",
+                "已保存的 OMP 不可用，PATH 中发现了未确认的替代版本。",
+                "请先在设置页面确认新的 OMP 后重试模型测试。",
+            )),
+            Ok(Some(path)) => self.validate_omp_for_model_test(path, cancellation, deadline),
+            Ok(None) => Ok(
+                saved_failure.unwrap_or_else(|| StartupState::OmpUnavailable {
+                    message: "未在已保存路径或系统 PATH 中找到可用的 OMP。".to_owned(),
+                }),
+            ),
+            Err(error) => {
+                let cause = io_error_cause(error.kind());
+                tracing::warn!(
+                    operation = "find_omp_in_path",
+                    cause,
+                    "OMP PATH discovery failed"
+                );
+                Ok(
+                    saved_failure.unwrap_or_else(|| StartupState::OmpUnavailable {
+                        message: format!("无法检查系统 PATH 中的 OMP（{cause}）。请手动选择 OMP。"),
+                    }),
+                )
+            }
+        }
+    }
+
     pub fn validate_selected_omp(&self, executable: PathBuf) -> StartupState {
         let _detection = self.detection_lock.lock();
         *self.pending_omp.write() = None;
@@ -636,43 +735,121 @@ impl AppService {
         previous_target_configuration: Option<String>,
     ) -> StartupState {
         let executable_path = executable.to_string_lossy().into_owned();
-        let version_output = match self.environment.run(&executable, &["--version"]) {
+        match self.validate_omp_with_runner(
+            executable,
+            requires_confirmation,
+            previous_target_configuration,
+            |executable, arguments| {
+                self.environment
+                    .run(executable, arguments)
+                    .map_err(CommandRunError::Io)
+            },
+            |target| {
+                self.environment
+                    .inspect_target(target)
+                    .map_err(CommandRunError::Io)
+            },
+        ) {
+            Ok(state) => state,
+            Err(CommandRunError::Cancelled | CommandRunError::TimedOut) => {
+                StartupState::InvalidExecutable {
+                    executable_path,
+                    message: "所选文件无法作为 OMP 可执行文件运行。".to_owned(),
+                    diagnostic_code: "process-control".to_owned(),
+                }
+            }
+            Err(CommandRunError::Io(error)) => StartupState::InvalidExecutable {
+                executable_path,
+                message: "所选文件无法作为 OMP 可执行文件运行。".to_owned(),
+                diagnostic_code: io_error_cause(error.kind()).to_owned(),
+            },
+        }
+    }
+
+    fn validate_omp_for_model_test(
+        &self,
+        executable: PathBuf,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<StartupState, AppError> {
+        self.validate_omp_with_runner(
+            executable,
+            false,
+            None,
+            |executable, arguments| {
+                self.environment
+                    .run_with_deadline(executable, arguments, cancellation, deadline)
+            },
+            |target| {
+                self.environment
+                    .inspect_target_with_deadline(target, cancellation, deadline)
+            },
+        )
+        .map_err(|error| match error {
+            CommandRunError::Cancelled => {
+                AppError::new("model-test-cancelled", "模型测试已取消。", "无需继续操作。")
+            }
+            CommandRunError::TimedOut => AppError::new(
+                "model-test-timeout",
+                "模型测试准备超时。",
+                "请检查 OMP 可执行文件和配置目录后重试。",
+            ),
+            CommandRunError::Io(_) => AppError::internal("模型测试准备任务失败"),
+        })
+    }
+
+    fn validate_omp_with_runner(
+        &self,
+        executable: PathBuf,
+        requires_confirmation: bool,
+        previous_target_configuration: Option<String>,
+        mut run: impl FnMut(&Path, &[&str]) -> Result<CommandOutput, CommandRunError>,
+        mut inspect: impl FnMut(&Path) -> Result<TargetConfigurationDiscovery, CommandRunError>,
+    ) -> Result<StartupState, CommandRunError> {
+        let executable_path = executable.to_string_lossy().into_owned();
+        let version_output = match run(&executable, &["--version"]) {
             Ok(output) => output,
-            Err(error) => {
-                return StartupState::InvalidExecutable {
+            Err(error @ (CommandRunError::Cancelled | CommandRunError::TimedOut)) => {
+                return Err(error);
+            }
+            Err(CommandRunError::Io(error)) => {
+                return Ok(StartupState::InvalidExecutable {
                     executable_path,
                     message: "所选文件无法作为 OMP 可执行文件运行。".to_owned(),
                     diagnostic_code: io_error_cause(error.kind()).to_owned(),
-                };
+                });
             }
         };
         if !version_output.success {
-            return StartupState::VersionFailed {
+            return Ok(StartupState::VersionFailed {
                 executable_path,
                 message: "OMP 版本命令执行失败。".to_owned(),
                 diagnostic_code: "process-exit".to_owned(),
                 exit_code: version_output.exit_code,
                 stderr: redact_diagnostic(&version_output.stderr),
-            };
+            });
         }
         let version =
             parse_single_line(&version_output.stdout).unwrap_or_else(|| "未知版本".to_owned());
-        let path_output = match self.environment.run(&executable, &["config", "path"]) {
+        let path_output = match run(&executable, &["config", "path"]) {
             Ok(output) => output,
-            Err(error) => {
-                return StartupState::ConfigPathFailed {
+            Err(error @ (CommandRunError::Cancelled | CommandRunError::TimedOut)) => {
+                return Err(error);
+            }
+            Err(CommandRunError::Io(error)) => {
+                return Ok(StartupState::ConfigPathFailed {
                     executable_path,
                     version,
                     message: config_path_failure_message(),
                     diagnostic_code: io_error_cause(error.kind()).to_owned(),
                     exit_code: None,
                     stderr: String::new(),
-                };
+                });
             }
         };
         let target = parse_absolute_directory(&path_output.stdout);
         if !path_output.success || target.is_none() {
-            return StartupState::ConfigPathFailed {
+            return Ok(StartupState::ConfigPathFailed {
                 executable_path,
                 version,
                 message: config_path_failure_message(),
@@ -684,13 +861,15 @@ impl AppService {
                 .to_owned(),
                 exit_code: path_output.exit_code,
                 stderr: redact_diagnostic(&path_output.stderr),
-            };
+            });
         }
         let target = target.unwrap();
-        let mut target_configuration = match self.environment.inspect_target(&target) {
+        let mut target_configuration = match inspect(&target) {
             Ok(discovery) => discovery,
-            Err(error) => {
-                return StartupState::ConfigPathFailed {
+            Err(CommandRunError::Cancelled) => return Err(CommandRunError::Cancelled),
+            Err(CommandRunError::TimedOut) => return Err(CommandRunError::TimedOut),
+            Err(CommandRunError::Io(error)) => {
+                return Ok(StartupState::ConfigPathFailed {
                     executable_path,
                     version,
                     message: "权威配置目录及其父目录不可访问。OMP Switch 不会改用其他目录。"
@@ -698,7 +877,7 @@ impl AppService {
                     diagnostic_code: io_error_cause(error.kind()).to_owned(),
                     exit_code: None,
                     stderr: redact_diagnostic(&error.to_string()),
-                };
+                });
             }
         };
         if let Some(notice) = target_configuration.recovery_notice.clone() {
@@ -708,13 +887,13 @@ impl AppService {
         {
             target_configuration.recovery_notice = Some(notice.clone());
         }
-        StartupState::OmpReady {
+        Ok(StartupState::OmpReady {
             executable_path,
             version,
             target_configuration: Box::new(target_configuration),
             previous_target_configuration,
             requires_confirmation,
-        }
+        })
     }
 
     pub fn initialize_target_configuration(
@@ -846,8 +1025,10 @@ impl AppService {
             settings.omp_executable_path = Some(executable.to_string_lossy().into_owned());
         })?;
         *pending = None;
+        self.model_tests.invalidate();
         Ok(settings)
     }
+
     pub fn get_ui_settings(&self) -> Result<AppSettings, AppError> {
         Ok(self.settings.read().clone())
     }
@@ -857,7 +1038,12 @@ impl AppService {
             settings.theme = update.theme;
             settings.selected_provider_id = update.selected_provider_id;
             settings.selected_model_id = update.selected_model_id;
-            settings.cost_notice_accepted = update.cost_notice_accepted;
+        })
+    }
+
+    pub fn accept_model_test_cost_notice(&self) -> Result<AppSettings, AppError> {
+        self.update_settings(|settings| {
+            settings.model_test_cost_notice_accepted = true;
         })
     }
 
@@ -875,6 +1061,7 @@ impl AppService {
             self.take_models_write_failure(),
         );
         if result.is_ok() {
+            self.model_tests.invalidate();
             self.clear_configuration_snapshot();
         }
         result
@@ -894,6 +1081,7 @@ impl AppService {
             self.take_models_write_failure(),
         );
         if result.is_ok() {
+            self.model_tests.invalidate();
             self.clear_configuration_snapshot();
         }
         result
@@ -910,6 +1098,7 @@ impl AppService {
             self.take_models_write_failure(),
         );
         if result.is_ok() {
+            self.model_tests.invalidate();
             self.clear_configuration_snapshot();
         }
         result
@@ -926,6 +1115,7 @@ impl AppService {
             self.take_models_write_failure(),
         );
         if result.is_ok() {
+            self.model_tests.invalidate();
             self.clear_configuration_snapshot();
         }
         result
@@ -942,6 +1132,7 @@ impl AppService {
             self.take_models_write_failure(),
         );
         if result.is_ok() {
+            self.model_tests.invalidate();
             self.clear_configuration_snapshot();
         }
         result
@@ -964,6 +1155,255 @@ impl AppService {
             self.clear_configuration_snapshot();
         }
         result
+    }
+
+    pub async fn test_model(&self, input: ModelTestInput) -> Result<ModelTestResult, AppError> {
+        if !self.settings.read().model_test_cost_notice_accepted {
+            return Err(AppError::new(
+                "model-test-cost-notice-required",
+                "模型测试费用说明尚未确认。",
+                "请先确认模型测试费用说明后重试。",
+            ));
+        }
+        let guard = self
+            .model_tests
+            .begin(&input.provider_id, &input.model_id)?;
+        let timeout = *self.model_test_timeout.read();
+        let started_at = Instant::now();
+        let deadline = started_at + timeout;
+        let configuration = match self
+            .prepare_model_test_configuration(
+                input.provider_id.clone(),
+                input.model_id.clone(),
+                guard.cancellation(),
+                guard.id(),
+                deadline,
+            )
+            .await
+        {
+            Ok(configuration) => configuration,
+            Err(preparation_error) => {
+                let ModelTestPreparationError {
+                    error,
+                    terminal_deferred,
+                } = preparation_error;
+                let terminal = match error.code {
+                    "model-test-cancelled" => Some(model_test::ModelTestTerminal {
+                        provider_id: input.provider_id.clone(),
+                        model_id: input.model_id.clone(),
+                        message: "测试已取消".to_owned(),
+                        error_code: "cancelled".to_owned(),
+                    }),
+                    "model-test-timeout" => Some(model_test::ModelTestTerminal {
+                        provider_id: input.provider_id.clone(),
+                        model_id: input.model_id.clone(),
+                        message: "模型测试准备超时".to_owned(),
+                        error_code: "timeout".to_owned(),
+                    }),
+                    _ => None,
+                };
+                if terminal_deferred {
+                    guard.keep_lease();
+                } else if let Some(terminal) = terminal {
+                    guard.fail(terminal);
+                } else {
+                    self.model_tests.invalidate();
+                    drop(guard);
+                }
+                return Err(error);
+            }
+        };
+        let binding = ModelTestBinding {
+            target_path: configuration.target_path.clone(),
+            models_hash: configuration.models_hash.clone(),
+        };
+        guard.bind(binding.clone());
+        let result = model_test::execute_until(configuration, guard.cancellation(), deadline).await;
+        match result {
+            Ok(result) => {
+                guard.complete(result.clone(), Some(binding));
+                Ok(result)
+            }
+            Err(error) => {
+                self.model_tests.invalidate();
+                drop(guard);
+                Err(error)
+            }
+        }
+    }
+
+    pub fn cancel_model_test(&self) -> bool {
+        self.model_tests.cancel()
+    }
+
+    pub fn get_model_test_state(&self) -> ModelTestState {
+        self.model_tests.state()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_model_test_timeout_for_test(&self, timeout: std::time::Duration) {
+        *self.model_test_timeout.write() = timeout;
+    }
+
+    fn prepare_model_test(
+        &self,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<
+        (
+            Box<TargetConfigurationDiscovery>,
+            &'static bundled_catalog::BundledCatalog,
+        ),
+        AppError,
+    > {
+        let state = self.detect_omp_for_model_test(cancellation, deadline)?;
+        let (version, target) = match state {
+            StartupState::OmpReady {
+                version,
+                target_configuration,
+                requires_confirmation: false,
+                ..
+            } => (version, target_configuration),
+            StartupState::OmpReady { .. } => {
+                return Err(AppError::new(
+                    "model-test-confirmation-required",
+                    "尚未确认新的 OMP 与 Target configuration，不能测试模型。",
+                    "请先在设置页面确认 OMP 与 Target configuration 后重试。",
+                ));
+            }
+            _ => {
+                return Err(AppError::new(
+                    "model-test-unavailable",
+                    "无法重新验证 OMP 的 Target configuration。",
+                    "请重新检测或重新选择 OMP。",
+                ));
+            }
+        };
+        let catalog = bundled_catalog::for_version(&version)?.ok_or_else(|| {
+            AppError::new(
+                "model-test-catalog-missing",
+                "当前 OMP 版本没有匹配的 bundled Provider 清单。",
+                "为避免误测内置或未知 Provider，模型测试暂时不可用。",
+            )
+        })?;
+        Ok((target, catalog))
+    }
+
+    async fn prepare_model_test_configuration(
+        &self,
+        provider_id: String,
+        model_id: String,
+        cancellation: CancellationToken,
+        test_id: u64,
+        deadline: Instant,
+    ) -> Result<crate::overview::ModelTestConfiguration, ModelTestPreparationError> {
+        let service = self.clone();
+        let preparation_cancellation = cancellation.clone();
+        let terminal_provider_id = provider_id.clone();
+        let terminal_model_id = model_id.clone();
+        let (sender, mut receiver) = tokio::sync::oneshot::channel();
+        let worker_coordinator = service.model_tests.clone();
+        let preparation = tokio::task::spawn_blocking(move || {
+            let (target, catalog) = {
+                let _detection = loop {
+                    if preparation_cancellation.is_cancelled() {
+                        return Err(AppError::new(
+                            "model-test-cancelled",
+                            "模型测试已取消。",
+                            "无需继续操作。",
+                        ));
+                    }
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(AppError::new(
+                            "model-test-timeout",
+                            "模型测试准备超时。",
+                            "请检查 OMP 可执行文件和配置目录后重试。",
+                        ));
+                    }
+                    if let Some(guard) = service
+                        .detection_lock
+                        .try_lock_for(remaining.min(Duration::from_millis(5)))
+                    {
+                        break guard;
+                    }
+                };
+                service.prepare_model_test(&preparation_cancellation, deadline)?
+            };
+            read_model_test_configuration(
+                &target,
+                catalog,
+                &provider_id,
+                &model_id,
+                &preparation_cancellation,
+                deadline,
+            )
+        });
+        tokio::spawn(async move {
+            let result = match preparation.await {
+                Ok(result) => result,
+                Err(_) => Err(AppError::internal("模型测试准备任务失败")),
+            };
+            if let Ok(configuration) = result.as_ref() {
+                worker_coordinator.bind(
+                    test_id,
+                    ModelTestBinding {
+                        target_path: configuration.target_path.clone(),
+                        models_hash: configuration.models_hash.clone(),
+                    },
+                );
+            }
+            worker_coordinator.finish_preparation(test_id);
+            let _ = sender.send(result);
+        });
+
+        let preparation = tokio::select! {
+            result = &mut receiver => match result {
+                Ok(result) => result.map_err(ModelTestPreparationError::from),
+                Err(_) => Err(ModelTestPreparationError::from(AppError::internal("模型测试准备任务失败"))),
+            },
+            _ = cancellation.cancelled() => {
+                self.model_tests.defer_terminal(
+                    test_id,
+                    model_test::ModelTestTerminal {
+                        provider_id: terminal_provider_id.clone(),
+                        model_id: terminal_model_id.clone(),
+                        message: "测试已取消".to_owned(),
+                        error_code: "cancelled".to_owned(),
+                    },
+                );
+                return Err(ModelTestPreparationError {
+                    error: AppError::new(
+                        "model-test-cancelled",
+                        "模型测试已取消。",
+                        "无需继续操作。",
+                    ),
+                    terminal_deferred: true,
+                });
+            },
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                self.model_tests.defer_terminal(
+                    test_id,
+                    model_test::ModelTestTerminal {
+                        provider_id: terminal_provider_id,
+                        model_id: terminal_model_id,
+                        message: "模型测试准备超时".to_owned(),
+                        error_code: "timeout".to_owned(),
+                    },
+                );
+                return Err(ModelTestPreparationError {
+                    error: AppError::new(
+                        "model-test-timeout",
+                        "模型测试准备超时。",
+                        "请检查 OMP 可执行文件和配置目录后重试。",
+                    ),
+                    terminal_deferred: true,
+                });
+            }
+        };
+        Self::ensure_model_test_window(&cancellation, deadline)
+            .map_err(ModelTestPreparationError::from)?;
+        preparation
     }
 
     fn prepare_role_write(
@@ -1185,6 +1625,29 @@ fn log_command_result<T>(
         Err(error) => tracing::warn!(operation, status = "error", code = error.code, elapsed_ms),
     }
 }
+fn log_model_test_result(started_at: Instant, result: &Result<ModelTestResult, AppError>) {
+    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+    match result {
+        Ok(model_result) if model_result.success => {
+            tracing::info!(operation = "test_model", status = "success", elapsed_ms)
+        }
+        Ok(model_result) => tracing::warn!(
+            operation = "test_model",
+            status = "error",
+            code = model_result
+                .error_code
+                .as_deref()
+                .unwrap_or("model-test-failed"),
+            elapsed_ms
+        ),
+        Err(error) => tracing::warn!(
+            operation = "test_model",
+            status = "error",
+            code = error.code,
+            elapsed_ms
+        ),
+    }
+}
 
 fn log_startup_state(operation: &'static str, started_at: Instant, state: &StartupState) {
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
@@ -1269,6 +1732,16 @@ pub fn save_ui_settings(
 }
 
 #[tauri::command]
+pub fn accept_model_test_cost_notice(
+    service: tauri::State<'_, AppService>,
+) -> Result<AppSettings, AppError> {
+    let started_at = Instant::now();
+    let result = service.accept_model_test_cost_notice();
+    log_command_result("accept_model_test_cost_notice", started_at, &result);
+    result
+}
+
+#[tauri::command]
 pub fn create_custom_provider(
     service: tauri::State<'_, AppService>,
     input: CreateCustomProviderInput,
@@ -1331,6 +1804,32 @@ pub fn save_model_roles(
     let result = service.save_model_roles(input);
     log_command_result("save_model_roles", started_at, &result);
     result
+}
+
+#[tauri::command]
+pub async fn test_model(
+    service: tauri::State<'_, AppService>,
+    input: ModelTestInput,
+) -> Result<ModelTestResult, AppError> {
+    let started_at = Instant::now();
+    let result = service.test_model(input).await;
+    log_model_test_result(started_at, &result);
+    result
+}
+
+#[tauri::command]
+pub fn cancel_model_test(service: tauri::State<'_, AppService>) -> bool {
+    let cancelled = service.cancel_model_test();
+    tracing::info!(
+        operation = "cancel_model_test",
+        status = if cancelled { "requested" } else { "idle" },
+    );
+    cancelled
+}
+
+#[tauri::command]
+pub fn get_model_test_state(service: tauri::State<'_, AppService>) -> ModelTestState {
+    service.get_model_test_state()
 }
 
 #[tauri::command]

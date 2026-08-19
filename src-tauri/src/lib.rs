@@ -3,6 +3,7 @@ mod bundled_catalog;
 mod error;
 mod logging;
 mod model_mutation;
+mod model_test;
 mod models_write;
 mod omp_environment;
 mod overview;
@@ -12,10 +13,11 @@ mod role_mutation;
 mod target_configuration;
 
 use application::{
-    AppService, confirm_selected_omp, create_custom_provider, create_model, delete_model,
-    detect_omp, edit_custom_provider, edit_model, get_overview_load, get_startup_state,
-    get_ui_settings, initialize_target_configuration, open_target_configuration_directory,
-    save_model_roles, save_ui_settings, validate_selected_omp,
+    AppService, accept_model_test_cost_notice, cancel_model_test, confirm_selected_omp,
+    create_custom_provider, create_model, delete_model, detect_omp, edit_custom_provider,
+    edit_model, get_model_test_state, get_overview_load, get_startup_state, get_ui_settings,
+    initialize_target_configuration, open_target_configuration_directory, save_model_roles,
+    save_ui_settings, test_model, validate_selected_omp,
 };
 
 use tauri::Manager;
@@ -52,12 +54,16 @@ pub fn run() {
             open_target_configuration_directory,
             get_ui_settings,
             save_ui_settings,
+            accept_model_test_cost_notice,
             create_custom_provider,
             edit_custom_provider,
             create_model,
             edit_model,
             delete_model,
             save_model_roles,
+            test_model,
+            cancel_model_test,
+            get_model_test_state,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run OMP Switch");

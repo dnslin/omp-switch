@@ -14,6 +14,7 @@ type UiSettingsState = UiSettingsWithoutSelection & {
   selection: ModelSelection;
   savedSelectionInvalid: boolean;
   setTheme(theme: Theme): void;
+  setModelTestCostNoticeAccepted(accepted: boolean): void;
   beginHydration(): void;
   hydrate(settings: UiSettings): void;
   failHydration(): void;
@@ -24,7 +25,7 @@ const NO_MODEL_SELECTION: ModelSelection = { kind: "none" };
 const DEFAULT_UI_SETTINGS: UiSettingsWithoutSelection = {
   ompExecutablePath: null,
   theme: "system",
-  costNoticeAccepted: false,
+  modelTestCostNoticeAccepted: false,
 };
 
 function persistedModelSelection(providerId: string | null, modelId: string | null) {
@@ -56,6 +57,7 @@ export const useUiSettings = create<UiSettingsState>((set) => ({
   selection: NO_MODEL_SELECTION,
   savedSelectionInvalid: false,
   setTheme: (theme) => set({ theme }),
+  setModelTestCostNoticeAccepted: (accepted) => set({ modelTestCostNoticeAccepted: accepted }),
   beginHydration: () => set({ ...DEFAULT_UI_SETTINGS, selection: NO_MODEL_SELECTION, savedSelectionInvalid: false, hydrationState: "loading" }),
   hydrate: ({ selectedProviderId, selectedModelId, ...settings }) => set({ ...settings, ...persistedModelSelection(selectedProviderId, selectedModelId), hydrationState: "ready" }),
   failHydration: () => set({ selection: NO_MODEL_SELECTION, savedSelectionInvalid: false, hydrationState: "error" }),

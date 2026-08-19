@@ -1,12 +1,23 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
+    collections::HashMap,
     fs,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
         Arc, Barrier,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc::{self, Receiver},
     },
     thread,
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::ffi::CString;
 
 use crate::{
     application::{
@@ -16,7 +27,8 @@ use crate::{
         OverviewLoadDto, ProviderAuthMode, StartupState, SupportedApi, SupportedInput, Theme,
         UiSettingsUpdate,
     },
-    omp_environment::{CommandOutput, OmpEnvironment},
+    omp_environment::{CommandOutput, CommandRunError, OmpEnvironment, SystemOmpEnvironment},
+    overview::{ModelTestConfiguration, OverviewAuthMode},
     target_configuration::{
         ConfigurationFileDiscovery, ConfigurationFileStatus, ConfigurationIssue,
         InitializationFailurePoint, TargetConfigurationDiscovery, TargetConfigurationStatus,
@@ -29,6 +41,7 @@ use parking_lot::Mutex;
 use pretty_assertions::assert_eq;
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::prelude::*;
 
 #[derive(Clone)]
@@ -149,6 +162,21 @@ impl OmpEnvironment for FakeOmpEnvironment {
             ("noisy-path", ["config", "path"]) => Ok(CommandOutput::success("/tmp/one\n/tmp/two")),
             _ => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
         }
+    }
+    fn run_with_deadline(
+        &self,
+        executable: &Path,
+        arguments: &[&str],
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<CommandOutput, CommandRunError> {
+        if cancellation.is_cancelled() {
+            return Err(CommandRunError::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(CommandRunError::TimedOut);
+        }
+        self.run(executable, arguments).map_err(CommandRunError::Io)
     }
     fn inspect_target(&self, target: &Path) -> std::io::Result<TargetConfigurationDiscovery> {
         if let Some(kind) = self.inspect_target_error {
@@ -460,6 +488,16 @@ fn application_service_uses_an_exact_catalog_and_locks_only_provider_management_
         input: [text]
         contextWindow: 128000
         maxTokens: 4096
+  custom:
+    baseUrl: https://custom.example/v1
+    api: openai-responses
+    models:
+      - id: too-large
+        name: Too Large
+        input: [text]
+        contextWindow: 1000
+        maxTokens: 2000
+
 "#,
     )
     .unwrap();
@@ -486,6 +524,9 @@ fn application_service_uses_an_exact_catalog_and_locks_only_provider_management_
     assert_eq!(provider("OPENAI")["editable"], false);
     assert_eq!(provider("advanced")["classification"], "advanced");
     assert_eq!(provider("advanced")["editable"], false);
+    assert_eq!(provider("custom")["editable"], true);
+    assert_eq!(provider("custom")["models"][0]["complete"], false);
+    assert_eq!(provider("custom")["models"][0]["status"], "incomplete");
     assert_eq!(
         exact_environment.calls(),
         vec![
@@ -685,6 +726,99 @@ fn startup_detection_requires_confirmation_before_replacing_unusable_saved_execu
             .as_deref(),
         Some("/bin/path-omp")
     );
+}
+#[tokio::test]
+async fn model_test_rejects_an_unconfirmed_path_omp_replacement() {
+    let environment = Arc::new(FakeOmpEnvironment::with_path("/bin/path-omp"));
+    let service = service_with(environment.clone(), Some("/bin/missing-omp"));
+    service.accept_model_test_cost_notice().unwrap();
+
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "provider",
+        "modelId": "model"
+    }))
+    .unwrap();
+    let error = service.test_model(input).await.unwrap_err();
+
+    assert_eq!(error.code, "model-test-omp-confirmation-required");
+    assert_eq!(
+        environment.calls(),
+        vec![(
+            PathBuf::from("/bin/missing-omp"),
+            vec!["--version".to_owned()]
+        )]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn omp_deadline_covers_inherited_output_pipes() {
+    let root = tempdir().unwrap();
+    let executable = root.path().join("spawn-descendant");
+    fs::write(&executable, "#!/bin/sh\nsleep 5 &\nexit 0\n").unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+
+    let environment = SystemOmpEnvironment::new(root.path().join("transactions"));
+    let started = Instant::now();
+    let result = environment.run_with_deadline(
+        &executable,
+        &[],
+        &CancellationToken::new(),
+        Instant::now() + Duration::from_millis(50),
+    );
+
+    assert!(matches!(result, Err(CommandRunError::TimedOut)));
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[cfg(unix)]
+#[test]
+fn omp_command_output_is_bounded() {
+    let root = tempdir().unwrap();
+    let executable = root.path().join("noisy-omp");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nwhile :; do printf '%8192s' ''; done\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+
+    let environment = SystemOmpEnvironment::new(root.path().join("transactions"));
+    let result = environment.run_with_deadline(
+        &executable,
+        &[],
+        &CancellationToken::new(),
+        Instant::now() + Duration::from_secs(2),
+    );
+
+    assert!(matches!(
+        result,
+        Err(CommandRunError::Io(error))
+            if error.kind() == std::io::ErrorKind::InvalidData
+    ));
+}
+#[cfg(windows)]
+#[test]
+fn omp_deadline_covers_windows_inherited_output_pipes() {
+    let environment = SystemOmpEnvironment::new(PathBuf::from("transactions"));
+    let started = Instant::now();
+    let result = environment.run_with_deadline(
+        Path::new("cmd.exe"),
+        &[
+            "/D",
+            "/C",
+            "start \"\" /B cmd.exe /D /C \"ping.exe -n 6 127.0.0.1 >NUL\"",
+        ],
+        &CancellationToken::new(),
+        Instant::now() + Duration::from_millis(50),
+    );
+
+    assert!(matches!(result, Err(CommandRunError::TimedOut)));
+    assert!(started.elapsed() < Duration::from_secs(1));
 }
 
 #[test]
@@ -1077,6 +1211,36 @@ fn malformed_settings_return_safe_diagnostic_error() {
 }
 
 #[test]
+fn legacy_cost_notice_setting_is_read_and_rewritten_with_the_canonical_key() {
+    let app_data = tempdir().unwrap();
+    let settings_path = app_data.path().join("settings.json");
+    fs::write(
+        &settings_path,
+        br#"{"ompExecutablePath":null,"theme":"system","selectedProviderId":null,"selectedModelId":null,"costNoticeAccepted":true}"#,
+    )
+    .unwrap();
+
+    let service = AppService::new(settings_path.clone()).unwrap();
+    assert!(
+        service
+            .get_ui_settings()
+            .unwrap()
+            .model_test_cost_notice_accepted
+    );
+    service
+        .save_ui_settings(UiSettingsUpdate {
+            theme: Theme::Dark,
+            selected_provider_id: None,
+            selected_model_id: None,
+        })
+        .unwrap();
+
+    let persisted = fs::read_to_string(settings_path).unwrap();
+    assert!(persisted.contains("modelTestCostNoticeAccepted"));
+    assert!(!persisted.contains("costNoticeAccepted"));
+}
+
+#[test]
 fn settings_update_atomically_replaces_an_existing_settings_file() {
     let app_data = tempdir().unwrap();
     let settings_path = app_data.path().join("settings.json");
@@ -1096,7 +1260,6 @@ fn settings_update_atomically_replaces_an_existing_settings_file() {
             theme: Theme::Dark,
             selected_provider_id: None,
             selected_model_id: None,
-            cost_notice_accepted: false,
         })
         .unwrap();
 
@@ -1114,20 +1277,26 @@ fn settings_seam_persists_only_approved_lightweight_state() {
         theme: Theme::Dark,
         selected_provider_id: Some("dnslin".to_owned()),
         selected_model_id: Some("gpt-5.6-sol".to_owned()),
-        cost_notice_accepted: true,
+        model_test_cost_notice_accepted: true,
     };
 
-    assert_eq!(
-        service
-            .save_ui_settings(UiSettingsUpdate {
-                theme: Theme::Dark,
-                selected_provider_id: Some("dnslin".to_owned()),
-                selected_model_id: Some("gpt-5.6-sol".to_owned()),
-                cost_notice_accepted: true,
-            })
-            .unwrap(),
-        expected
-    );
+    service
+        .save_ui_settings(UiSettingsUpdate {
+            theme: Theme::Dark,
+            selected_provider_id: Some("dnslin".to_owned()),
+            selected_model_id: Some("gpt-5.6-sol".to_owned()),
+        })
+        .unwrap();
+    service.accept_model_test_cost_notice().unwrap();
+    service
+        .save_ui_settings(UiSettingsUpdate {
+            theme: Theme::Dark,
+            selected_provider_id: Some("dnslin".to_owned()),
+            selected_model_id: Some("gpt-5.6-sol".to_owned()),
+        })
+        .unwrap();
+
+    assert_eq!(service.get_ui_settings().unwrap(), expected);
 
     let rebuilt = AppService::new(settings_path).unwrap();
     assert_eq!(rebuilt.get_ui_settings().unwrap(), expected);
@@ -1146,7 +1315,6 @@ fn ui_settings_update_cannot_replace_the_confirmed_omp_executable() {
             theme: Theme::Dark,
             selected_provider_id: Some("dnslin".to_owned()),
             selected_model_id: Some("gpt-5.6-sol".to_owned()),
-            cost_notice_accepted: true,
         })
         .unwrap();
 
@@ -1179,7 +1347,6 @@ fn concurrent_settings_update_and_omp_confirmation_preserve_both_changes() {
                 theme: Theme::Dark,
                 selected_provider_id: Some("dnslin".to_owned()),
                 selected_model_id: None,
-                cost_notice_accepted: false,
             })
         });
         let confirmation_service = Arc::clone(&service);
@@ -1208,7 +1375,7 @@ fn ui_settings_update_rejects_omp_executable_path_from_ipc() {
         "theme": "system",
         "selectedProviderId": null,
         "selectedModelId": null,
-        "costNoticeAccepted": false
+        "modelTestCostNoticeAccepted": false
     }));
 
     assert!(result.is_err());
@@ -3189,7 +3356,7 @@ fn custom_provider_creation_accepts_spec_valid_model_suffix_and_limits() {
     let mut input = provider_creation_input(opened_models_hash);
     input.first_model.id = "  new-model:high  ".to_owned();
     input.first_model.context_window = 1_024;
-    input.first_model.max_tokens = 2_048;
+    input.first_model.max_tokens = 512;
 
     let result = service.create_custom_provider(input).unwrap();
 
@@ -3199,7 +3366,7 @@ fn custom_provider_creation_accepts_spec_valid_model_suffix_and_limits() {
     let model = &created["providers"]["new-provider"]["models"][0];
     assert_eq!(model["id"], "new-model:high");
     assert_eq!(model["contextWindow"], 1_024);
-    assert_eq!(model["maxTokens"], 2_048);
+    assert_eq!(model["maxTokens"], 512);
     let refreshed = service.get_overview_load().overview.unwrap();
     let model = refreshed
         .models
@@ -4365,4 +4532,963 @@ fn custom_model_roles_support_create_rename_edit_and_delete_without_empty_values
     assert!(!deleted.contains("researcher-v2:"));
     assert!(deleted.contains("modelRoles: {}"));
     assert!(deleted.contains("keep: true"));
+}
+
+#[tokio::test]
+async fn model_test_reloads_saved_openai_completions_and_uses_a_minimal_authenticated_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_model_test_connection(&listener);
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0);
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap()
+                    + 4;
+                let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= header_end + content_length {
+                    break;
+                }
+            }
+        }
+        let request_text = String::from_utf8_lossy(&request);
+        assert!(request_text.starts_with("POST /v1/chat/completions HTTP/1.1"));
+        assert!(request_text.contains("authorization: Bearer saved-secret"));
+        let header_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let body: serde_json::Value = serde_json::from_slice(&request[header_end..]).unwrap();
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(body["max_tokens"], 1);
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"], "OMP Switch model test");
+        let response = r#"{"choices":[{"message":{"content":"OK"}}]}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response.len(),
+            response,
+        )
+        .unwrap();
+    });
+
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        format!(
+            "providers:\n  test-provider:\n    baseUrl: http://{address}/v1\n    api: openai-completions\n    apiKey: saved-secret\n    models:\n      - id: test-model\n        name: Test Model\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n"
+        ),
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = service_for_target(&target);
+
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "test-provider",
+        "modelId": "test-model"
+    }))
+    .unwrap();
+    let blocked = service.test_model(input.clone()).await.unwrap_err();
+    assert_eq!(blocked.code, "model-test-cost-notice-required");
+    service.accept_model_test_cost_notice().unwrap();
+    let result = service.test_model(input.clone()).await.unwrap();
+
+    server.join().unwrap();
+    assert!(result.success);
+    assert_eq!(result.provider_id, "test-provider");
+    assert_eq!(result.model_id, "test-model");
+    assert_eq!(result.protocol.as_str(), "openai-completions");
+    assert_eq!(result.status, Some(200));
+    assert!(
+        !serde_json::to_string(&result)
+            .unwrap()
+            .contains("saved-secret")
+    );
+    let overview = service.get_overview_load().overview.unwrap();
+    let save_roles =
+        serde_json::from_value::<crate::application::SaveModelRolesInput>(serde_json::json!({
+            "openedConfigHash": overview.files.config.content_hash.unwrap(),
+            "changes": [{
+                "kind": "create",
+                "roleId": "researcher",
+                "providerId": "test-provider",
+                "modelId": "test-model"
+            }]
+        }))
+        .unwrap();
+    service.save_model_roles(save_roles).unwrap();
+    assert!(service.get_model_test_state().result.is_some());
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    let rejected = service.test_model(input.clone()).await.unwrap_err();
+    assert_eq!(rejected.code, "model-test-not-eligible");
+    assert!(service.get_model_test_state().result.is_none());
+    fs::write(target.join("models.yml"), "providers: [\n").unwrap();
+    let failed_reload = service.get_overview_load();
+    assert_eq!(
+        failed_reload.error.as_ref().map(|error| error.code),
+        Some("overview-parse-error")
+    );
+    assert!(service.get_model_test_state().result.is_none());
+}
+#[tokio::test]
+async fn model_test_rejects_an_image_only_model_for_text_probe() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        "providers:\n  image-provider:\n    baseUrl: http://127.0.0.1:1/v1\n    api: openai-responses\n    models:\n      - id: image-only\n        name: Image Only\n        input: [image]\n        contextWindow: 128000\n        maxTokens: 4096\n",
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = service_for_target(&target);
+    let overview = serde_json::to_value(service.get_overview_load().overview.unwrap()).unwrap();
+    assert_eq!(overview["providers"][0]["models"][0]["complete"], true);
+    service.accept_model_test_cost_notice().unwrap();
+
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "image-provider",
+        "modelId": "image-only"
+    }))
+    .unwrap();
+    let error = service.test_model(input).await.unwrap_err();
+
+    assert_eq!(error.code, "model-test-not-eligible");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn model_test_rejects_a_non_file_models_path_quickly() {
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let fifo = target.join("models.fifo");
+    let fifo_path = CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+
+    let mut target_override = writable_target(&target);
+    target_override.models.canonical_path = fifo.to_string_lossy().into_owned();
+    target_override.models.resolved_path = Some(fifo.to_string_lossy().into_owned());
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.clone()),
+        target_override: Some(target_override),
+        transaction_root: target.parent().unwrap().join(".app-transactions"),
+        ..FakeOmpEnvironment::default()
+    });
+    let service = service_with(environment, None);
+    service.accept_model_test_cost_notice().unwrap();
+    service.set_model_test_timeout_for_test(Duration::from_millis(50));
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "blocked-provider",
+        "modelId": "blocked-model"
+    }))
+    .unwrap();
+
+    let started = Instant::now();
+    let outcome = tokio::time::timeout(Duration::from_millis(300), service.test_model(input)).await;
+    let error = outcome
+        .expect("model test should reject non-file paths before the deadline")
+        .unwrap_err();
+    assert_eq!(error.code, "overview-read-failed");
+    assert!(started.elapsed() < Duration::from_millis(250));
+}
+
+struct CapturedModelTestRequest {
+    method: String,
+    target: String,
+    headers: HashMap<String, String>,
+    body: serde_json::Value,
+}
+
+fn accept_model_test_connection(listener: &TcpListener) -> TcpStream {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("mock server accept failed: {error}"),
+        }
+    }
+}
+
+fn start_model_test_server(
+    request_count: usize,
+) -> (String, Receiver<CapturedModelTestRequest>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        for _ in 0..request_count {
+            let mut stream = accept_model_test_connection(&listener);
+            let request = read_model_test_request(&mut stream);
+            let response = if request.target.starts_with("/v1/chat/completions") {
+                r#"{"choices":[{"message":{"content":"OK"}}]}"#
+            } else if request.target.starts_with("/v1/responses") {
+                r#"{"output":[{"type":"message"}]}"#
+            } else if request.target.contains("/messages") {
+                r#"{"content":[{"type":"text","text":"OK"}]}"#
+            } else {
+                r#"{"candidates":[{"content":{"parts":[{"text":"OK"}]}}]}"#
+            };
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response,
+            )
+            .unwrap();
+            sender.send(request).unwrap();
+        }
+    });
+    (address, receiver, handle)
+}
+
+fn read_model_test_request(stream: &mut TcpStream) -> CapturedModelTestRequest {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let read = match stream.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out while reading model-test request"
+                );
+                continue;
+            }
+            Err(error) => panic!("failed to read model-test request: {error}"),
+        };
+        assert!(read > 0);
+        request.extend_from_slice(&buffer[..read]);
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let header_end = header_end + 4;
+        let headers_text = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers_text
+            .lines()
+            .find_map(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower
+                    .strip_prefix("content-length:")
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        if request.len() < header_end + content_length {
+            continue;
+        }
+        let mut lines = headers_text.lines();
+        let request_line = lines.next().unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        let method = request_parts.next().unwrap().to_owned();
+        let target = request_parts.next().unwrap().to_owned();
+        let headers = lines
+            .filter_map(|line| line.split_once(':'))
+            .map(|(key, value)| (key.to_ascii_lowercase(), value.trim().to_owned()))
+            .collect();
+        let body =
+            serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap();
+        return CapturedModelTestRequest {
+            method,
+            target,
+            headers,
+            body,
+        };
+    }
+}
+
+#[tokio::test]
+async fn model_test_uses_protocol_specific_urls_bodies_and_authentication() {
+    let (base_url, requests, server) = start_model_test_server(4);
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        format!(
+            "providers:\n  test-completions:\n    baseUrl: {base_url}/v1\n    api: openai-completions\n    apiKey: completions-key\n    models:\n      - id: completions-model\n        name: Completions\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n  test-responses:\n    baseUrl: {base_url}/v1\n    api: openai-responses\n    apiKey: responses-key\n    models:\n      - id: responses-model\n        name: Responses\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n  test-anthropic:\n    baseUrl: {base_url}/v1/\n    api: anthropic-messages\n    apiKey: anthropic-key\n    models:\n      - id: anthropic-model\n        name: Anthropic\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n  test-google:\n    baseUrl: {base_url}/v1/?region=us&alt=json\n    api: google-generative-ai\n    apiKey: google-key\n    models:\n      - id: google-model\n        name: Google\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n"
+        ),
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = service_for_target(&target);
+    service.accept_model_test_cost_notice().unwrap();
+
+    for (provider_id, model_id) in [
+        ("test-completions", "completions-model"),
+        ("test-responses", "responses-model"),
+        ("test-anthropic", "anthropic-model"),
+        ("test-google", "google-model"),
+    ] {
+        let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+            "providerId": provider_id,
+            "modelId": model_id
+        }))
+        .unwrap();
+        let result = service.test_model(input).await.unwrap();
+        assert!(result.success);
+    }
+    server.join().unwrap();
+
+    let completions = requests.recv().unwrap();
+    assert_eq!(completions.method, "POST");
+    assert_eq!(completions.target, "/v1/chat/completions");
+    assert_eq!(
+        completions.headers["authorization"],
+        "Bearer completions-key"
+    );
+    assert_eq!(
+        completions.body,
+        serde_json::json!({
+            "model": "completions-model",
+            "messages": [{"role": "user", "content": "OMP Switch model test"}],
+            "max_tokens": 1,
+        })
+    );
+
+    let responses = requests.recv().unwrap();
+    assert_eq!(responses.method, "POST");
+    assert_eq!(responses.target, "/v1/responses");
+    assert_eq!(responses.headers["authorization"], "Bearer responses-key");
+    assert_eq!(
+        responses.body,
+        serde_json::json!({
+            "model": "responses-model",
+            "input": "OMP Switch model test",
+            "max_output_tokens": 1,
+        })
+    );
+
+    let anthropic = requests.recv().unwrap();
+    assert_eq!(anthropic.method, "POST");
+    assert_eq!(anthropic.target, "/v1/messages");
+    assert_eq!(anthropic.headers["authorization"], "Bearer anthropic-key");
+    assert_eq!(anthropic.headers["anthropic-version"], "2023-06-01");
+    assert!(!anthropic.headers.contains_key("x-api-key"));
+    assert_eq!(
+        anthropic.body,
+        serde_json::json!({
+            "model": "anthropic-model",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "OMP Switch model test"}],
+        })
+    );
+
+    let google = requests.recv().unwrap();
+    assert_eq!(google.method, "POST");
+    assert!(
+        google
+            .target
+            .starts_with("/v1/models/google-model:streamGenerateContent?region=us&alt=sse")
+    );
+    assert_eq!(google.headers["x-goog-api-key"], "google-key");
+    assert!(!google.headers.contains_key("authorization"));
+    assert_eq!(
+        google.body,
+        serde_json::json!({
+            "contents": [{"role": "user", "parts": [{"text": "OMP Switch model test"}]}],
+            "generationConfig": {"maxOutputTokens": 1},
+        })
+    );
+}
+
+#[tokio::test]
+async fn model_test_never_forwards_credentials_across_redirects() {
+    let (base_url, forwarded, server) = start_redirect_model_test_server();
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        format!(
+            "providers:\n  test-redirect:\n    baseUrl: {base_url}\n    api: anthropic-messages\n    apiKey: redirect-secret\n    models:\n      - id: redirect-model\n        name: Redirect\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n"
+        ),
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = service_for_target(&target);
+    service.accept_model_test_cost_notice().unwrap();
+
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "test-redirect",
+        "modelId": "redirect-model"
+    }))
+    .unwrap();
+    let result = service.test_model(input).await.unwrap();
+
+    assert!(!result.success);
+    assert_eq!(result.error_code.as_deref(), Some("http-status"));
+    assert!(!forwarded.load(Ordering::SeqCst));
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn model_test_limits_response_body_and_returns_safe_format_failure() {
+    let (base_url, server) = start_oversized_model_test_server();
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        format!(
+            "providers:\n  test-large:\n    baseUrl: {base_url}/v1\n    api: openai-responses\n    models:\n      - id: large-model\n        name: Large\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n"
+        ),
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = service_for_target(&target);
+    service.accept_model_test_cost_notice().unwrap();
+
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "test-large",
+        "modelId": "large-model"
+    }))
+    .unwrap();
+    let result = service.test_model(input).await.unwrap();
+
+    assert!(!result.success);
+    assert_eq!(result.error_code.as_deref(), Some("response-format"));
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn model_test_classifies_base_dns_connection_and_tls_failures_safely() {
+    let invalid = ModelTestConfiguration {
+        provider_id: "provider".to_owned(),
+        model_id: "model".to_owned(),
+        base_url: "not-a-url".to_owned(),
+        protocol: SupportedApi::OpenAiResponses,
+        auth_mode: OverviewAuthMode::None,
+        api_key: None,
+        target_path: "/tmp/test-target".to_owned(),
+        models_hash: "test-models-hash".to_owned(),
+    };
+    let invalid_error =
+        crate::model_test::execute(invalid, CancellationToken::new(), Duration::from_secs(2))
+            .await
+            .unwrap_err();
+    assert_eq!(invalid_error.code, "model-test-base-url");
+
+    let dns = ModelTestConfiguration {
+        base_url: "http://omp-switch.invalid/v1".to_owned(),
+        ..direct_model_test_configuration()
+    };
+    let dns_result =
+        crate::model_test::execute(dns, CancellationToken::new(), Duration::from_secs(2))
+            .await
+            .unwrap();
+    assert_eq!(dns_result.error_code.as_deref(), Some("dns"));
+
+    let unused_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let unused_address = unused_listener.local_addr().unwrap();
+    drop(unused_listener);
+    let connection = ModelTestConfiguration {
+        base_url: format!("http://{unused_address}/tls-provider/v1"),
+        ..direct_model_test_configuration()
+    };
+    let connection_result =
+        crate::model_test::execute(connection, CancellationToken::new(), Duration::from_secs(2))
+            .await
+            .unwrap();
+    assert_eq!(connection_result.error_code.as_deref(), Some("connection"));
+
+    let tls_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tls_address = tls_listener.local_addr().unwrap();
+    let tls_server = thread::spawn(move || {
+        let mut stream = accept_model_test_connection(&tls_listener);
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut buffer = [0_u8; 1024];
+        let _ = stream.read(&mut buffer);
+        let _ = stream.write_all(b"not tls");
+    });
+    let tls = ModelTestConfiguration {
+        base_url: format!("https://{tls_address}/v1"),
+        ..direct_model_test_configuration()
+    };
+    let tls_result =
+        crate::model_test::execute(tls, CancellationToken::new(), Duration::from_secs(2))
+            .await
+            .unwrap();
+    assert_eq!(tls_result.error_code.as_deref(), Some("tls"));
+    tls_server.join().unwrap();
+}
+fn direct_model_test_configuration() -> ModelTestConfiguration {
+    ModelTestConfiguration {
+        provider_id: "provider".to_owned(),
+        model_id: "model".to_owned(),
+        base_url: "http://127.0.0.1:1/v1".to_owned(),
+        protocol: SupportedApi::OpenAiResponses,
+        auth_mode: OverviewAuthMode::None,
+        api_key: None,
+        target_path: "/tmp/test-target".to_owned(),
+        models_hash: "test-models-hash".to_owned(),
+    }
+}
+
+fn start_redirect_model_test_server() -> (String, Arc<AtomicBool>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let destination_url = format!("http://{}/v1/messages", destination.local_addr().unwrap());
+    let forwarded = Arc::new(AtomicBool::new(false));
+    let forwarded_in_server = Arc::clone(&forwarded);
+    let handle = thread::spawn(move || {
+        let mut stream = accept_model_test_connection(&listener);
+        let _ = read_model_test_request(&mut stream);
+        write!(
+            stream,
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: {destination_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(100));
+        destination.set_nonblocking(true).unwrap();
+        if let Ok((mut redirected_stream, _)) = destination.accept() {
+            forwarded_in_server.store(true, Ordering::SeqCst);
+            let _ = read_model_test_request(&mut redirected_stream);
+            let body = r#"{"content":[{"type":"text","text":"OK"}]}"#;
+            let _ = write!(
+                redirected_stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+        }
+    });
+    (address, forwarded, handle)
+}
+
+fn start_oversized_model_test_server() -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let body = "x".repeat(crate::model_test::MAX_RESPONSE_BYTES + 1);
+    let handle = thread::spawn(move || {
+        let mut stream = accept_model_test_connection(&listener);
+        let _ = read_model_test_request(&mut stream);
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body,
+        );
+    });
+    (address, handle)
+}
+
+fn start_status_model_test_server(responses: Vec<(u16, &'static str)>) -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let handle = thread::spawn(move || {
+        for (status, response) in responses {
+            let mut stream = accept_model_test_connection(&listener);
+            let _ = read_model_test_request(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 {} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status,
+                response.len(),
+                response,
+            )
+            .unwrap();
+        }
+    });
+    (address, handle)
+}
+
+fn start_hanging_model_test_server() -> (String, Receiver<()>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("mock server accept failed: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let _ = read_model_test_request(&mut stream);
+        sender.send(()).unwrap();
+        thread::sleep(Duration::from_millis(400));
+        let response = r#"{"output":[{"type":"message"}]}"#;
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response.len(),
+            response,
+        );
+    });
+    (address, receiver, handle)
+}
+
+#[tokio::test]
+async fn model_test_returns_safe_error_categories_and_supports_no_authentication() {
+    let (base_url, server) = start_status_model_test_server(vec![
+        (401, r#"{"error":"auth response secret"}"#),
+        (403, r#"{"error":"permission response secret"}"#),
+        (404, r#"{"error":"not found response secret"}"#),
+        (429, r#"{"error":"rate response secret"}"#),
+        (500, r#"{"error":"server response secret"}"#),
+        (200, "not-json response secret"),
+    ]);
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        format!(
+            "providers:\n  test-errors:\n    baseUrl: {base_url}/v1\n    api: openai-responses\n    apiKey: error-key\n    models:\n      - id: error-model\n        name: Error Model\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n"
+        ),
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = service_for_target(&target);
+    service.accept_model_test_cost_notice().unwrap();
+    for expected in [
+        "http-401",
+        "http-403",
+        "http-404",
+        "http-429",
+        "http-5xx",
+        "response-format",
+    ] {
+        let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+            "providerId": "test-errors",
+            "modelId": "error-model"
+        }))
+        .unwrap();
+        let result = service.test_model(input).await.unwrap();
+        assert!(!result.success);
+        assert_eq!(result.error_code.as_deref(), Some(expected));
+        assert!(
+            !serde_json::to_string(&result)
+                .unwrap()
+                .contains("response secret")
+        );
+    }
+    server.join().unwrap();
+
+    let (base_url, requests, server) = start_model_test_server(1);
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        format!(
+            "providers:\n  test-no-auth:\n    baseUrl: {base_url}/v1\n    api: openai-responses\n    models:\n      - id: no-auth-model\n        name: No Auth\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n"
+        ),
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = service_for_target(&target);
+    service.accept_model_test_cost_notice().unwrap();
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "test-no-auth",
+        "modelId": "no-auth-model"
+    }))
+    .unwrap();
+    assert!(service.test_model(input).await.unwrap().success);
+    let request = requests.recv().unwrap();
+    assert!(!request.headers.contains_key("authorization"));
+    assert!(!request.headers.contains_key("x-api-key"));
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn model_test_is_single_concurrent_cancellable_and_time_bounded() {
+    let (base_url, started, server) = start_hanging_model_test_server();
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        format!(
+            "providers:\n  test-timeout:\n    baseUrl: {base_url}/v1\n    api: openai-responses\n    apiKey: timeout-key\n    models:\n      - id: timeout-model\n        name: Timeout\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n"
+        ),
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = service_for_target(&target);
+    service.accept_model_test_cost_notice().unwrap();
+    service.set_model_test_timeout_for_test(Duration::from_millis(50));
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "test-timeout",
+        "modelId": "timeout-model"
+    }))
+    .unwrap();
+    let result = service.test_model(input).await.unwrap();
+    assert_eq!(result.error_code.as_deref(), Some("timeout"));
+    started.recv_timeout(Duration::from_secs(1)).unwrap();
+    server.join().unwrap();
+
+    let (base_url, started, server) = start_hanging_model_test_server();
+    let app_data = tempdir().unwrap().keep();
+    let target = app_data.join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        target.join("models.yml"),
+        format!(
+            "providers:\n  test-cancel:\n    baseUrl: {base_url}/v1\n    api: openai-responses\n    apiKey: cancel-key\n    models:\n      - id: cancel-model\n        name: Cancel\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n"
+        ),
+    )
+    .unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let service = service_for_target(&target);
+    service.accept_model_test_cost_notice().unwrap();
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "test-cancel",
+        "modelId": "cancel-model"
+    }))
+    .unwrap();
+    let first_service = service.clone();
+    let first_input = input.clone();
+    let first = tokio::spawn(async move { first_service.test_model(first_input).await.unwrap() });
+    let mut request_started = false;
+    for _ in 0..100 {
+        if started.try_recv().is_ok() {
+            request_started = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(request_started);
+    let busy = service.test_model(input).await.unwrap_err();
+    assert_eq!(busy.code, "model-test-busy");
+    assert!(service.cancel_model_test());
+    let cancelled = first.await.unwrap();
+    assert_eq!(cancelled.error_code.as_deref(), Some("cancelled"));
+    assert!(!service.get_model_test_state().running);
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn model_test_cancels_and_times_out_a_hanging_omp_preflight() {
+    let app_data = tempdir().unwrap().keep();
+    let executable = app_data.join("hanging-omp");
+    fs::write(&executable, "#!/bin/sh\nwhile :; do :; done\n").unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    let settings_path = app_data.join("settings.json");
+    fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&AppSettings {
+            omp_executable_path: Some(executable.to_string_lossy().into_owned()),
+            ..AppSettings::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let environment = Arc::new(SystemOmpEnvironment::new(
+        app_data.join("target-initialization-transactions"),
+    ));
+    let service = AppService::new_with_environment(settings_path, environment).unwrap();
+    service.accept_model_test_cost_notice().unwrap();
+    service.set_model_test_timeout_for_test(Duration::from_secs(2));
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "hanging-provider",
+        "modelId": "hanging-model"
+    }))
+    .unwrap();
+
+    let first_service = service.clone();
+    let first_input = input.clone();
+    let started = Instant::now();
+    let first = tokio::spawn(async move { first_service.test_model(first_input).await });
+    for _ in 0..100 {
+        if service.get_model_test_state().running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(service.cancel_model_test());
+    let cancelled = first.await.unwrap().unwrap_err();
+    assert_eq!(cancelled.code, "model-test-cancelled");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    for _ in 0..100 {
+        if !service.get_model_test_state().running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let cancelled_state = service.get_model_test_state();
+    assert!(!cancelled_state.running);
+    assert_eq!(
+        cancelled_state
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.error_code.as_str()),
+        Some("cancelled")
+    );
+    service.set_model_test_timeout_for_test(Duration::from_millis(50));
+    let started = Instant::now();
+    let timed_out = service.test_model(input).await.unwrap_err();
+    assert_eq!(timed_out.code, "model-test-timeout");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    for _ in 0..100 {
+        if !service.get_model_test_state().running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let timed_out_state = service.get_model_test_state();
+    assert!(!timed_out_state.running);
+    assert_eq!(
+        timed_out_state
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.error_code.as_str()),
+        Some("timeout")
+    );
+}
+
+#[tokio::test]
+async fn model_test_keeps_lease_until_blocking_preflight_worker_exits() {
+    let root = tempdir().unwrap();
+    let target = root.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let release_preflight = Arc::new(Barrier::new(2));
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.clone()),
+        inspect_real_target: true,
+        transaction_root: root.path().join("transactions"),
+        block_first_version: Some((release_preflight.clone(), Arc::new(AtomicBool::new(false)))),
+        ..FakeOmpEnvironment::default()
+    });
+    let service = service_with(environment.clone(), None);
+    service.accept_model_test_cost_notice().unwrap();
+    service.set_model_test_timeout_for_test(Duration::from_secs(2));
+    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
+        "providerId": "blocked-provider",
+        "modelId": "blocked-model"
+    }))
+    .unwrap();
+
+    let first_service = service.clone();
+    let first_input = input.clone();
+    let first = tokio::spawn(async move { first_service.test_model(first_input).await });
+    for _ in 0..100 {
+        if !environment.calls().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(!environment.calls().is_empty());
+    assert!(service.cancel_model_test());
+    let cancelled = first.await.unwrap().unwrap_err();
+    assert_eq!(cancelled.code, "model-test-cancelled");
+
+    let busy = service.test_model(input.clone()).await.unwrap_err();
+    assert_eq!(busy.code, "model-test-busy");
+
+    release_preflight.wait();
+    for _ in 0..100 {
+        if !service.get_model_test_state().running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(!service.get_model_test_state().running);
+    let retry = service.test_model(input).await.unwrap_err();
+    assert_ne!(retry.code, "model-test-busy");
+}
+
+#[tokio::test]
+async fn model_test_times_out_while_waiting_for_a_stuck_omp_detection_lock() {
+    let root = tempdir().unwrap();
+    let target = root.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
+    let release_detection = Arc::new(Barrier::new(2));
+    let environment = Arc::new(FakeOmpEnvironment {
+        path_omp: Some(PathBuf::from("/bin/temp-omp")),
+        config_path: Some(target.clone()),
+        inspect_real_target: true,
+        transaction_root: root.path().join("transactions"),
+        block_first_version: Some((release_detection.clone(), Arc::new(AtomicBool::new(false)))),
+        ..FakeOmpEnvironment::default()
+    });
+    let service = service_with(environment.clone(), None);
+    let detection_service = service.clone();
+    let detection = thread::spawn(move || detection_service.get_startup_state());
+    let mut command_started = false;
+    for _ in 0..100 {
+        if !environment.calls().is_empty() {
+            command_started = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(command_started);
+    service.accept_model_test_cost_notice().unwrap();
+    service.set_model_test_timeout_for_test(Duration::from_millis(50));
+    let started = Instant::now();
+    let error = service
+        .test_model(
+            serde_json::from_value(serde_json::json!({
+                "providerId": "blocked-provider",
+                "modelId": "blocked-model"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "model-test-timeout");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    release_detection.wait();
+    detection.join().unwrap();
 }

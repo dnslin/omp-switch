@@ -739,6 +739,7 @@ type ModelTestResult = {
 ```
 
 不返回请求 Header、API Key、完整请求或完整响应。
+- 概览或 Provider 刷新后重新同步测试状态；如果绑定的 Target configuration 或 `models.yml` Hash 已变化，旧结果立即失效。
 
 ### 13.4 错误分类
 

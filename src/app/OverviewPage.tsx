@@ -3,15 +3,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import { toast } from "sonner";
 
-import { Button } from "../components/ui";
+import { Button, StatusIndicator } from "../components/ui";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
-import { asAppError, useTauriClient, type AppError, type OverviewDto, type OverviewModel, type OverviewProvider, type TauriClient, type UiSettingsUpdate } from "../lib/tauri-client";
+import { asAppError, useTauriClient, type AppError, type ModelTestResult, type ModelTestTerminal, type OverviewDto, type OverviewModel, type OverviewProvider, type TauriClient, type UiSettingsUpdate } from "../lib/tauri-client";
 import { modelSelectionFields, useUiSettings, type ModelSelection } from "../store/ui-settings";
 import { MainShell } from "./MainShell";
 import { fileStatusView } from "./omp-presentation";
 import { useOverviewLoad } from "./overview-load";
 import { buildModelEndpoint, type ModelEndpoint } from "./model-endpoint";
-
+import { isModelTestable, useModelTestRunner, useRefreshAfterModelTest, type ModelTestRunner } from "./model-test";
 type OverviewError = Pick<AppError, "message" | "action">;
 
 const overviewLoadCopy = {
@@ -107,7 +107,9 @@ function sameModelSelection(left: ModelSelection, right: ModelSelection) {
 export function OverviewPage() {
   const client = useTauriClient();
   const hydrationState = useUiSettings((state) => state.hydrationState);
-  const { data, startupState, error, loading, reload, shellStatus } = useOverviewLoad(overviewLoadCopy);
+  const { data, startupState, error, loading, revision, reload, refresh, shellStatus } = useOverviewLoad(overviewLoadCopy);
+  const modelTest = useModelTestRunner();
+  useRefreshAfterModelTest({ ready: Boolean(data), loading, revision, refresh });
 
   async function openTargetDirectory() {
     if (startupState?.kind !== "omp-ready") return;
@@ -126,7 +128,7 @@ export function OverviewPage() {
     <MainShell status={shellStatus}>
       <div className={`overview-page ${pageClass}`} aria-busy={pageLoading}>
         <OverviewPageHeader />
-        {pageLoading ? <OverviewLoadingBody /> : error ? <OverviewErrorBody error={error} onReload={reload} onOpenTargetDirectory={openDirectory} /> : data ? <OverviewContentBody data={data} /> : <OverviewErrorBody error={overviewLoadCopy.missingOverview} onReload={reload} onOpenTargetDirectory={openDirectory} />}
+        {pageLoading ? <OverviewLoadingBody /> : error ? <OverviewErrorBody error={error} onReload={reload} onOpenTargetDirectory={openDirectory} /> : data ? <OverviewContentBody data={data} modelTest={modelTest} /> : <OverviewErrorBody error={overviewLoadCopy.missingOverview} onReload={reload} onOpenTargetDirectory={openDirectory} />}
       </div>
     </MainShell>
   );
@@ -181,7 +183,7 @@ function OverviewErrorBody({ error, onReload, onOpenTargetDirectory }: { error: 
   );
 }
 
-function OverviewContentBody({ data }: { data: OverviewDto }) {
+function OverviewContentBody({ data, modelTest }: { data: OverviewDto; modelTest: ModelTestRunner }) {
   const client = useTauriClient();
   const hydrationState = useUiSettings((state) => state.hydrationState);
   const storedSelection = useUiSettings((state) => state.selection);
@@ -196,8 +198,8 @@ function OverviewContentBody({ data }: { data: OverviewDto }) {
     return () => { isActive.current = false; };
   }, []);
   const enqueueSelectionSave = useCallback((nextSelection: ModelSelection) => {
-    const { theme, costNoticeAccepted } = useUiSettings.getState();
-    const settings = { theme, ...modelSelectionFields(nextSelection), costNoticeAccepted };
+    const { theme } = useUiSettings.getState();
+    const settings = { theme, ...modelSelectionFields(nextSelection) };
     enqueueOverviewSettingsSave(client, settings, () => isActive.current);
   }, [client]);
 
@@ -242,9 +244,10 @@ function OverviewContentBody({ data }: { data: OverviewDto }) {
       <OverviewMetrics data={data} />
       {data.state === "empty" || data.state === "read-only" ? <OverviewStateBanner data={data} /> : null}
       <div className="overview-test-area">
-        <QuickTestPanel providers={data.providers} provider={selectedProvider} model={selectedModel} onProviderChange={handleProviderChange} onModelChange={handleModelChange} />
-        <TestResultPanel />
+        <QuickTestPanel providers={data.providers} provider={selectedProvider} model={selectedModel} targetWritable={data.targetConfiguration.status === "writable" && data.targetConfiguration.writable} onProviderChange={handleProviderChange} onModelChange={handleModelChange} modelTest={modelTest} />
+        <TestResultPanel providers={data.providers} result={modelTest.result} terminal={modelTest.terminal} running={modelTest.running} providerId={modelTest.activeProviderId} modelId={modelTest.activeModelId} onCancel={modelTest.cancel} />
       </div>
+      {modelTest.costNoticeDialog}
     </>
   );
 }
@@ -333,14 +336,18 @@ function QuickTestPanel({
   providers,
   provider,
   model,
+  targetWritable,
   onProviderChange,
   onModelChange,
+  modelTest,
 }: {
   providers: readonly OverviewProvider[];
   provider: OverviewProvider | null;
   model: OverviewModel | null;
+  targetWritable: boolean;
   onProviderChange(value: string): void;
   onModelChange(value: string): void;
+  modelTest: ModelTestRunner;
 }) {
   const endpoint = provider && model ? modelEndpoint(provider, model) : { kind: "not-configured" as const };
   const finalAddress = endpoint.kind === "available" ? endpoint.value : endpoint.kind === "invalid" ? endpoint.reason : "—";
@@ -348,6 +355,11 @@ function QuickTestPanel({
   const capabilities = model
     ? [...model.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : "Unsupported"), ...(model.reasoning === true ? ["Reasoning"] : [])].join("  ·  ") || "—"
     : "—";
+  const canTest = Boolean(provider && model && isModelTestable(provider, model, targetWritable));
+  const active = Boolean(provider && model && modelTest.isActive(provider.id, model.id));
+  const disabled = active ? false : !modelTest.settingsReady || !canTest || modelTest.isBusy(provider?.id ?? "", model?.id ?? "");
+  const testLabel = active ? "取消测试" : "测试模型";
+  const testTitle = active ? undefined : !modelTest.settingsReady ? "正在读取设置" : !canTest ? "当前 Model definition 不满足测试条件" : modelTest.running ? "已有模型测试正在进行" : undefined;
   return (
     <section className="overview-panel overview-quick-test" aria-label="快速测试">
       <h2>快速测试</h2>
@@ -371,7 +383,22 @@ function QuickTestPanel({
       <OverviewField label="最终地址" value={finalAddress} mono />
       <OverviewField label="能力" value={capabilities} />
       <OverviewField label="Context Window" value={model?.contextWindow ? formatOverviewCount(model.contextWindow) : "—"} />
-      <div className="overview-panel-actions"><Button disabled aria-label="测试模型（尚未启用）">测试模型</Button></div>
+      <div className="overview-panel-actions">
+        <Button
+          disabled={disabled}
+          aria-label={testLabel}
+          title={testTitle}
+          onClick={() => {
+            if (active) {
+              modelTest.cancel();
+            } else if (!modelTest.running && provider && model) {
+              modelTest.start(provider.id, model.id);
+            }
+          }}
+        >
+          {testLabel}
+        </Button>
+      </div>
     </section>
   );
 }
@@ -424,20 +451,44 @@ function OverviewField({ label, value, mono = false }: { label: string; value: s
   );
 }
 
-function TestResultPanel() {
+function TestResultPanel({ providers, result, terminal, running, providerId, modelId, onCancel }: { providers: readonly OverviewProvider[]; result: ModelTestResult | null; terminal: ModelTestTerminal | null; running: boolean; providerId: string | null; modelId: string | null; onCancel(): void }) {
+  const contextProviderId = running ? providerId : result?.providerId ?? terminal?.providerId ?? null;
+  const contextModelId = running ? modelId : result?.modelId ?? terminal?.modelId ?? null;
+  const contextProvider = contextProviderId ? providers.find((item) => item.id === contextProviderId) : undefined;
+  const contextModel = contextProvider && contextModelId ? contextProvider.models.find((item) => item.id === contextModelId) : undefined;
+  const protocol = running ? contextModel?.effectiveApi ?? "—" : result?.protocol ?? "—";
+  const endpointResult = contextProvider && contextModel && !contextModel.hasBaseUrlOverride && (running || result)
+    ? buildModelEndpoint(contextProvider.baseUrl, contextModel.id, running ? contextModel.effectiveApi : result?.protocol)
+    : { kind: "not-configured" as const };
+  const endpoint = endpointResult.kind === "available" ? endpointResult.value : "—";
+  const statusLabel = running ? "测试中…" : result?.message ?? terminal?.message ?? "尚未测试";
+  const tone = running
+    ? "warning"
+    : result
+      ? result.success ? "success" : result.errorCode === "cancelled" ? "warning" : "danger"
+      : terminal
+        ? terminal.errorCode === "cancelled" ? "warning" : "danger"
+        : "neutral";
+  const displayModel = contextProviderId && contextModelId ? `${contextProviderId}/${contextModelId}` : "—";
   return (
-    <section className="overview-panel overview-result" aria-label="测试结果">
-      <header><h2>测试结果</h2><span className="overview-result-status"><span className="status-dot" aria-hidden="true" />尚未测试</span></header>
-      <OverviewResultRow label="模型" value="—" />
-      <OverviewResultRow label="耗时" value="—" />
-      <OverviewResultRow label="状态码" value="—" />
-      <OverviewResultRow label="时间" value="—" />
+    <section className="overview-panel overview-result" aria-label="测试结果" aria-live="polite">
+      <header>
+        <h2>测试结果</h2>
+        <StatusIndicator tone={tone}>{statusLabel}</StatusIndicator>
+        {running ? <Button type="button" variant="secondary" className="overview-result__cancel" aria-label="取消测试" onClick={onCancel}>取消测试</Button> : null}
+      </header>
+      <OverviewResultRow label="模型" value={displayModel} />
+      <OverviewResultRow label="有效协议" value={protocol} />
+      <OverviewResultRow label="最终地址" value={endpoint} mono />
+      <OverviewResultRow label="耗时" value={running || !result ? "—" : `${result.latencyMs} ms`} />
+      <OverviewResultRow label="状态码" value={running || !result ? "—" : result.status ? String(result.status) : "—"} />
+      <OverviewResultRow label="时间" value={running ? "请求进行中" : result || terminal ? "刚刚" : "—"} />
     </section>
   );
 }
 
-function OverviewResultRow({ label, value }: { label: string; value: string }) {
-  return <div className="overview-result-row"><span>{label}</span><span>{value}</span></div>;
+function OverviewResultRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return <div className="overview-result-row"><span>{label}</span><span className={mono ? "overview-result-row__value--mono" : undefined}>{value}</span></div>;
 }
 
 
