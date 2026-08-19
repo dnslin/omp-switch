@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import reducedMotionStyles from "../styles/components.css?raw";
-import { TauriClientProvider, type OverviewDto, type OverviewLoad, type OverviewModel, type OverviewProvider, type StartupState, type TargetConfigurationDiscovery, type TauriClient } from "../lib/tauri-client";
+import { TauriClientProvider, type AppError, type OverviewDto, type OverviewLoad, type OverviewModel, type OverviewProvider, type StartupState, type TargetConfigurationDiscovery, type TauriClient } from "../lib/tauri-client";
 import { useModelTestStore } from "../store/model-test";
 
 
@@ -1056,8 +1056,10 @@ describe("React page seam", () => {
     });
     await user.click(screen.getByRole("button", { name: "创建 Provider" }));
 
-    const error = await screen.findByText(message);
+    const errors = await screen.findAllByText(message);
+    const error = errors.find((element) => element.classList.contains("provider-create-field-error")) ?? errors[0];
     const stepText = expectedStep === "provider" ? "步骤 1 / 2 · Provider" : "步骤 2 / 2 · 首个模型";
+    expect(screen.getByRole("alert")).toHaveTextContent("请修正字段后重试。");
     expect(screen.getByText((_, element) => Boolean(
       element?.classList.contains("provider-create-step") && element.textContent === stepText,
     ))).toBeVisible();
@@ -2580,6 +2582,44 @@ describe("React page seam", () => {
     renderRoute("/settings", { ...unavailableClient, getStartupState: async () => readyState });
     expect(await screen.findByRole("heading", { name: "设置" })).toBeVisible();
   });
+  it("keeps the redetection interaction available while reduced motion is active", async () => {
+    const originalMatchMedia = window.matchMedia;
+    const style = document.createElement("style");
+    style.textContent = reducedMotionStyles;
+    document.head.appendChild(style);
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: (query: string) => ({
+        matches: query === "(prefers-reduced-motion: reduce)",
+        media: query,
+        onchange: null,
+        addListener: () => undefined,
+        removeListener: () => undefined,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        dispatchEvent: () => false,
+      }),
+    });
+    const detection = deferred<StartupState>();
+    const user = userEvent.setup();
+    try {
+      renderRoute("/settings", {
+        ...unavailableClient,
+        getStartupState: async () => readyState,
+        detectOmp: () => detection.promise,
+      });
+      await screen.findByRole("heading", { name: "设置" });
+      await user.click(screen.getByRole("button", { name: "重新检测" }));
+      const status = await screen.findByRole("status");
+      expect(status).toHaveTextContent("正在重新检测 OMP");
+      const mediaRule = Array.from(style.sheet?.cssRules ?? []).find((rule) => rule instanceof CSSMediaRule) as CSSMediaRule | undefined;
+      expect(mediaRule?.conditionText).toContain("prefers-reduced-motion");
+      detection.resolve(readyState);
+    } finally {
+      style.remove();
+      Object.defineProperty(window, "matchMedia", { configurable: true, value: originalMatchMedia });
+    }
+  });
   it("does not persist a theme after settings hydration fails", async () => {
     const user = userEvent.setup();
     const saveUiSettings = vi.fn(unavailableClient.saveUiSettings);
@@ -2651,6 +2691,50 @@ describe("React page seam", () => {
     await user.click(within(dialog).getByRole("button", { name: "取消" }));
     expect(screen.getByText("/usr/local/bin/omp")).toBeVisible();
     expect(confirmSelectedOmp).not.toHaveBeenCalled();
+  });
+  it("rereads configuration after confirming an OMP switch", async () => {
+    const user = userEvent.setup();
+    const candidate: StartupState = {
+      kind: "omp-ready",
+      executablePath: "/opt/new/bin/omp",
+      version: "18.0.0",
+      targetConfiguration: targetConfiguration("/Users/username/.omp/new-agent"),
+      previousTargetConfiguration: "/Users/username/.omp/agent",
+      requiresConfirmation: true,
+    };
+    const switchedState: StartupState = { ...candidate, requiresConfirmation: false };
+    const getOverviewLoad = vi.fn(async () => overviewLoad(overviewDto(), switchedState));
+    const getStartupState = vi.fn(async () => readyState);
+    const getSettingsDirectories = vi.fn()
+      .mockResolvedValueOnce(unavailableClient.getSettingsDirectories())
+      .mockResolvedValue({
+        targetConfiguration: "/Users/username/.omp/new-agent",
+        applicationConfiguration: "/Users/username/Library/Application Support/OMP Switch",
+        applicationLog: "/Users/username/Library/Logs/OMP Switch",
+        targetBackup: "/Users/username/.omp/new-agent/backups",
+      });
+    renderRoute("/settings", {
+      ...unavailableClient,
+      getStartupState,
+      getSettingsDirectories,
+      getOverviewLoad,
+      selectOmpExecutable: async () => "/opt/new/bin/omp",
+      validateSelectedOmp: async () => candidate,
+    });
+
+    await screen.findByRole("heading", { name: "设置" });
+    await user.click(screen.getByRole("button", { name: "重新选择" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "确认切换" }));
+
+    await waitFor(() => {
+      expect(getOverviewLoad).toHaveBeenCalledTimes(1);
+      expect(getSettingsDirectories).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.getAllByTitle("/Users/username/.omp/new-agent").length).toBeGreaterThan(0);
+    expect(screen.getByTitle("/Users/username/.omp/new-agent/backups")).toBeVisible();
+    expect(await screen.findByText("OMP 已切换")).toBeVisible();
+    expect(screen.queryByText("无法保存 OMP 选择")).not.toBeInTheDocument();
   });
   it("initializes a creation-required Target before committing an OMP switch", async () => {
     const user = userEvent.setup();
@@ -2816,6 +2900,17 @@ describe("React page seam", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("不会猜测目录");
     expect(screen.getByRole("alert")).toHaveTextContent("请检查 OMP 配置路径和权限后重试");
     expect(screen.getByText("/Users/username/Library/Application Support/OMP Switch")).toBeVisible();
+  });
+  it("does not guess a platform when runtime information is unavailable", async () => {
+    renderRoute("/settings", {
+      ...unavailableClient,
+      getStartupState: async () => readyState,
+      getRuntimeInfo: async () => { throw { code: "runtime-info-failed", message: "无法读取运行环境", action: "请重新打开设置页。" }; },
+    });
+
+    await screen.findByRole("heading", { name: "设置" });
+    expect(await screen.findByText("未知 · —")).toBeVisible();
+    expect(screen.queryByText("Linux · —")).not.toBeInTheDocument();
   });
 
   it("refreshes to OMP unavailable after resetting with no PATH fallback", async () => {
@@ -3141,7 +3236,8 @@ describe("Overview page seam", () => {
       message: "无法保存快速测试选择",
       action: "请重试。",
     });
-    expect(await screen.findByText("无法保存快速测试选择")).toBeVisible();
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法保存快速测试选择");
+    expect(screen.getByRole("alert")).toHaveTextContent("请重试。");
     await waitFor(() => expect(saveUiSettings).toHaveBeenCalledTimes(2));
     expect(saveUiSettings).toHaveBeenNthCalledWith(2, {
       theme: "dark",
@@ -4408,5 +4504,28 @@ describe("Model test page seam", () => {
     const result = await screen.findByRole("region", { name: "测试结果" });
     await waitFor(() => expect(result).toHaveTextContent("Provider 拒绝了认证，请检查 API Key。"));
     expect(result.querySelector(".status-indicator--danger")).not.toBeNull();
+  });
+  it("keeps the model test recovery action visible after a command failure", async () => {
+    const user = userEvent.setup();
+    const testModel = vi.fn(async () => {
+      throw { code: "http-401", message: "模型测试失败", action: "检查 API Key 后重试。" } satisfies AppError;
+    });
+    renderRoute("/overview", {
+      ...unavailableClient,
+      getOverviewLoad: async () => overviewLoad(overviewDto(), readyState),
+      getUiSettings: async () => ({
+        ompExecutablePath: "/usr/local/bin/omp",
+        theme: "dark",
+        selectedProviderId: "dnslin",
+        selectedModelId: "gpt-5.6-sol",
+        modelTestCostNoticeAccepted: true,
+      }),
+      testModel,
+    });
+
+    const panel = await screen.findByRole("region", { name: "快速测试" });
+    await user.click(within(panel).getByRole("button", { name: "测试模型" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("检查 API Key 后重试。");
   });
 });

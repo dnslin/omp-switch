@@ -252,9 +252,7 @@ pub struct AppService {
     settings: Arc<RwLock<AppSettings>>,
     settings_write: Arc<Mutex<()>>,
     environment: Arc<dyn OmpEnvironment>,
-    pending_omp: Arc<RwLock<Option<PathBuf>>>,
-    pending_omp_confirmation: Arc<RwLock<Option<PendingOmpConfirmation>>>,
-    pending_omp_use_path: Arc<RwLock<bool>>,
+    pending_omp: Arc<RwLock<Option<PendingOmpSwitch>>>,
     recovery_notice: Arc<RwLock<Option<(PathBuf, String)>>>,
     #[cfg(test)]
     configuration_snapshot: Arc<RwLock<Option<ConfigurationSnapshot>>>,
@@ -290,6 +288,22 @@ impl PendingOmpConfirmation {
             }),
             _ => None,
         }
+    }
+}
+#[derive(Clone, Debug)]
+struct PendingOmpSwitch {
+    executable: PathBuf,
+    confirmation: Option<PendingOmpConfirmation>,
+    use_system_path: bool,
+}
+impl PendingOmpSwitch {
+    fn from_state(executable: PathBuf, state: &StartupState, use_system_path: bool) -> Option<Self> {
+        let confirmation = PendingOmpConfirmation::from_state(state)?;
+        Some(Self {
+            executable,
+            confirmation: Some(confirmation),
+            use_system_path,
+        })
     }
 }
 
@@ -457,8 +471,6 @@ impl AppService {
             settings_write: Arc::new(Mutex::new(())),
             environment,
             pending_omp: Arc::new(RwLock::new(None)),
-            pending_omp_confirmation: Arc::new(RwLock::new(None)),
-            pending_omp_use_path: Arc::new(RwLock::new(false)),
             recovery_notice: Arc::new(RwLock::new(None)),
             #[cfg(test)]
             configuration_snapshot: Arc::new(RwLock::new(None)),
@@ -666,8 +678,6 @@ impl AppService {
 
     fn detect_omp_internal(&self) -> StartupState {
         *self.pending_omp.write() = None;
-        *self.pending_omp_confirmation.write() = None;
-        *self.pending_omp_use_path.write() = false;
         let saved = self.settings.read().omp_executable_path.clone();
         let mut saved_failure = None;
         if let Some(path) = saved.as_ref() {
@@ -680,15 +690,13 @@ impl AppService {
         match self.environment.find_in_path() {
             Ok(Some(path)) => {
                 let requires_confirmation = saved.is_some();
-                let previous_target_configuration = self.saved_target_configuration(&path);
+                let previous_target_configuration = self.saved_target_configuration();
                 let state = self.validate_omp(
                     path.clone(),
                     requires_confirmation,
                     previous_target_configuration,
                 );
-                *self.pending_omp.write() =
-                    PendingOmpConfirmation::from_state(&state).map(|_| path);
-                *self.pending_omp_confirmation.write() = PendingOmpConfirmation::from_state(&state);
+                *self.pending_omp.write() = PendingOmpSwitch::from_state(path, &state, false);
                 state
             }
             Ok(None) => saved_failure.unwrap_or_else(|| StartupState::OmpUnavailable {
@@ -779,20 +787,15 @@ impl AppService {
     pub fn validate_selected_omp(&self, executable: PathBuf) -> StartupState {
         let _detection = self.detection_lock.lock();
         *self.pending_omp.write() = None;
-        *self.pending_omp_confirmation.write() = None;
-        *self.pending_omp_use_path.write() = false;
-        let previous_target_configuration = self.saved_target_configuration(&executable);
+        let previous_target_configuration = self.saved_target_configuration();
         let state = self.validate_omp(executable.clone(), true, previous_target_configuration);
-        *self.pending_omp.write() = PendingOmpConfirmation::from_state(&state).map(|_| executable);
-        *self.pending_omp_confirmation.write() = PendingOmpConfirmation::from_state(&state);
+        *self.pending_omp.write() = PendingOmpSwitch::from_state(executable, &state, false);
         state
     }
     pub fn validate_path_omp(&self) -> StartupState {
         let _detection = self.detection_lock.lock();
         *self.pending_omp.write() = None;
-        *self.pending_omp_confirmation.write() = None;
-        *self.pending_omp_use_path.write() = false;
-        let previous_target_configuration = self.saved_target_configuration(Path::new(""));
+        let previous_target_configuration = self.saved_target_configuration();
         let state = match self.environment.find_in_path() {
             Ok(Some(path)) => self.validate_omp(path, true, previous_target_configuration),
             Ok(None) => StartupState::OmpUnavailable {
@@ -810,14 +813,12 @@ impl AppService {
         } = &state
         {
             let executable = PathBuf::from(executable_path);
-            *self.pending_omp.write() = Some(executable);
-            *self.pending_omp_confirmation.write() = PendingOmpConfirmation::from_state(&state);
-            *self.pending_omp_use_path.write() = true;
+            *self.pending_omp.write() = PendingOmpSwitch::from_state(executable, &state, true);
         }
         state
     }
 
-    fn saved_target_configuration(&self, _selected: &Path) -> Option<String> {
+    fn saved_target_configuration(&self) -> Option<String> {
         let saved = self.settings.read().omp_executable_path.clone()?;
         match self.validate_omp(PathBuf::from(saved), false, None) {
             StartupState::OmpReady {
@@ -1046,18 +1047,21 @@ impl AppService {
         let _detection = self.detection_lock.lock();
         let saved_settings = self.settings.read().clone();
         let saved = saved_settings.omp_executable_path.clone();
-        let requires_confirmation = self.pending_omp.read().as_ref() == Some(&executable)
+        let pending = self.pending_omp.read().clone();
+        let requires_confirmation = pending
+            .as_ref()
+            .is_some_and(|pending| pending.executable == executable)
             || saved
                 .as_deref()
                 .is_some_and(|saved_path| Path::new(saved_path) != executable);
-        let previous_target_configuration = self.saved_target_configuration(&executable);
+        let previous_target_configuration = self.saved_target_configuration();
         let state = self.validate_omp(
             executable.clone(),
             requires_confirmation,
             previous_target_configuration.clone(),
         );
         let pending_confirmation = PendingOmpConfirmation::from_state(&state);
-        let pending_use_path = *self.pending_omp_use_path.read();
+        let pending_use_path = pending.as_ref().is_some_and(|pending| pending.use_system_path);
         let target = match state {
             StartupState::OmpReady {
                 ref target_configuration,
@@ -1105,9 +1109,11 @@ impl AppService {
                 self.update_settings(|settings| {
                     *settings = saved_settings.clone();
                 })?;
-                *self.pending_omp.write() = Some(executable.clone());
-                *self.pending_omp_confirmation.write() = pending_confirmation;
-                *self.pending_omp_use_path.write() = pending_use_path;
+                *self.pending_omp.write() = Some(PendingOmpSwitch {
+                    executable: executable.clone(),
+                    confirmation: pending_confirmation,
+                    use_system_path: pending_use_path,
+                });
             }
             return Err(AppError::new(
                 "target-initialization-failed",
@@ -1160,7 +1166,12 @@ impl AppService {
 
     pub fn confirm_selected_omp(&self, executable: PathBuf) -> Result<AppSettings, AppError> {
         let _detection = self.detection_lock.lock();
-        if *self.pending_omp_use_path.read() {
+        if self
+            .pending_omp
+            .read()
+            .as_ref()
+            .is_some_and(|pending| pending.use_system_path)
+        {
             return Err(AppError::internal("当前 OMP 验证状态要求使用 PATH 确认"));
         }
         self.confirm_selected_omp_locked(executable)
@@ -1168,7 +1179,12 @@ impl AppService {
 
     pub fn confirm_path_omp(&self, executable: PathBuf) -> Result<AppSettings, AppError> {
         let _detection = self.detection_lock.lock();
-        if !*self.pending_omp_use_path.read() {
+        if !self
+            .pending_omp
+            .read()
+            .as_ref()
+            .is_some_and(|pending| pending.use_system_path)
+        {
             return Err(AppError::internal("当前 OMP 验证状态不是 PATH 选择"));
         }
         self.confirm_selected_omp_locked(executable)
@@ -1176,14 +1192,18 @@ impl AppService {
 
     fn confirm_selected_omp_locked(&self, executable: PathBuf) -> Result<AppSettings, AppError> {
         let mut pending = self.pending_omp.write();
-        if pending.as_ref() != Some(&executable) {
-            return Err(AppError::internal("OMP 验证状态已变化，请重新检测"));
-        }
-        let pending_confirmation = self.pending_omp_confirmation.read().clone();
+        let (pending_confirmation, use_system_path) = {
+            let pending_state = pending
+                .as_ref()
+                .ok_or_else(|| AppError::internal("OMP 验证状态已变化，请重新检测"))?;
+            if pending_state.executable != executable {
+                return Err(AppError::internal("OMP 验证状态已变化，请重新检测"));
+            }
+            (pending_state.confirmation.clone(), pending_state.use_system_path)
+        };
         let target_changed = pending_confirmation.as_ref().map_or(true, |pending| {
             pending.previous_target.as_deref() != Some(pending.candidate_target.as_str())
         });
-        let use_system_path = *self.pending_omp_use_path.read();
         let settings = self.update_settings(|settings| {
             settings.omp_executable_path = if use_system_path {
                 None
@@ -1196,8 +1216,6 @@ impl AppService {
             }
         })?;
         *pending = None;
-        *self.pending_omp_confirmation.write() = None;
-        *self.pending_omp_use_path.write() = false;
         self.model_tests.invalidate();
         Ok(settings)
     }
@@ -1219,8 +1237,6 @@ impl AppService {
             *settings = AppSettings::default();
         })?;
         *self.pending_omp.write() = None;
-        *self.pending_omp_confirmation.write() = None;
-        *self.pending_omp_use_path.write() = false;
         self.model_tests.invalidate();
         Ok(settings)
     }
@@ -2017,11 +2033,7 @@ pub fn get_startup_state(service: tauri::State<'_, AppService>) -> StartupState 
     let started_at = Instant::now();
     let state = service.get_startup_state();
     let safe_state = AppService::sanitize_overview_startup_state(&state);
-    tracing::info!(
-        operation = "get_startup_state",
-        status = "success",
-        elapsed_ms = started_at.elapsed().as_millis() as u64
-    );
+    log_startup_state("get_startup_state", started_at, &safe_state);
     safe_state
 }
 
@@ -2030,7 +2042,7 @@ pub fn get_overview_load(service: tauri::State<'_, AppService>) -> OverviewLoadD
     let started_at = Instant::now();
     let result = service.get_overview_load();
     if let Some(error) = result.error.as_ref() {
-        tracing::info!(
+        tracing::warn!(
             operation = "get_overview_load",
             status = "error",
             code = error.code,
@@ -2056,6 +2068,7 @@ pub fn get_ui_settings(service: tauri::State<'_, AppService>) -> Result<AppSetti
 
 #[tauri::command]
 pub fn get_runtime_info() -> RuntimeInfo {
+    let started_at = Instant::now();
     let platform = match std::env::consts::OS {
         "macos" => "macOS",
         "windows" => "Windows",
@@ -2068,10 +2081,16 @@ pub fn get_runtime_info() -> RuntimeInfo {
         "x86" => "x86",
         other => other,
     };
-    RuntimeInfo {
+    let result = RuntimeInfo {
         platform: platform.to_owned(),
         architecture: architecture.to_owned(),
-    }
+    };
+    tracing::info!(
+        operation = "get_runtime_info",
+        status = "success",
+        elapsed_ms = started_at.elapsed().as_millis() as u64
+    );
+    result
 }
 
 #[tauri::command]
@@ -2080,11 +2099,13 @@ pub fn get_settings_directories(
     app: tauri::AppHandle,
 ) -> Result<SettingsDirectories, AppError> {
     let started_at = Instant::now();
+    let mut partial_code = None;
     let result = (|| {
         let application_configuration = service.application_configuration_directory()?;
         let application_log = app.path().app_log_dir().map_err(|error| {
             tracing::warn!(
                 operation = "get_settings_directories",
+                status = "failure",
                 diagnostic = %redact_diagnostic(&error.to_string()),
                 "application log directory resolution failed"
             );
@@ -2094,7 +2115,19 @@ pub fn get_settings_directories(
                 "请检查系统应用目录权限后重试。",
             )
         })?;
-        let current_target = service.current_target_and_backup_directories().ok();
+        let current_target = match service.current_target_and_backup_directories() {
+            Ok(directories) => Some(directories),
+            Err(error) => {
+                partial_code = Some(error.code);
+                tracing::warn!(
+                    operation = "get_settings_directories",
+                    status = "partial",
+                    code = error.code,
+                    "target configuration directory resolution failed"
+                );
+                None
+            }
+        };
         Ok(SettingsDirectories {
             target_configuration: current_target
                 .as_ref()
@@ -2106,7 +2139,16 @@ pub fn get_settings_directories(
                 .map(|(_, backup)| backup.to_string_lossy().into_owned()),
         })
     })();
-    log_command_result("get_settings_directories", started_at, &result);
+    if let Some(code) = partial_code {
+        tracing::info!(
+            operation = "get_settings_directories",
+            status = "partial",
+            code,
+            elapsed_ms = started_at.elapsed().as_millis() as u64
+        );
+    } else {
+        log_command_result("get_settings_directories", started_at, &result);
+    }
     result
 }
 #[tauri::command]
@@ -2218,17 +2260,26 @@ pub async fn test_model(
 
 #[tauri::command]
 pub fn cancel_model_test(service: tauri::State<'_, AppService>) -> bool {
+    let started_at = Instant::now();
     let cancelled = service.cancel_model_test();
     tracing::info!(
         operation = "cancel_model_test",
         status = if cancelled { "requested" } else { "idle" },
+        elapsed_ms = started_at.elapsed().as_millis() as u64
     );
     cancelled
 }
 
 #[tauri::command]
 pub fn get_model_test_state(service: tauri::State<'_, AppService>) -> ModelTestState {
-    service.get_model_test_state()
+    let started_at = Instant::now();
+    let state = service.get_model_test_state();
+    tracing::info!(
+        operation = "get_model_test_state",
+        status = "success",
+        elapsed_ms = started_at.elapsed().as_millis() as u64
+    );
+    state
 }
 
 #[tauri::command]

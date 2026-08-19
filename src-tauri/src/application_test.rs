@@ -73,6 +73,47 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CleanupWarningCoun
         }
     }
 }
+#[derive(Clone)]
+struct OperationLogCapture(Arc<Mutex<Vec<String>>>);
+
+#[derive(Default)]
+struct OperationLogVisitor {
+    operation: Option<String>,
+    status: Option<String>,
+    code: Option<String>,
+    cause: Option<String>,
+}
+
+impl tracing::field::Visit for OperationLogVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        match field.name() {
+            "operation" => self.operation = Some(value.to_owned()),
+            "status" => self.status = Some(value.to_owned()),
+            "code" => self.code = Some(value.to_owned()),
+            "cause" => self.cause = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.record_str(field, &format!("{value:?}"));
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for OperationLogCapture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let mut visitor = OperationLogVisitor::default();
+        event.record(&mut visitor);
+        if let Some(operation) = visitor.operation {
+            self.0.lock().push(format!(
+                "operation={operation};status={};code={};cause={}",
+                visitor.status.unwrap_or_default(),
+                visitor.code.unwrap_or_default(),
+                visitor.cause.unwrap_or_default(),
+            ));
+        }
+    }
+}
 
 #[derive(Default)]
 struct FakeOmpEnvironment {
@@ -7107,4 +7148,17 @@ async fn model_test_times_out_while_waiting_for_a_stuck_omp_detection_lock() {
     assert!(started.elapsed() < Duration::from_secs(1));
     release_detection.wait();
     detection.join().unwrap();
+}
+#[test]
+fn runtime_info_emits_redacted_operation_log() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(OperationLogCapture(events.clone()));
+    let runtime = tracing::subscriber::with_default(subscriber, crate::application::get_runtime_info);
+
+    assert!(!runtime.platform.is_empty());
+    assert!(!runtime.architecture.is_empty());
+    let events = events.lock();
+    assert!(events.iter().any(|event| {
+        event.contains("operation=get_runtime_info") && event.contains("status=success")
+    }));
 }
