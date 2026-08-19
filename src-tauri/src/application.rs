@@ -1160,7 +1160,11 @@ impl AppService {
             self.take_models_write_failure(),
             self.take_configuration_transaction_failure(),
         );
-        if result.is_ok() {
+        if result.is_ok()
+            || result
+                .as_ref()
+                .is_err_and(|error| error.code == "configuration-transaction-cleanup-failed")
+        {
             self.model_tests.invalidate();
             self.clear_configuration_snapshot();
         }
@@ -1212,7 +1216,11 @@ impl AppService {
             self.take_models_write_failure(),
             self.take_configuration_transaction_failure(),
         );
-        if result.is_ok() {
+        if result.is_ok()
+            || result
+                .as_ref()
+                .is_err_and(|error| error.code == "configuration-transaction-cleanup-failed")
+        {
             self.model_tests.invalidate();
             self.clear_configuration_snapshot();
         }

@@ -1,0 +1,16 @@
+Issue #14 visual verification
+
+Pencil references:
+- .artifacts/issue-14/pencil-reference/P0H6Xc.png — Dialog / Confirm
+- .artifacts/issue-14/pencil-reference/R6EUPs.png — Page / Setup Success
+
+Tauri captures:
+- .artifacts/issue-14/model-delete-confirmation-tauri-3072x1922.png
+- .artifacts/issue-14/recovery-success-tauri-3072x1922.png
+- .artifacts/issue-14/recovery-manual-handling-tauri-3072x1922.png
+
+Comparison:
+- Cross-file model deletion confirmation uses the approved Dialog / Confirm structure: same centered surface, border, radius, shadow, title/body/action hierarchy, secondary cancel and primary destructive confirmation treatment. The page backdrop and Provider detail context remain visible behind the dialog.
+- Recovery success and manual-handling states reuse the approved Setup Success page frame and existing status/notice/card tokens. Recovery copy is added inside the existing notice region; no new layout, token, or component family was introduced.
+- The manual-handling capture keeps the same setup table, status row, action placement, and read-only treatment while presenting the safe path without configuration正文.
+- Intentional differences are content, native macOS window chrome, runtime paths, and screenshot viewport scale only.

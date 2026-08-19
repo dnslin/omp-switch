@@ -4752,6 +4752,86 @@ fn configuration_transaction_failure_points_commit_or_restore_as_a_unit() {
         }
     }
 }
+#[test]
+fn configuration_transaction_cleanup_failure_is_reported_and_recovered_on_startup() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let original_models = b"providers:\n  editable:\n    baseUrl: https://example.com/v1\n    api: openai-responses\n    models:\n      - id: first\n        name: First\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n      - id: second\n        name: Second\n        input: [text]\n        contextWindow: 100000\n        maxTokens: 1000\n";
+    let original_config = b"modelRoles:\n  default: editable/second\n";
+    fs::write(target.join("models.yml"), original_models).unwrap();
+    fs::write(target.join("config.yml"), original_config).unwrap();
+    let service = service_for_target_with_app_data(&target, app_data.path());
+    let overview = service.get_overview_load().overview.unwrap();
+    let opened_models_hash = overview.files.models.content_hash.clone().unwrap();
+    let opened_config_hash = overview.files.config.content_hash.clone().unwrap();
+    service.set_configuration_transaction_failure_for_test(
+        ConfigurationTransactionFailurePoint::ManifestCleanupFailure,
+    );
+
+    let error = service
+        .delete_model(DeleteModelInput {
+            opened_models_hash,
+            opened_config_hash,
+            provider_id: "editable".to_owned(),
+            model_id: "second".to_owned(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.code, "configuration-transaction-cleanup-failed");
+    assert_ne!(
+        fs::read(target.join("models.yml")).unwrap(),
+        original_models
+    );
+    assert_ne!(
+        fs::read(target.join("config.yml")).unwrap(),
+        original_config
+    );
+    let backup_root = app_data.path().join("target-configuration-backups");
+    let transaction_directory = backup_root
+        .join(crate::models_write::target_fingerprint(
+            &target.canonicalize().unwrap(),
+        ))
+        .join("transactions");
+    let manifest_count = || {
+        fs::read_dir(&transaction_directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+            })
+            .count()
+    };
+    assert_eq!(manifest_count(), 1);
+    let pending_error = crate::models_write::ensure_no_pending_configuration_transaction(
+        &backup_root,
+        &target.canonicalize().unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(pending_error.code, "configuration-transaction-pending");
+    let load = service.get_overview_load();
+    let StartupState::OmpReady {
+        target_configuration,
+        ..
+    } = load.startup_state
+    else {
+        panic!("cleanup failure recovery did not return OMP ready state");
+    };
+    assert!(
+        target_configuration
+            .recovery_notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("完整提交"))
+    );
+    let refreshed = load.overview.unwrap();
+    assert!(refreshed.models.iter().all(|model| model.id != "second"));
+    assert_eq!(manifest_count(), 0);
+    crate::models_write::ensure_no_pending_configuration_transaction(
+        &backup_root,
+        &target.canonicalize().unwrap(),
+    )
+    .unwrap();
+}
 
 #[cfg(unix)]
 #[test]

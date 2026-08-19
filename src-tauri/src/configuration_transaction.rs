@@ -29,6 +29,7 @@ pub(crate) enum ConfigurationTransactionFailurePoint {
     AfterFirstReplacement,
     AfterSecondReplacement,
     DuringCleanup,
+    ManifestCleanupFailure,
 }
 
 #[derive(Clone, Debug)]
@@ -236,7 +237,10 @@ where
     if failure == Some(ConfigurationTransactionFailurePoint::DuringCleanup) {
         return Err(injected_failure(operation, "事务清理时"));
     }
-    cleanup_manifest_after_commit(&manifest_path);
+    cleanup_manifest_after_commit(
+        &manifest_path,
+        failure == Some(ConfigurationTransactionFailurePoint::ManifestCleanupFailure),
+    )?;
     drop(locks);
     Ok(())
 }
@@ -453,15 +457,27 @@ fn persist_manifest(
     Ok(path)
 }
 
-fn cleanup_manifest_after_commit(path: &Path) {
-    if let Err(error) = fs::remove_file(path)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(
-            operation = "cleanup_configuration_transaction_manifest",
-            cause = io_error_cause(error.kind()),
-            "Configuration transaction manifest cleanup failed"
-        );
+fn cleanup_manifest_after_commit(path: &Path, inject_failure: bool) -> Result<(), AppError> {
+    let result = if inject_failure {
+        Err(std::io::Error::other("injected manifest cleanup failure"))
+    } else {
+        fs::remove_file(path)
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            tracing::warn!(
+                operation = "cleanup_configuration_transaction_manifest",
+                cause = io_error_cause(error.kind()),
+                "Configuration transaction manifest cleanup failed"
+            );
+            Err(AppError::new(
+                "configuration-transaction-cleanup-failed",
+                "models.yml 与 config.yml 已完成替换，但 Configuration transaction 清单清理失败。",
+                "请重新检测 OMP；启动流程会按最终 Hash 清理清单。清单清理前不会允许新的写入。",
+            ))
+        }
     }
 }
 
@@ -1017,3 +1033,21 @@ fn manual_recovery(path: &Path, detail: String) -> RecoveryResult {
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn manifest_cleanup_reports_delete_failure() {
+        let root = tempdir().unwrap();
+        let manifest_path = root.path().join("manifest.json");
+        fs::create_dir(&manifest_path).unwrap();
+
+        let error = cleanup_manifest_after_commit(&manifest_path, false).unwrap_err();
+
+        assert_eq!(error.code, "configuration-transaction-cleanup-failed");
+        assert!(manifest_path.is_dir());
+    }
+}
