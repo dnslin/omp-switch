@@ -248,7 +248,7 @@ a { color: inherit; text-decoration: none; }
 .settings-row--executable, .settings-row--theme, .settings-row--reset { min-height: 50px; }
 .settings-row--executable > code { color: var(--color-text-primary); }
 .settings-theme-options { width: 320px; min-width: 320px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; padding-block: 8px; }
-.settings-row > .settings-theme-options { width: 320px; min-width: 320px; }
+.settings-row > .settings-theme-options { width: 352px; min-width: 352px; }
 .settings-theme-options .app-button { width: 100%; min-height: 34px; padding-inline: 0; border-radius: 0; font-size: 14px; }
 .settings-theme-options .app-button:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
 .settings-theme-options .app-button:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
@@ -273,7 +273,7 @@ a { color: inherit; text-decoration: none; }
   .settings-row--executable { padding-top: 8px; }
   .settings-row--executable > code { padding-block: 4px; }
   .settings-theme-options { min-width: 0; }
-  .settings-row > .settings-theme-options { width: min(320px, 100%); min-width: 0; }
+  .settings-row > .settings-theme-options { width: min(352px, 100%); min-width: 0; }
   .settings-theme-options { width: min(320px, 100%); }
   .settings-row--reset > span:nth-child(2) { padding-block: 10px; }
   .settings-target-change { grid-template-columns: 1fr; }

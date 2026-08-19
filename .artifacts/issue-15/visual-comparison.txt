@@ -8,6 +8,7 @@
 Checked against Pencil node `W7copJ`:
 
 - Settings title, sidebar, section headers, key/value rows, directory actions, appearance controls, danger action, and bottom OMP status area are present in the same order and layout.
-- Theme control uses a dedicated 320×34 segmented group. The selected Light option uses `primary-soft` background with primary text/border, not the solid primary Button treatment.
+- Theme control has a 320×34 visible segmented group. The Settings row's direct child uses a 352px border-box outer width to account for its 16px horizontal padding on both sides; the content/buttons therefore remain 320px wide with the intended 108/106/106 split.
+- The selected Light option uses `primary-soft` background with primary text/border, not the solid primary Button treatment.
 - Native macOS titlebar controls and directory/file-picker surfaces are the only platform-specific elements.
 - Reset confirmation reuses the approved Dialog treatment and preserves the settings page behind the scrim.

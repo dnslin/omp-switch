@@ -5,6 +5,7 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
+import reducedMotionStyles from "../styles/components.css?raw";
 import { TauriClientProvider, type OverviewDto, type OverviewLoad, type OverviewModel, type OverviewProvider, type StartupState, type TargetConfigurationDiscovery, type TauriClient } from "../lib/tauri-client";
 import { useModelTestStore } from "../store/model-test";
 
@@ -2568,6 +2569,16 @@ describe("React page seam", () => {
       selectedModelId: null,
     }));
     expect(document.documentElement.dataset.theme).toBe("dark");
+  });
+  it("keeps page transitions bounded when reduced motion is requested", async () => {
+    const reducedMotionCss = reducedMotionStyles.replace(/\s+/g, "");
+
+    expect(reducedMotionCss).toContain("@media(prefers-reduced-motion:reduce)");
+    expect(reducedMotionCss).toContain("transition-duration:0.01ms");
+    expect(reducedMotionCss).toContain("animation-duration:0.01ms");
+
+    renderRoute("/settings", { ...unavailableClient, getStartupState: async () => readyState });
+    expect(await screen.findByRole("heading", { name: "设置" })).toBeVisible();
   });
   it("does not persist a theme after settings hydration fails", async () => {
     const user = userEvent.setup();
