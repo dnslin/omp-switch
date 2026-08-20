@@ -671,7 +671,7 @@ function ProviderDetailPage() {
               </div>
               <div className="provider-detail-actions">
                 <Button type="button" disabled={!provider.editable || !openedModelsHash || !targetWritable} onClick={() => { if (!openedModelsHash) return; setEditingModelsHash(openedModelsHash); setEditing(true); }}>编辑 Provider</Button>
-                <Button type="button" variant="secondary" className="provider-detail-delete" disabled={!provider.editable || !openedModelsHash || !openedConfigHash || !targetWritable} onClick={() => { if (!openedModelsHash || !openedConfigHash) return; setProviderDeleteError(null); setDeleteHashes({ models: openedModelsHash, config: openedConfigHash }); setDeletingProvider(true); }}>删除 Provider</Button>
+                <Button type="button" variant="secondary" className="provider-detail-delete" disabled={!provider.editable || !openedModelsHash || !openedConfigHash || !targetWritable} onClick={() => { if (!openedModelsHash || !openedConfigHash) return; setProviderDeleteError(null); setDeleteHashes({ models: openedModelsHash, config: openedConfigHash }); setDeletingProvider(true); }}>删除</Button>
               </div>
             </header>
             {!provider.editable ? <p className="provider-detail-readonly" role="status">{provider.readOnlyReason ?? "当前 Provider 只能查看。"}</p> : null}
@@ -719,7 +719,7 @@ function ProviderDetailPage() {
                         <td><div className="provider-detail-model-cell"><strong>{model.name && model.name !== model.id ? model.name : model.id}</strong>{model.name && model.name !== model.id ? <code>{model.id}</code> : null}{status.tone !== "success" ? <span className={`provider-detail-model-status provider-detail-model-status--${status.tone}`}>{status.label}</span> : null}</div></td>
                         <td>{model.effectiveApi ?? "未配置"}</td>
                         <td title={sourceLabel}>{sourceLabel}</td>
-                        <td>{model.input.length ? model.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : "不支持").join(" · ") : "未配置"}</td>
+                        <td>{model.input.length ? model.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : "不支持").join(", ") : "未配置"}</td>
                         <td>{formatNumber(model.contextWindow)}</td><td>{formatNumber(model.maxTokens)}</td><td>{model.referenceCount}</td><td>{active ? <StatusIndicator tone="warning">测试中…</StatusIndicator> : recentResult ? (recentResult.success ? `${recentResult.latencyMs} ms` : recentResult.message) : "—"}</td>
                         <td><div className="provider-detail-model-actions">
                           <Button type="button" variant="secondary" className="provider-detail-model-action" aria-label={`Model 操作 ${model.id}`} aria-expanded={openModelActions === model.id} title="Model 操作" onClick={() => setOpenModelActions((current) => current === model.id ? null : model.id)}><MoreHorizontal aria-hidden="true" size={18} /></Button>
@@ -790,7 +790,10 @@ function modelStatusView(model: OverviewModel): { label: string; tone: "success"
 }
 
 function formatNumber(value: number | null): string {
-  return value === null ? "未配置" : new Intl.NumberFormat("zh-CN").format(value);
+  if (value === null) return "未配置";
+  if (value >= 1_000_000 && value % 1_000_000 === 0) return `${value / 1_000_000}M`;
+  if (value >= 1_000 && value % 1_000 === 0) return `${value / 1_000}K`;
+  return new Intl.NumberFormat("zh-CN").format(value);
 }
 
 function NotFoundPage() {

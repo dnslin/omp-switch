@@ -23,7 +23,7 @@ a { color: inherit; text-decoration: none; }
 .sidebar-footer strong { color: var(--color-text-secondary); font-size: 16px; font-weight: var(--font-weight-regular); }
 .sidebar-footer code { color: var(--color-text-disabled); font-family: var(--font-mono); font-size: 13px; }
 .sidebar-footer__status { color: var(--color-text-disabled); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.page-content { min-width: 0; overflow: auto; padding: 34px 40px 28px; }
+.page-content { min-width: 0; overflow: auto; padding: 39px 40px 28px; }
 .page-content--roles { padding-inline: 36px; }
 .placeholder-card { margin-top: 20px; max-width: 760px; color: var(--color-text-secondary); }
 .setup-body { min-height: 100%; height: 100%; overflow: auto; display: flex; align-items: safe center; justify-content: center; padding: 64px 0; }
@@ -233,7 +233,7 @@ a { color: inherit; text-decoration: none; }
 .settings-details p { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 16px; margin: 0; }
 .settings-details code { min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono); color: var(--color-text-primary); }
 .page-content--settings { padding: 34px 42px 40px; }
-.settings-page { min-width: 0; max-width: 1170px; display: grid; align-content: start; gap: 18px; }
+.settings-page { min-width: 0; max-width: 1176px; display: grid; align-content: start; gap: 18px; }
 .settings-error { min-width: 0; display: grid; gap: 6px; padding: 14px 18px; border: 1px solid color-mix(in srgb, var(--color-danger) 45%, var(--color-border)); border-radius: var(--radius-md); background: var(--color-bg-surface); }
 .settings-error strong { color: var(--color-danger); font-size: 15px; font-weight: var(--font-weight-medium); }
 .settings-error p { margin: 0; color: var(--color-text-secondary); overflow-wrap: anywhere; }

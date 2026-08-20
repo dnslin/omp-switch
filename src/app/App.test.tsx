@@ -1825,7 +1825,7 @@ describe("React page seam", () => {
     renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad, deleteProvider });
 
     await screen.findByText("Sol");
-    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    await user.click(screen.getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "删除 Provider" }));
 
@@ -1870,7 +1870,7 @@ describe("React page seam", () => {
     });
 
     await screen.findByText("Sol");
-    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    await user.click(screen.getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "删除 Provider" }));
 
@@ -1928,7 +1928,7 @@ describe("React page seam", () => {
     renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad, deleteProvider });
 
     await screen.findByText("Sol");
-    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    await user.click(screen.getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "删除 Provider" }));
 
@@ -1956,7 +1956,7 @@ describe("React page seam", () => {
     renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview, readyState), openTargetConfigurationDirectory, deleteProvider });
 
     await screen.findByText("Sol");
-    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    await user.click(screen.getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveTextContent("包含模型");
     expect(dialog).toHaveTextContent("gpt-5.6-sol");
@@ -1995,7 +1995,7 @@ describe("React page seam", () => {
     renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview, readyState), deleteProvider });
 
     await screen.findByText("Advanced model");
-    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    await user.click(screen.getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveTextContent("Provider 包含只读 Model definition advanced-model");
     expect(within(dialog).getByRole("button", { name: "删除 Provider" })).toBeDisabled();
@@ -2014,7 +2014,7 @@ describe("React page seam", () => {
     renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad, deleteProvider });
 
     await screen.findByText("Sol");
-    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    await user.click(screen.getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveTextContent("dnslin");
     expect(dialog).toHaveTextContent("gpt-5.6-sol");

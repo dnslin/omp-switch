@@ -19,7 +19,7 @@ const overviewModelSpecs = detailModelSpecs.map(([id, api, input, reasoning, con
 const googleModelSpecs = [["gemini-3.6-pro", "google-generative-ai", ["text", "image"], true, 1000000, 128000]];
 
 const builtinRoles = {
-  default: "dnslin/gpt-5.6-luna:max",
+  default: "dnslin/gpt-5.6-luna",
   smol: "dnslin/gpt-5.6-luna:off",
   slow: "dnslin/gpt-5.6-luna:minimal",
   vision: "dnslin/gpt-5.6-luna:low",
@@ -54,7 +54,7 @@ const scenarioRoles = {
   overview: { ...builtinRoles, advisor: "dnslin/gpt-5.6-sol:max" },
   providers: { ...builtinRoles, advisor: "dnslin/gpt-5.6-sol:max" },
   detail: {},
-  roles: { ...builtinRoles, researcher: "dnslin/gpt-5.6-sol:high" },
+  roles: { ...builtinRoles, researcher: "dnslin/gpt-5.6-luna:auto" },
 };
 
 function fixtureRoot() {
