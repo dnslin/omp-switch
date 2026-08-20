@@ -81,3 +81,13 @@ gh run watch <run-id>
 ```
 
 验证所有 matrix job、bundle artifact、smoke JSON、Rust/React 测试和 manifest 校验均成功后，才可将 draft release 提交人工发布。
+
+## 已完成发布证据
+
+- blocker gate：`gh api repos/dnslin/omp-switch/issues/16 --jq '{state,blocked_by:(.dependencies_summary.blocked_by // .issue_dependencies_summary.blocked_by // null)}'` 返回 `{"state":"open","blocked_by":0}`；#7–#15 均已关闭。
+- 最终原生矩阵：workflow run `32367195692`，commit `dd5b0c936d6346c36383d1013ef101bf0eab6c1c`，结论 `success`。macOS arm64、macOS Intel、Windows x64、Ubuntu 22.04 x64 和 Ubuntu 24.04 复用 Ubuntu 22.04 AppImage 的 job 全部成功；所有正式 bundle、smoke 和 UI artifacts 已下载到 `.artifacts/issue-16/ci-32367195692/`。
+- bundle 清单：macOS arm64 `.dmg`、macOS Intel `.dmg`、Windows `.msi`/NSIS `.exe`、Ubuntu 22.04 `.deb`/`.AppImage`/`.rpm` 均存在于最终 run artifact。Ubuntu 24.04 只启动同一份 Ubuntu 22.04 AppImage。
+- 五个平台 smoke JSON 均为 `launched: true`；分别记录 macOS arm64、macOS Intel、Windows x64、Ubuntu 22.04 x64 和 Ubuntu 24.04 x64 的真实启动路径及正式资产名。
+- 最终矩阵每个平台生成九张真实 Tauri `viewport/` 截图（1536×1024）及九张 Pencil `content/` 对比截图（1536×960）；逐页视觉复核记录见 `.artifacts/issue-16/visual-comparison.txt`。矩阵 runner 的视觉结果未发现未批准的肉眼可见差异。
+- 本地最终验证：`corepack pnpm exec vitest run` 通过，184 tests；`cargo test --manifest-path src-tauri/Cargo.toml` 通过，204 tests；`corepack pnpm typecheck`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` 和 `git diff --check` 通过。manifest、React/Rust seam、正式 bundle、矩阵 runner smoke 及 UI 截图在最终 workflow 中再次通过。
+- 初次矩阵 run `32366307070` 仅因 macOS arm64 artifact finalize 的 GitHub `ECONNRESET` 失败；完整重跑 `32367195692` 通过。该重跑仍使用 `windows-2022` Windows Server 2022 runner；Windows 10 22H2/Windows 11 x64 客户端真实验收主机尚未取得，不能以文档豁免，issue #16 不得关闭或发布 draft。
