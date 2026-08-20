@@ -3,7 +3,8 @@ import { join, resolve } from "node:path";
 import { setScenario } from "./ui-fixture.mjs";
 
 const outputDirectory = resolve(process.env.OMP_SWITCH_UI_OUTPUT ?? ".artifacts/issue-16/ui-acceptance");
-
+const evidenceHeight = Number(process.env.OMP_SWITCH_UI_HEIGHT ?? "960");
+if (![960, 1024].includes(evidenceHeight)) throw new Error(`OMP_SWITCH_UI_HEIGHT must be 960 or 1024; received ${evidenceHeight}`);
 function xpathLiteral(value) {
   if (!value.includes("'")) return `'${value}'`;
   if (!value.includes('"')) return `"${value}"`;
@@ -28,35 +29,77 @@ async function screenshot(name) {
   await browser.pause(350);
   const rawViewport = await browser.execute(() => ({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio }));
   const viewport = rawViewport.value ?? rawViewport;
-  if (viewport.width !== 1536 || viewport.height !== 1024) {
-    throw new Error(`UI evidence requires an exact 1536x1024 CSS viewport; received ${viewport.width}x${viewport.height} at dpr ${viewport.dpr}`);
+  if (viewport.width !== 1536 || viewport.height !== evidenceHeight) {
+    throw new Error(`UI evidence requires a 1536x${evidenceHeight} WebView content viewport; received inner ${viewport.width}x${viewport.height} at dpr ${viewport.dpr}`);
   }
   const rawScreenshot = await browser.takeScreenshot();
   const screenshot = typeof rawScreenshot === "string" ? rawScreenshot : rawScreenshot.value;
-  const rawResized = await browser.executeAsync((source, expectedWidth, expectedHeight, done) => {
+  if (!Number.isFinite(viewport.dpr) || viewport.dpr <= 0) {
+    throw new Error(`UI evidence requires a valid devicePixelRatio; received ${viewport.dpr}`);
+  }
+  const expectedWidth = Math.round(1536 * viewport.dpr);
+  const expectedHeight = Math.round(evidenceHeight * viewport.dpr);
+  const normalized = await browser.executeAsync((source, expectedWidth, expectedHeight, outputHeight, done) => {
     const image = new Image();
     image.onload = () => {
-      if (image.naturalWidth !== expectedWidth || image.naturalHeight !== expectedHeight) {
-        done({ error: `screenshot-size-${image.naturalWidth}x${image.naturalHeight}-expected-${expectedWidth}x${expectedHeight}` });
+      if (image.naturalWidth !== expectedWidth || image.naturalHeight < expectedHeight) {
+        done({ error: `screenshot-size-${image.naturalWidth}x${image.naturalHeight}-expected-width-${expectedWidth}-minimum-height-${expectedHeight}` });
         return;
+      }
+      const sourceCanvas = document.createElement("canvas");
+      sourceCanvas.width = image.naturalWidth;
+      sourceCanvas.height = image.naturalHeight;
+      const sourceContext = sourceCanvas.getContext("2d");
+      if (!sourceContext) {
+        done({ error: "source-canvas-context-unavailable" });
+        return;
+      }
+      sourceContext.drawImage(image, 0, 0);
+      const extraHeight = image.naturalHeight - expectedHeight;
+      let excludedBandColor = null;
+      if (extraHeight > 0) {
+        const extra = sourceContext.getImageData(0, expectedHeight, image.naturalWidth, extraHeight).data;
+        excludedBandColor = [extra[0], extra[1], extra[2], extra[3]];
+        for (let index = 0; index < extra.length; index += 4) {
+          if (extra[index] !== excludedBandColor[0] || extra[index + 1] !== excludedBandColor[1] || extra[index + 2] !== excludedBandColor[2] || extra[index + 3] !== excludedBandColor[3]) {
+            done({ error: `unexpected-nonuniform-bottom-snapshot-band-${extraHeight}px` });
+            return;
+          }
+        }
       }
       const canvas = document.createElement("canvas");
       canvas.width = 1536;
-      canvas.height = 1024;
+      canvas.height = outputHeight;
       const context = canvas.getContext("2d");
       if (!context) {
         done({ error: "canvas-context-unavailable" });
         return;
       }
-      context.drawImage(image, 0, 0, 1536, 1024);
-      done({ png: canvas.toDataURL("image/png").slice("data:image/png;base64,".length) });
+      context.drawImage(image, 0, 0, expectedWidth, expectedHeight, 0, 0, 1536, outputHeight);
+      done({
+        png: canvas.toDataURL("image/png").slice("data:image/png;base64,".length),
+        rawWidth: image.naturalWidth,
+        rawHeight: image.naturalHeight,
+        excludedBottomPixels: extraHeight,
+        excludedBandColor,
+      });
     };
     image.onerror = () => done({ error: "screenshot-decode-failed" });
     image.src = `data:image/png;base64,${source}`;
-  }, screenshot, Math.round(1536 * viewport.dpr), Math.round(1024 * viewport.dpr));
-  const resized = rawResized.value ?? rawResized;
-  if (!resized.png) throw new Error(`Unable to downsample ${name}: ${resized.error ?? "unknown error"}`);
-  await writeFile(join(outputDirectory, `${name}.png`), Buffer.from(resized.png, "base64"));
+  }, screenshot, expectedWidth, expectedHeight, evidenceHeight);
+  const result = normalized.value ?? normalized;
+  if (!result.png) {
+    await writeFile(join(outputDirectory, `${name}.raw.png`), Buffer.from(screenshot, "base64"));
+    throw new Error(`Unable to normalize ${name}: ${result.error ?? "unknown error"}`);
+  }
+  await writeFile(join(outputDirectory, `${name}.normalization.json`), `${JSON.stringify({
+    state: name,
+    rawSnapshot: { width: result.rawWidth, height: result.rawHeight },
+    output: { width: 1536, height: evidenceHeight },
+    excludedBottomPixels: result.excludedBottomPixels,
+    excludedBandColor: result.excludedBandColor,
+  }, null, 2)}\n`);
+  await writeFile(join(outputDirectory, `${name}.png`), Buffer.from(result.png, "base64"));
 }
 async function selectOption(label, optionText) {
   await (await visible(`[aria-label=${JSON.stringify(label)}]`)).click();
@@ -76,13 +119,8 @@ async function setModelTestResult(result) {
 }
 
 describe("OMP Switch real packaged UI evidence", () => {
-  it("captures the nine approved states at 1536x1024", async () => {
+  it(`captures the nine approved 1536x${evidenceHeight} states`, async () => {
     await mkdir(outputDirectory, { recursive: true });
-    const rawViewport = await browser.execute(() => ({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio }));
-    const viewport = rawViewport.value ?? rawViewport;
-    if (viewport.width !== 1536 || viewport.height !== 1024) {
-      throw new Error(`UI evidence requires an exact 1536x1024 CSS viewport; received ${viewport.width}x${viewport.height} at dpr ${viewport.dpr}`);
-    }
 
     await waitHeading("OMP 已找到");
     await screenshot("setup-success");

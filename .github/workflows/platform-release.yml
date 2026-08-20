@@ -152,10 +152,16 @@ jobs:
           $msi = Get-ChildItem -Path "src-tauri/target/release/bundle/msi" -Filter "*.msi" | Select-Object -First 1
           if ($null -eq $msi) { throw "No MSI installer was produced" }
           Start-Process msiexec.exe -ArgumentList @('/i', $msi.FullName, '/qn', '/norestart') -Wait -NoNewWindow
-          $binary = Get-ChildItem -Path $env:ProgramFiles, ${env:ProgramFiles(x86)} -Filter "omp-switch.exe" -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($null -eq $binary) { throw "Installed omp-switch.exe was not found" }
+          $candidates = @(
+            (Join-Path $env:ProgramFiles "OMP Switch\omp-switch.exe"),
+            (Join-Path ${env:ProgramFiles(x86)} "OMP Switch\omp-switch.exe"),
+            (Join-Path $env:LOCALAPPDATA "OMP Switch\omp-switch.exe"),
+            (Join-Path $env:LOCALAPPDATA "Programs\OMP Switch\omp-switch.exe")
+          )
+          $binaryPath = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if ($null -eq $binaryPath) { throw "Installed omp-switch.exe was not found in expected MSI locations: $($candidates -join ', ')" }
           $env:OMP_SWITCH_RELEASE_ASSET = $msi.FullName
-          node scripts/platform-smoke.mjs $binary.FullName --report $env:OMP_SWITCH_SMOKE_REPORT
+          node scripts/platform-smoke.mjs $binaryPath --report $env:OMP_SWITCH_SMOKE_REPORT
 
       - name: Build test-enabled UI application
         env:
@@ -171,11 +177,20 @@ jobs:
           killall Dock 2>/dev/null || true
           killall SystemUIServer 2>/dev/null || true
 
-      - name: Capture macOS UI evidence
+      - name: Capture macOS 1536x1024 UI viewport evidence
         if: matrix.smoke-shell == 'macos'
         env:
           OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch
-          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/viewport
+          OMP_SWITCH_UI_HEIGHT: "1024"
+        run: pnpm exec wdio run wdio.ui-acceptance.mjs
+
+      - name: Capture macOS 1536x960 Pencil content evidence
+        if: matrix.smoke-shell == 'macos'
+        env:
+          OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/content
+          OMP_SWITCH_UI_HEIGHT: "960"
         run: pnpm exec wdio run wdio.ui-acceptance.mjs
 
       - name: Restore macOS UI display
@@ -187,18 +202,36 @@ jobs:
           killall Dock 2>/dev/null || true
           killall SystemUIServer 2>/dev/null || true
 
-      - name: Capture Windows UI evidence
+      - name: Capture Windows 1536x1024 UI viewport evidence
         if: matrix.smoke-shell == 'windows'
         env:
           OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch.exe
-          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/viewport
+          OMP_SWITCH_UI_HEIGHT: "1024"
         run: pnpm exec wdio run wdio.ui-acceptance.mjs
 
-      - name: Capture Ubuntu UI evidence
+      - name: Capture Windows 1536x960 Pencil content evidence
+        if: matrix.smoke-shell == 'windows'
+        env:
+          OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch.exe
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/content
+          OMP_SWITCH_UI_HEIGHT: "960"
+        run: pnpm exec wdio run wdio.ui-acceptance.mjs
+
+      - name: Capture Ubuntu 1536x1024 UI viewport evidence
         if: matrix.smoke-shell == 'linux'
         env:
           OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch
-          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/viewport
+          OMP_SWITCH_UI_HEIGHT: "1024"
+        run: xvfb-run -a -s "-screen 0 1920x1200x24" bash -lc 'openbox --sm-disable >/tmp/omp-switch-openbox.log 2>&1 & sleep 1; exec pnpm exec wdio run wdio.ui-acceptance.mjs'
+
+      - name: Capture Ubuntu 1536x960 Pencil content evidence
+        if: matrix.smoke-shell == 'linux'
+        env:
+          OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/content
+          OMP_SWITCH_UI_HEIGHT: "960"
         run: xvfb-run -a -s "-screen 0 1920x1200x24" bash -lc 'openbox --sm-disable >/tmp/omp-switch-openbox.log 2>&1 & sleep 1; exec pnpm exec wdio run wdio.ui-acceptance.mjs'
 
       - name: Upload UI screenshot evidence
@@ -304,10 +337,18 @@ jobs:
         run: pnpm tauri build --no-bundle --debug --features webdriver --config src-tauri/tauri.webdriver.conf.json --verbose
 
 
-      - name: Capture Ubuntu 24 UI evidence
+      - name: Capture Ubuntu 24 1536x1024 UI viewport evidence
         env:
           OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch
-          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/viewport
+          OMP_SWITCH_UI_HEIGHT: "1024"
+        run: xvfb-run -a -s "-screen 0 1920x1200x24" bash -lc 'openbox --sm-disable >/tmp/omp-switch-openbox.log 2>&1 & sleep 1; exec pnpm exec wdio run wdio.ui-acceptance.mjs'
+
+      - name: Capture Ubuntu 24 1536x960 Pencil content evidence
+        env:
+          OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/content
+          OMP_SWITCH_UI_HEIGHT: "960"
         run: xvfb-run -a -s "-screen 0 1920x1200x24" bash -lc 'openbox --sm-disable >/tmp/omp-switch-openbox.log 2>&1 & sleep 1; exec pnpm exec wdio run wdio.ui-acceptance.mjs'
 
       - name: Upload Ubuntu 24 UI screenshot evidence

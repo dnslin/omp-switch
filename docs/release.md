@@ -52,9 +52,9 @@ React page seam 使用真实 routed pages、可访问控件和 typed Tauri clien
 - macOS 安装包：在当前 Apple Silicon 主机运行 `MACOSX_DEPLOYMENT_TARGET=13.0 pnpm tauri build`，并在 `macos-14` workflow 复验；Intel 由 `macos-15-intel` 原生 runner 构建和启动。最低系统版本由 bundle metadata 固定为 macOS 13.0。
 - Windows x64：在 `windows-2022` 原生 runner 构建、安装、启动并执行 Rust/React seam。
 - Ubuntu 22.04/24.04 x64：Ubuntu 22.04 构建并执行 Rust/React seam；Ubuntu 24.04 下载并启动同一份 Ubuntu 22.04 `.AppImage`，smoke JSON 记录正式资产名。
-- 每个平台的 runner 日志、bundle、smoke JSON 和九页真实 Tauri UI 截图作为 workflow artifacts 保存 14 天。UI 截图由该平台刚构建、使用正式 `tauri.conf.json` 原生装饰配置的 Tauri binary 生成，不是浏览器或静态页面截图；WDIO 将 native window 调整到严格 `window.innerWidth === 1536 && window.innerHeight === 1024`，并只按实际 DPR 对原始截图等比降采样，正式窗口标题仍由 Tauri 提供。
+- 每个平台的 runner 日志、bundle、smoke JSON 和两组九页真实 Tauri UI 证据作为 workflow artifacts 保存 14 天。`viewport/` 由该平台刚构建、使用正式 `src-tauri/tauri.conf.json` 原生装饰配置的 Tauri binary 生成，固定 `window.innerWidth === 1536 && window.innerHeight === 1024`，满足 issue #16 的 1536×1024 视口验收；`content/` 固定 1536×960，用于去掉 Pencil 64px 伪标题栏后的逐页比较。两组都不是浏览器或静态页面截图；`tauri-plugin-wdio-webdriver` 的 macOS endpoint 使用 `WKWebView.takeSnapshot`，PNG 不包含 OS 原生标题栏/交通灯。每次运行保留 `raw-snapshot.png` 与 `window-geometry.json`，后者记录请求的原生窗口基线、实际外窗物理尺寸、DPR、DOM 内容视口和 raw snapshot 尺寸。
 
-原生应用窗口标题由 `src-tauri/tauri.conf.json` 的 Tauri window `title` 提供；页面不绘制第二套标题栏。UI 基准视口为 1536×1024，最小窗口为 1100×720；Setup 的最外层卡片例外遵循 issue #5 的已批准基准。
+原生应用窗口标题由 `src-tauri/tauri.conf.json` 的 Tauri window `title` 提供，正式装饰和标题由 packaged-app smoke/启动配置验证；页面不绘制第二套标题栏。视觉比较使用 `content/` 的 1536×960 PNG 与 Pencil 含背景的内容基准，不把 OS 原生控件或 Pencil `Window Title Bar` 节点计入比较。若 raw snapshot 比目标内容多出底部像素，归一化只在运行时证明整带 RGBA 同色背景后排除；非均匀额外像素直接失败。OS chrome 高度跨平台不同，不宣称统一的实际外窗高度；Setup 的内容画板例外遵循 issue #5 的已批准基准。
 
 
 ## 视觉证据
@@ -69,7 +69,7 @@ React page seam 使用真实 routed pages、可访问控件和 typed Tauri clien
 - `W7copJ`：Settings
 - `N3OTR` / `r67daM`：Foundations / Components
 
-Provider 创建两步和 Model Create Sheet 必须使用对应 `.pen` 的已填写可提交状态：Step 1 的 Provider ID、Base URL、API Key 已填且“下一步”可用；Step 2 的 Model ID、名称已填、最终地址已解析且“创建 Provider”可用；Model Sheet 的 Model ID、名称、显式协议已填且“保存模型”可用。每个 matrix 平台都必须产生以下九个 1536×1024 文件：`setup-success.png`、`overview.png`、`providers-list.png`、`provider-detail.png`、`roles-dirty.png`、`settings.png`、`provider-create-step1.png`、`provider-create-step2.png`、`model-create-sheet.png`；artifact 名称为 `omp-switch-<matrix-id>-ui`。逐页比较记录必须随发布证据保存；未批准的肉眼可见差异不能通过文档豁免。
+Provider 创建两步和 Model Create Sheet 必须使用对应 `.pen` 的已填写可提交状态：Step 1 的 Provider ID、Base URL、API Key 已填且“下一步”可用；Step 2 的 Model ID、名称已填、最终地址已解析且“创建 Provider”可用；Model Sheet 的 Model ID、名称、显式协议已填且“保存模型”可用。每个 matrix 平台必须在 `viewport/` 产生以下九个 1536×1024 PNG：`setup-success.png`、`overview.png`、`providers-list.png`、`provider-detail.png`、`roles-dirty.png`、`settings.png`、`provider-create-step1.png`、`provider-create-step2.png`、`model-create-sheet.png`；并在 `content/` 产生同名九个 1536×960 Pencil 内容比较 PNG。两组各自保留 `raw-snapshot.png`、`window-geometry.json` 和每页 `.normalization.json`，artifact 名称为 `omp-switch-<matrix-id>-ui`。`.normalization.json` 必须证明任何被排除的底部 snapshot 带是整带同色背景；非均匀额外像素直接失败。逐页比较记录必须随发布证据保存；未批准的肉眼可见差异不能通过文档豁免。
 
 ## 发布命令
 

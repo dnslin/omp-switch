@@ -1,13 +1,29 @@
 Issue #16 Pencil visual verification
 
-Reference frames: `designs/01-setup-success.png`, `10-overview-normal.png`, `20-providers-list.png`, `30-provider-detail.png`, `50-roles-dirty.png`, `60-settings-normal.png`, `23-provider-create-step1.png`, `24-provider-create-step2.png`, `32-model-create-sheet.png`. Each reference is 1536x1024. Pencil node IDs: `R6EUPs`, `chFfk`, `H6IsaW`, `vz6sg`, `i5xFP`, `W7copJ`.
+Reference source:
+- Persistent Pencil file: `designs/omp-switch.pen` (saved through the Pen editor; `git status` shows the intended modification).
+- Full-page exports with inherited page background: `.artifacts/issue-16/pencil-reference-full/{R6EUPs,chFfk,H6IsaW,vz6sg,i5xFP,W7copJ}.png`, each 1536×1024.
+- Comparable content references: `.artifacts/issue-16/pencil-reference-content/{setup-success,overview,providers-list,provider-detail,roles-dirty,settings}.png`, each generated from the corresponding full-page export by removing the exact top 64px titlebar band with an RGBA-preserving crop. These are not transparent child-node exports.
+- Pencil page nodes: `R6EUPs` Setup Success, `chFfk` Overview, `H6IsaW` Providers List, `vz6sg` Provider Detail, `i5xFP` Roles Dirty, `W7copJ` Settings.
+- Each approved page is 1536×1024 with a 64px `Window Title Bar` child and a 1536×960 main/content child. The content nodes are `cprjw`, `fwzhN`, `fIk4S`, `TRT2S`, `K8AfL`, and `MvqC4`; their transparent direct exports are not used as visual baselines.
 
-The earlier local files under `.artifacts/issue-16/ui-acceptance/` were generated from a test-only `decorations:false` configuration and are invalidated as release evidence. They remain only as debugging output and must not be used for issue closure.
+Content comparison contract:
+- Product behavior keeps the Overview test-result fields required by `docs/mvp.md` and `docs/flow.md`: model, effective protocol, final address, latency, HTTP status, and time. The persistent approved `chFfk` node includes effective protocol and final address.
+- The Overview sync strip keeps `最近备份 —`; issue #16 does not add backup-time metadata or a new DTO.
+- Formal evidence builds use `src-tauri/tauri.conf.json`; no `decorations:false` override and no test-only titlebar overlay.
+- `tauri-plugin-wdio-webdriver` captures a WKWebView snapshot. Native OS titlebar/window controls are outside the visual comparison and are verified separately by formal decorated packaged-app smoke and startup configuration.
+- Every matrix run now produces both `viewport/` (nine real application PNGs at a fixed 1536×1024 WebView viewport, satisfying issue #16) and `content/` (nine 1536×960 PNGs used for Pencil comparison). `window-geometry.json` records the requested native baseline and actual outer physical rect; it does not claim a uniform final outer height.
 
-Release evidence contract:
-- Build the UI evidence binary with the formal `src-tauri/tauri.conf.json`, including native decorations and the native `OMP Switch` title.
-- On every matrix platform, establish and assert exactly `window.innerWidth === 1536` and `window.innerHeight === 1024` before capture.
-- Validate the raw WebDriver PNG is exactly `1536 * devicePixelRatio` by `1024 * devicePixelRatio`; downsample only that exact DPR image to 1536x1024. No stretching or cropping is allowed.
-- Produce `setup-success.png`, `overview.png`, `providers-list.png`, `provider-detail.png`, `roles-dirty.png`, `settings.png`, `provider-create-step1.png`, `provider-create-step2.png`, and `model-create-sheet.png` in each platform artifact `omp-switch-<matrix-id>-ui`.
+WK snapshot extra-band investigation:
+- On the local macOS content run at DPR 2, `window.innerWidth/innerHeight` and `visualViewport` were 1536×960, while the endpoint returned a raw 3072×1984 PNG. The extra 64 physical rows are the bottom band after the 3072×1920 content rectangle.
+- The raw PNG was retained as `.artifacts/issue-16/ui-acceptance-content-final/raw-snapshot.png`.
+- Pixel inspection and the runtime normalization guard found every RGBA pixel in the extra band equal to `[248,249,252,255]`, the page background; no content crosses the boundary. Normalization therefore excludes only this proven, uniform bottom backing-surface band. A non-uniform extra band fails the test rather than being cropped.
+- This is an endpoint/backing-surface size discrepancy, not the Pencil 64px titlebar. The code does not use a generic top-left crop or infer native chrome height.
 
-Platform-by-platform comparison is intentionally pending until the formal-decoration workflow run produces all five required platform artifacts: macOS Intel, macOS Apple Silicon, Windows x64, Ubuntu 22.04 x64, and Ubuntu 24.04 runtime. Issue #16 must remain open until those artifacts are downloaded, dimension-checked, and compared page by page against the Pencil references.
+Local final macOS evidence:
+- Test binary: `src-tauri/target/debug/omp-switch`, built with formal native decorations and `webdriver` only for the test seam.
+- Viewport command: `OMP_SWITCH_UI_BINARY=src-tauri/target/debug/omp-switch OMP_SWITCH_UI_OUTPUT=.artifacts/issue-16/ui-acceptance-viewport-final OMP_SWITCH_UI_HEIGHT=1024 corepack pnpm exec wdio run wdio.ui-acceptance.mjs`.
+- Content command: `OMP_SWITCH_UI_BINARY=src-tauri/target/debug/omp-switch OMP_SWITCH_UI_OUTPUT=.artifacts/issue-16/ui-acceptance-content-final OMP_SWITCH_UI_HEIGHT=960 corepack pnpm exec wdio run wdio.ui-acceptance.mjs`.
+- Both results: 1 spec passed; nine states captured; viewport PNGs are 1536×1024; content PNGs are 1536×960; raw snapshots retained; bottom-band verification passed; window geometry recorded. macOS menu bar and Dock were hidden for deterministic dimensions and restored after each run.
+
+The platform-by-platform comparison remains pending until the formal workflow produces and downloads all required matrix artifacts; issue #16 must remain open until those artifacts are dimension-checked and reviewed against the approved Pencil content references.

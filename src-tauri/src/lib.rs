@@ -27,8 +27,6 @@ use application::{
 };
 
 use tauri::Manager;
-#[cfg(all(feature = "webdriver", target_os = "macos"))]
-use tauri::TitleBarStyle;
 
 #[cfg(test)]
 #[path = "../manifest_registry_build.rs"]
@@ -51,12 +49,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            #[cfg(all(feature = "webdriver", target_os = "macos"))]
-            if let Some(window) = app.get_webview_window("main") {
-                window
-                    .set_title_bar_style(TitleBarStyle::Overlay)
-                    .map_err(|error| std::io::Error::other(error.to_string()))?;
-            }
             let settings_path = app.path().app_data_dir()?.join("settings.json");
             let service = AppService::new(settings_path)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;

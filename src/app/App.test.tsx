@@ -3163,7 +3163,7 @@ describe("Overview page seam", () => {
     expect(panel).toHaveTextContent(/anthropic-messages\s+·\s+Provider 默认值/);
     expect(panel).toHaveTextContent("https://api.anthropic.com/v1/messages");
     expect(panel).toHaveTextContent("Text");
-    expect(panel).toHaveTextContent("200,000");
+    expect(panel).toHaveTextContent("200K");
     await waitFor(() => expect(saveUiSettings).toHaveBeenCalledTimes(2));
     expect(saveUiSettings).toHaveBeenNthCalledWith(2, {
       theme: "dark",
@@ -3363,7 +3363,7 @@ describe("Overview page seam", () => {
     expect(panel).toHaveTextContent("claude-sonnet-4");
     expect(panel).toHaveTextContent(/anthropic-messages\s+·\s+Provider 默认值/);
     expect(panel).toHaveTextContent("https://api.anthropic.com/v1/messages");
-    expect(panel).toHaveTextContent("200,000");
+    expect(panel).toHaveTextContent("200K");
     expect(saveUiSettings).not.toHaveBeenCalled();
   });
   it("preserves a saved Provider with an intentionally empty Model", async () => {
@@ -3529,7 +3529,7 @@ describe("Overview page seam", () => {
     expect(panel).toHaveTextContent(/openai-completions\s+·\s+模型指定/);
     expect(panel).toHaveTextContent("https://legacy.example/v1/chat/completions");
     expect(panel).toHaveTextContent(/Text\s+·\s+Image\s+·\s+Reasoning/);
-    expect(panel).toHaveTextContent("64,000");
+    expect(panel).toHaveTextContent("64K");
     expect(screen.getByRole("button", { name: "测试模型" })).toBeDisabled();
   });
 
@@ -3760,6 +3760,11 @@ describe("Model test page seam", () => {
     await waitFor(() => expect(testModel).toHaveBeenCalledWith({ providerId: "dnslin", modelId: "gpt-5.6-sol" }));
     expect(await screen.findByText("模型连接成功")).toBeVisible();
     expect(screen.getByText("42 ms")).toBeVisible();
+    const result = screen.getByRole("region", { name: "测试结果" });
+    expect(result).toHaveTextContent("openai-responses");
+    expect(result).toHaveTextContent("https://example.com/responses");
+    expect(result).toHaveTextContent("HTTP 200");
+    expect(screen.getByRole("region", { name: "快速测试" })).toHaveTextContent("356K");
   });
   it("clears a completed result when refresh reconciles an invalidated remote state", async () => {
     const user = userEvent.setup();
