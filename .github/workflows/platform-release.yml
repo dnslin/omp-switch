@@ -160,7 +160,7 @@ jobs:
       - name: Build test-enabled UI application
         env:
           VITE_WDIO: "1"
-        run: pnpm tauri build --no-bundle --debug --features webdriver --verbose
+        run: pnpm tauri build --no-bundle --debug --features webdriver --config src-tauri/tauri.webdriver.conf.json --verbose
 
       - name: Capture macOS UI evidence
         if: matrix.smoke-shell == 'macos'
@@ -283,7 +283,7 @@ jobs:
       - name: Build test-enabled Ubuntu 24 UI application
         env:
           VITE_WDIO: "1"
-        run: pnpm tauri build --no-bundle --debug --features webdriver --verbose
+        run: pnpm tauri build --no-bundle --debug --features webdriver --config src-tauri/tauri.webdriver.conf.json --verbose
 
 
       - name: Capture Ubuntu 24 UI evidence
