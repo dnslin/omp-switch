@@ -6934,26 +6934,17 @@ async fn model_test_returns_safe_error_categories_and_supports_no_authentication
 #[tokio::test]
 async fn model_test_is_single_concurrent_cancellable_and_time_bounded() {
     let (base_url, started, server) = start_hanging_model_test_server(Duration::from_secs(1));
-    let app_data = tempdir().unwrap().keep();
-    let target = app_data.join("agent");
-    fs::create_dir_all(&target).unwrap();
-    fs::write(
-        target.join("models.yml"),
-        format!(
-            "providers:\n  test-timeout:\n    baseUrl: {base_url}/v1\n    api: openai-responses\n    apiKey: timeout-key\n    models:\n      - id: timeout-model\n        name: Timeout\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n"
-        ),
+    let timeout_configuration = ModelTestConfiguration {
+        base_url: format!("{base_url}/v1"),
+        ..direct_model_test_configuration()
+    };
+    let result = crate::model_test::execute(
+        timeout_configuration,
+        CancellationToken::new(),
+        Duration::from_millis(50),
     )
+    .await
     .unwrap();
-    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = service_for_target(&target);
-    service.accept_model_test_cost_notice().unwrap();
-    service.set_model_test_timeout_for_test(Duration::from_millis(500));
-    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
-        "providerId": "test-timeout",
-        "modelId": "timeout-model"
-    }))
-    .unwrap();
-    let result = service.test_model(input).await.unwrap();
     assert_eq!(result.error_code.as_deref(), Some("timeout"));
     started.recv_timeout(Duration::from_secs(1)).unwrap();
     server.join().unwrap();
