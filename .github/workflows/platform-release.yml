@@ -162,12 +162,30 @@ jobs:
           VITE_WDIO: "1"
         run: pnpm tauri build --no-bundle --debug --features webdriver --config src-tauri/tauri.webdriver.conf.json --verbose
 
+      - name: Prepare macOS UI display
+        if: matrix.smoke-shell == 'macos'
+        shell: bash
+        run: |
+          defaults write com.apple.dock autohide -bool true
+          defaults write NSGlobalDomain _HIHideMenuBar -bool true
+          killall Dock 2>/dev/null || true
+          killall SystemUIServer 2>/dev/null || true
+
       - name: Capture macOS UI evidence
         if: matrix.smoke-shell == 'macos'
         env:
           OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch
           OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance
         run: pnpm exec wdio run wdio.ui-acceptance.mjs
+
+      - name: Restore macOS UI display
+        if: ${{ always() && matrix.smoke-shell == 'macos' }}
+        shell: bash
+        run: |
+          defaults write com.apple.dock autohide -bool false
+          defaults delete NSGlobalDomain _HIHideMenuBar 2>/dev/null || true
+          killall Dock 2>/dev/null || true
+          killall SystemUIServer 2>/dev/null || true
 
       - name: Capture Windows UI evidence
         if: matrix.smoke-shell == 'windows'
