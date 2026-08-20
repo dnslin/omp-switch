@@ -1578,6 +1578,10 @@ impl AppService {
     pub fn get_model_test_state(&self) -> ModelTestState {
         self.model_tests.state()
     }
+    #[cfg(feature = "webdriver")]
+    pub fn set_webdriver_model_test_state(&self, result: ModelTestResult) {
+        self.model_tests.set_webdriver_result(result);
+    }
 
     #[cfg(test)]
     pub(crate) fn set_model_test_timeout_for_test(&self, timeout: std::time::Duration) {
@@ -2289,6 +2293,15 @@ pub fn get_model_test_state(service: tauri::State<'_, AppService>) -> ModelTestS
         elapsed_ms = started_at.elapsed().as_millis() as u64
     );
     state
+}
+
+#[cfg(feature = "webdriver")]
+#[tauri::command]
+pub fn set_webdriver_model_test_state(
+    service: tauri::State<'_, AppService>,
+    result: ModelTestResult,
+) {
+    service.set_webdriver_model_test_state(result);
 }
 
 #[tauri::command]

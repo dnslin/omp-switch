@@ -715,8 +715,8 @@ function ProviderDetailPage() {
                     const active = modelTest.isActive(provider.id, model.id);
                     const busy = modelTest.isBusy(provider.id, model.id);
                     return (
-                      <tr key={model.id} className={model.status === "read-only" ? "provider-detail-model-row--readonly" : undefined}>
-                        <td><div className="provider-detail-model-cell"><strong>{model.name ?? "未命名模型"}</strong><code>{model.id}</code><span className={`provider-detail-model-status provider-detail-model-status--${status.tone}`}>{status.label}</span></div></td>
+                      <tr key={model.id} className={[model.status === "read-only" ? "provider-detail-model-row--readonly" : null, recentResult ? "provider-detail-model-row--tested" : null].filter(Boolean).join(" ") || undefined}>
+                        <td><div className="provider-detail-model-cell"><strong>{model.name && model.name !== model.id ? model.name : model.id}</strong>{model.name && model.name !== model.id ? <code>{model.id}</code> : null}{status.tone !== "success" ? <span className={`provider-detail-model-status provider-detail-model-status--${status.tone}`}>{status.label}</span> : null}</div></td>
                         <td>{model.effectiveApi ?? "未配置"}</td>
                         <td title={sourceLabel}>{sourceLabel}</td>
                         <td>{model.input.length ? model.input.map((input) => input === "text" ? "Text" : input === "image" ? "Image" : "不支持").join(" · ") : "未配置"}</td>

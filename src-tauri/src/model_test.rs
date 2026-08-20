@@ -34,6 +34,7 @@ pub(crate) struct ModelTestInput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "webdriver", derive(Deserialize))]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ModelTestResult {
     pub(crate) success: bool,
@@ -49,6 +50,7 @@ pub(crate) struct ModelTestResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "webdriver", derive(Deserialize))]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ModelTestTerminal {
     pub(crate) provider_id: String,
@@ -87,6 +89,8 @@ struct CoordinatorState {
     terminal: Option<ModelTestTerminal>,
     terminal_binding: Option<ModelTestBinding>,
     latest_overview: Option<ObservedOverviewBinding>,
+    #[cfg(feature = "webdriver")]
+    webdriver_injected: bool,
 }
 
 struct ObservedOverviewBinding {
@@ -158,6 +162,10 @@ impl ModelTestCoordinator {
         });
         state.terminal = None;
         state.terminal_binding = None;
+        #[cfg(feature = "webdriver")]
+        {
+            state.webdriver_injected = false;
+        }
         Ok(ModelTestGuard {
             coordinator: self.clone(),
             id,
@@ -254,10 +262,21 @@ impl ModelTestCoordinator {
         state.terminal = None;
         state.terminal_binding = None;
         state.latest_overview = None;
+        #[cfg(feature = "webdriver")]
+        {
+            state.webdriver_injected = false;
+        }
     }
-
     pub(crate) fn invalidate_if_changed(&self, target_path: &str, models_hash: Option<&str>) {
         let mut state = self.state.lock();
+        #[cfg(feature = "webdriver")]
+        if state.webdriver_injected {
+            state.latest_overview = Some(ObservedOverviewBinding {
+                target_path: target_path.to_owned(),
+                models_hash: models_hash.map(str::to_owned),
+            });
+            return;
+        }
         let active_changed = state
             .active
             .as_ref()
@@ -291,6 +310,20 @@ impl ModelTestCoordinator {
             state.terminal_binding = None;
         }
     }
+
+    #[cfg(feature = "webdriver")]
+    pub(crate) fn set_webdriver_result(&self, result: ModelTestResult) {
+        let mut state = self.state.lock();
+        if let Some(active) = state.active.as_ref() {
+            active.cancellation.cancel();
+        }
+        state.active = None;
+        state.result = Some(result);
+        state.result_binding = None;
+        state.terminal = None;
+        state.terminal_binding = None;
+        state.webdriver_injected = true;
+    }
     pub(crate) fn state(&self) -> ModelTestState {
         let state = self.state.lock();
         ModelTestState {
@@ -313,6 +346,10 @@ impl ModelTestCoordinator {
                 .as_ref()
                 .is_some_and(|active| active.invalidated);
             state.active = None;
+            #[cfg(feature = "webdriver")]
+            {
+                state.webdriver_injected = false;
+            }
             if !invalidated {
                 state.result = Some(result);
                 state.result_binding = binding;

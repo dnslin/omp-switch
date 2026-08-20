@@ -1,19 +1,13 @@
 Issue #16 Pencil visual verification
 
-Reference frames: designs/01-setup-success.png, 10-overview-normal.png, 20-providers-list.png, 30-provider-detail.png, 50-roles-dirty.png, 60-settings-normal.png, 23-provider-create-step1.png, 24-provider-create-step2.png, 32-model-create-sheet.png. Each reference is 1536x1024.
+Reference frames: `designs/01-setup-success.png`, `10-overview-normal.png`, `20-providers-list.png`, `30-provider-detail.png`, `50-roles-dirty.png`, `60-settings-normal.png`, `23-provider-create-step1.png`, `24-provider-create-step2.png`, `32-model-create-sheet.png`. Each reference is 1536x1024. Pencil node IDs: `R6EUPs`, `chFfk`, `H6IsaW`, `vz6sg`, `i5xFP`, `W7copJ`.
 
-Native evidence was captured from the rebuilt macOS arm64 release binary with Orca computer-use. The logical window was 1536x961; Retina originals are retained as *-tauri-retina.png and logical-size copies are *-tauri-1536x961.png. Native titlebar and window controls are the only OS-native visual difference.
+The earlier local files under `.artifacts/issue-16/ui-acceptance/` were generated from a test-only `decorations:false` configuration and are invalidated as release evidence. They remain only as debugging output and must not be used for issue closure.
 
-Observed matches:
-- Setup Success: setup card hierarchy, status rows, actions, spacing, and native titlebar match; only temporary OMP paths/version data differ.
-- Overview: sidebar, status cards, environment/statistics/test panels, typography, controls, and spacing match; provider/test data reflects the temporary target.
-- Providers List: page header, search control, table geometry, action affordance, and status styling match; row count reflects the temporary target.
-- Provider Detail: breadcrumb, provider actions, summary, model table, test panel, and spacing match.
-- Roles Dirty: dirty status, save affordance, role table, and inline selectors match; the captured dirty state is intentionally unsaved.
-- Settings: section panels, rows, controls, reset/danger area, and responsive spacing match.
-- Provider creation step 1: the 1536x961 evidence uses the approved filled state: Provider ID and Base URL are populated, API Key is populated but remains masked, and 下一步 is enabled; the centered 814px-class modal, two-column form, protocol/auth controls, and footer match `designs/23-provider-create-step1.png`.
-- Provider creation step 2: the 1536x961 evidence uses the approved filled state: Model ID and 名称 are populated, 最终地址 resolves to `http://127.0.0.1:9/v1/responses`, and 创建 Provider is enabled without a focus-visible ring after the heading/container blur; the 752px x 740px geometry, 12px heading gap, inherited 90px footer/46px buttons, compact rows, final address, explanatory note, and one-row capabilities match `designs/24-provider-create-step2.png`.
-- Model Create Sheet: the 1536x961 evidence uses the approved filled state: Model ID and 名称 are populated, protocol is explicitly `google-generative-ai`, the final address resolves, and 保存模型 is enabled; the 590px x 608px geometry, absolute capability legend, body boundary, right-aligned footer actions, and sheet footer match `designs/32-model-create-sheet.png`.
-- All three current logical evidence files are exactly 1536x961; their Retina originals are exactly 3072x1922. The earlier Step 1 `752px` description and the earlier empty/disabled Step 2 and Model Sheet captures are superseded and are not release evidence.
+Release evidence contract:
+- Build the UI evidence binary with the formal `src-tauri/tauri.conf.json`, including native decorations and the native `OMP Switch` title.
+- On every matrix platform, establish and assert exactly `window.innerWidth === 1536` and `window.innerHeight === 1024` before capture.
+- Validate the raw WebDriver PNG is exactly `1536 * devicePixelRatio` by `1024 * devicePixelRatio`; downsample only that exact DPR image to 1536x1024. No stretching or cropping is allowed.
+- Produce `setup-success.png`, `overview.png`, `providers-list.png`, `provider-detail.png`, `roles-dirty.png`, `settings.png`, `provider-create-step1.png`, `provider-create-step2.png`, and `model-create-sheet.png` in each platform artifact `omp-switch-<matrix-id>-ui`.
 
-The rebuilt screenshots now match their corresponding approved Pencil states. No unapproved visual deviation was observed in the inspected states; the earlier invalidated conclusion is replaced by this filled-state comparison.
+Platform-by-platform comparison is intentionally pending until the formal-decoration workflow run produces all five required platform artifacts: macOS Intel, macOS Apple Silicon, Windows x64, Ubuntu 22.04 x64, and Ubuntu 24.04 runtime. Issue #16 must remain open until those artifacts are downloaded, dimension-checked, and compared page by page against the Pencil references.

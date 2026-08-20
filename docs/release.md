@@ -50,9 +50,9 @@ React page seam 使用真实 routed pages、可访问控件和 typed Tauri clien
 ## 平台真实验收
 
 - macOS 安装包：在当前 Apple Silicon 主机运行 `MACOSX_DEPLOYMENT_TARGET=13.0 pnpm tauri build`，并在 `macos-14` workflow 复验；Intel 由 `macos-15-intel` 原生 runner 构建和启动。最低系统版本由 bundle metadata 固定为 macOS 13.0。
-- Windows x64：在 `windows-2022` 原生 runner 构建、启动并执行 Rust/React seam。
+- Windows x64：在 `windows-2022` 原生 runner 构建、安装、启动并执行 Rust/React seam。
 - Ubuntu 22.04/24.04 x64：Ubuntu 22.04 构建并执行 Rust/React seam；Ubuntu 24.04 下载并启动同一份 Ubuntu 22.04 `.AppImage`，smoke JSON 记录正式资产名。
-- 每个平台的 runner 日志、bundle 和 smoke JSON 作为 workflow artifacts 保存 14 天。
+- 每个平台的 runner 日志、bundle、smoke JSON 和九页真实 Tauri UI 截图作为 workflow artifacts 保存 14 天。UI 截图由该平台刚构建、使用正式 `tauri.conf.json` 原生装饰配置的 Tauri binary 生成，不是浏览器或静态页面截图；WDIO 将 native window 调整到严格 `window.innerWidth === 1536 && window.innerHeight === 1024`，并只按实际 DPR 对原始截图等比降采样，正式窗口标题仍由 Tauri 提供。
 
 原生应用窗口标题由 `src-tauri/tauri.conf.json` 的 Tauri window `title` 提供；页面不绘制第二套标题栏。UI 基准视口为 1536×1024，最小窗口为 1100×720；Setup 的最外层卡片例外遵循 issue #5 的已批准基准。
 
@@ -69,7 +69,7 @@ React page seam 使用真实 routed pages、可访问控件和 typed Tauri clien
 - `W7copJ`：Settings
 - `N3OTR` / `r67daM`：Foundations / Components
 
-Provider 创建两步和 Model Create Sheet 必须使用对应 `.pen` 的已填写可提交状态：Step 1 的 Provider ID、Base URL、API Key 已填且“下一步”可用；Step 2 的 Model ID、名称已填、最终地址已解析且“创建 Provider”可用；Model Sheet 的 Model ID、名称、显式协议已填且“保存模型”可用。issue #16 的 1536×961 原生截图分别位于 `.artifacts/issue-16/provider-create-step1-tauri-1536x961.png`、`.artifacts/issue-16/provider-create-step2-tauri-1536x961.png` 和 `.artifacts/issue-16/model-create-sheet-tauri-1536x961.png`，3072×1922 Retina 原件以 `*-tauri-retina.png` 保留；逐页比较记录位于 `.artifacts/issue-16/visual-comparison.txt`。未批准的肉眼可见差异不能通过文档豁免。
+Provider 创建两步和 Model Create Sheet 必须使用对应 `.pen` 的已填写可提交状态：Step 1 的 Provider ID、Base URL、API Key 已填且“下一步”可用；Step 2 的 Model ID、名称已填、最终地址已解析且“创建 Provider”可用；Model Sheet 的 Model ID、名称、显式协议已填且“保存模型”可用。每个 matrix 平台都必须产生以下九个 1536×1024 文件：`setup-success.png`、`overview.png`、`providers-list.png`、`provider-detail.png`、`roles-dirty.png`、`settings.png`、`provider-create-step1.png`、`provider-create-step2.png`、`model-create-sheet.png`；artifact 名称为 `omp-switch-<matrix-id>-ui`。逐页比较记录必须随发布证据保存；未批准的肉眼可见差异不能通过文档豁免。
 
 ## 发布命令
 

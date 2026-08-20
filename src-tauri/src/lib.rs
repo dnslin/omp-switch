@@ -13,6 +13,8 @@ mod redaction;
 mod role_mutation;
 mod target_configuration;
 
+#[cfg(feature = "webdriver")]
+use application::set_webdriver_model_test_state;
 use application::{
     AppService, accept_model_test_cost_notice, cancel_model_test, confirm_path_omp,
     confirm_selected_omp, create_custom_provider, create_model, delete_model, delete_provider,
@@ -38,7 +40,12 @@ pub fn run() {
     logging::init().expect("failed to initialize redacted application logging");
     tracing::info!("starting OMP Switch without configuration payload logging");
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(feature = "webdriver")]
+    let builder = builder
+        .plugin(tauri_plugin_wdio::init())
+        .plugin(tauri_plugin_wdio_webdriver::init());
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -78,6 +85,8 @@ pub fn run() {
             test_model,
             cancel_model_test,
             get_model_test_state,
+            #[cfg(feature = "webdriver")]
+            set_webdriver_model_test_state,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run OMP Switch");

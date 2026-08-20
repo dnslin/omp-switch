@@ -41,6 +41,7 @@ const report = {
   platform: process.platform,
   architecture: process.arch,
   binaryPath,
+  releaseAssetPath: process.env.OMP_SWITCH_RELEASE_ASSET ? resolve(process.env.OMP_SWITCH_RELEASE_ASSET) : null,
   releaseAssetName: process.env.OMP_SWITCH_RELEASE_ASSET ? basename(process.env.OMP_SWITCH_RELEASE_ASSET) : null,
   launchWindowMs: waitMs,
   launched: true,
