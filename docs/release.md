@@ -55,7 +55,7 @@ React page seam 使用真实 routed pages、可访问控件和 typed Tauri clien
 - Ubuntu 22.04/24.04 x64：Ubuntu 22.04 构建并执行 Rust/React seam；Ubuntu 24.04 下载并启动同一份 Ubuntu 22.04 `.AppImage`，smoke JSON 记录正式资产名。
 - 每个平台的 runner 日志、bundle、smoke JSON 和两组九页真实 Tauri UI 证据作为 workflow artifacts 保存 14 天。`viewport/` 由该平台刚构建、使用正式 `src-tauri/tauri.conf.json` 原生装饰配置的 Tauri binary 生成，固定 `window.innerWidth === 1536 && window.innerHeight === 1024`，满足 issue #16 的 1536×1024 视口验收；`content/` 固定 1536×960，用于去掉 Pencil 64px 伪标题栏后的逐页比较。两组都不是浏览器或静态页面截图；`tauri-plugin-wdio-webdriver` 的 macOS endpoint 使用 `WKWebView.takeSnapshot`，PNG 不包含 OS 原生标题栏/交通灯。每次运行保留 `raw-snapshot.png` 与 `window-geometry.json`，后者记录请求的原生窗口基线、实际外窗物理尺寸、DPR、DOM 内容视口和 raw snapshot 尺寸。
 
-原生应用窗口标题由 `src-tauri/tauri.conf.json` 的 Tauri window `title` 提供，正式装饰和标题由 packaged-app smoke/启动配置验证；页面不绘制第二套标题栏。视觉比较使用 `content/` 的 1536×960 PNG 与 Pencil 含背景的内容基准，不把 OS 原生控件或 Pencil `Window Title Bar` 节点计入比较。若 raw snapshot 比目标内容多出底部像素，归一化只在运行时证明整带 RGBA 同色背景后排除；非均匀额外像素直接失败。OS chrome 高度跨平台不同，不宣称统一的实际外窗高度；Setup 的内容画板例外遵循 issue #5 的已批准基准。
+原生应用窗口标题由 `src-tauri/tauri.conf.json` 的 Tauri window `title` 提供，正式装饰和标题由 packaged-app smoke/启动配置验证；页面不绘制第二套标题栏。视觉比较使用 `content/` 的 1536×960 PNG 与 Pencil 含背景的内容基准，不把 OS 原生控件或 Pencil `Window Title Bar` 节点计入比较。若 raw snapshot 比目标内容多出底部像素，归一化只在运行时证明整带 RGBA 同色背景后排除；非均匀额外像素直接失败。OS chrome 高度跨平台不同，不宣称统一的实际外窗高度；Setup 的内容画板使用 issue #5 已批准的无外层卡片基准（`.artifacts/issue-5/implementation-1536x1024.png`），仅保留检测表格、状态行、间距和操作区。
 
 
 ## 视觉证据
@@ -85,9 +85,9 @@ gh run watch <run-id>
 ## 已完成发布证据
 
 - blocker gate：`gh api repos/dnslin/omp-switch/issues/16 --jq '{state,blocked_by:(.dependencies_summary.blocked_by // .issue_dependencies_summary.blocked_by // null)}'` 返回 `{"state":"open","blocked_by":0}`；#7–#15 均已关闭。
-- 最终原生矩阵：workflow run `32367195692`，commit `dd5b0c936d6346c36383d1013ef101bf0eab6c1c`，结论 `success`。macOS arm64、macOS Intel、Windows x64、Ubuntu 22.04 x64 和 Ubuntu 24.04 复用 Ubuntu 22.04 AppImage 的 job 全部成功；所有正式 bundle、smoke 和 UI artifacts 已下载到 `.artifacts/issue-16/ci-32367195692/`。
-- bundle 清单：macOS arm64 `.dmg`、macOS Intel `.dmg`、Windows `.msi`/NSIS `.exe`、Ubuntu 22.04 `.deb`/`.AppImage`/`.rpm` 均存在于最终 run artifact。Ubuntu 24.04 只启动同一份 Ubuntu 22.04 AppImage。
+- 修正版原生矩阵：workflow run `32370762456`，commit `13a90e44c42fef1495bef2e7185ee7b949dd6657`，结论 `success`。macOS arm64、macOS Intel、Windows x64、Ubuntu 22.04 x64 和 Ubuntu 24.04 复用 Ubuntu 22.04 AppImage 的 job 全部成功；证据已下载到 `.artifacts/issue-16/ci-32370762456/`。
+- bundle 清单：macOS arm64 `.dmg`、macOS Intel `.dmg`、Windows `.msi`/NSIS `.exe`、Ubuntu 22.04 `.deb`/`.AppImage`/`.rpm` 均存在于修正版 run artifact。Ubuntu 24.04 只启动同一份 Ubuntu 22.04 AppImage。
 - 五个平台 smoke JSON 均为 `launched: true`；分别记录 macOS arm64、macOS Intel、Windows x64、Ubuntu 22.04 x64 和 Ubuntu 24.04 x64 的真实启动路径及正式资产名。
-- 最终矩阵每个平台生成九张真实 Tauri `viewport/` 截图（1536×1024）及九张 Pencil `content/` 对比截图（1536×960）；逐页视觉复核记录见 `.artifacts/issue-16/visual-comparison.txt`。矩阵 runner 的视觉结果未发现未批准的肉眼可见差异。
-- 本地最终验证：`corepack pnpm exec vitest run` 通过，184 tests；`cargo test --manifest-path src-tauri/Cargo.toml` 通过，204 tests；`corepack pnpm typecheck`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` 和 `git diff --check` 通过。manifest、React/Rust seam、正式 bundle、矩阵 runner smoke 及 UI 截图在最终 workflow 中再次通过。
-- 初次矩阵 run `32366307070` 仅因 macOS arm64 artifact finalize 的 GitHub `ECONNRESET` 失败；完整重跑 `32367195692` 通过。该重跑仍使用 `windows-2022` Windows Server 2022 runner；Windows 10 22H2/Windows 11 x64 客户端真实验收主机尚未取得，不能以文档豁免，issue #16 不得关闭或发布 draft。
+- 修正版矩阵每个平台生成九张真实 Tauri `viewport/` 截图（1536×1024）及九张 `content/` 对比截图（1536×960）；每页 `.normalization.json`、`raw-snapshot.png` 和 `window-geometry.json` 均存在。Setup 逐页比较额外遵循 issue #5 已批准的无外层卡片基准；其余页面使用 Pencil 对应节点。比较记录见 `.artifacts/issue-16/visual-comparison.txt`，未发现未经批准的肉眼可见偏差。
+- 本地最终验证：`corepack pnpm install --frozen-lockfile`、`corepack pnpm test:manifest`（3 passed）、`corepack pnpm typecheck`、`corepack pnpm exec vitest run`（184 passed）、`cargo test --manifest-path src-tauri/Cargo.toml`（204 passed）、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` 和 `git diff --check` 均通过；修正版 `MACOSX_DEPLOYMENT_TARGET=13.0 corepack pnpm tauri build -- --verbose` 产出 `.app`/`.dmg`，本机 packaged-app smoke `launched=true`，metadata 为 `OMP Switch`、最低 macOS `13.0`。
+- Windows 客户端 gate 仍未满足：`windows-2022` 是 Windows Server 2022，不是 Windows 10 22H2 或 Windows 11 x64；当前没有可用的 Windows 客户端验收主机。不能用文档豁免，issue #16 不得关闭或发布 draft；取得客户端后必须重新运行 Windows 安装、启动、Rust/React seam 和九页 UI 证据。
