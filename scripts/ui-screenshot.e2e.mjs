@@ -117,6 +117,26 @@ async function setModelTestResult(result) {
   );
   await browser.refresh();
 }
+async function assertOverviewEndpointVisible() {
+  const rawMetrics = await browser.execute(() => {
+    const row = Array.from(document.querySelectorAll(".overview-result-row")).find((candidate) => candidate.firstElementChild?.textContent?.trim() === "最终地址");
+    const value = row?.lastElementChild;
+    if (!(value instanceof HTMLElement)) return { error: "overview-endpoint-row-not-found" };
+    return {
+      text: value.textContent?.trim() ?? "",
+      clientWidth: value.clientWidth,
+      scrollWidth: value.scrollWidth,
+    };
+  });
+  const metrics = rawMetrics.value ?? rawMetrics;
+  if (metrics.error) throw new Error(metrics.error);
+  if (metrics.text !== "https://cpa.example.xyz/v1/responses") {
+    throw new Error(`overview endpoint text mismatch: ${JSON.stringify(metrics.text)}`);
+  }
+  if (metrics.scrollWidth > metrics.clientWidth + 1) {
+    throw new Error(`overview endpoint is clipped: scrollWidth=${metrics.scrollWidth}, clientWidth=${metrics.clientWidth}`);
+  }
+}
 
 describe("OMP Switch real packaged UI evidence", () => {
   it(`captures the nine approved 1536x${evidenceHeight} states`, async () => {
@@ -139,6 +159,7 @@ describe("OMP Switch real packaged UI evidence", () => {
       message: "测试成功",
     });
     await waitHeading("概览");
+    await assertOverviewEndpointVisible();
     await screenshot("overview");
 
     setScenario("providers");
