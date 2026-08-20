@@ -174,8 +174,13 @@ impl OmpEnvironment for FakeOmpEnvironment {
         {
             barrier.wait();
         }
-        let name = executable.file_name().unwrap().to_string_lossy();
-        match (name.as_ref(), arguments) {
+        let executable_name = executable.to_string_lossy();
+        let name = executable_name
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default();
+
+        match (name, arguments) {
             ("saved-omp", ["--version"]) => Ok(CommandOutput::success("17.4.1\n")),
             ("saved-omp", ["config", "path"]) => Ok(CommandOutput::success("/tmp/saved-agent\n")),
             ("temp-omp", ["--version"]) if self.vary_temp_version => {
@@ -1992,17 +1997,16 @@ fn application_service_reports_junction_real_target() {
     fs::create_dir(&real).unwrap();
     fs::write(real.join("models.yml"), "providers: {}\n").unwrap();
     fs::write(real.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let command = format!(
-        "mklink /J \"{}\" \"{}\"",
-        junction.display(),
-        real.display()
-    );
+    let junction_result = Command::new("cmd.exe")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&real)
+        .output()
+        .unwrap();
     assert!(
-        Command::new("cmd")
-            .args(["/C", &command])
-            .status()
-            .unwrap()
-            .success()
+        junction_result.status.success(),
+        "mklink failed: {}",
+        String::from_utf8_lossy(&junction_result.stderr)
     );
 
     let state = service_for_target(&junction).detect_omp();
@@ -6673,11 +6677,14 @@ async fn model_test_classifies_base_dns_connection_and_tls_failures_safely() {
             .unwrap();
     assert_eq!(dns_result.error_code.as_deref(), Some("dns"));
 
-    let unused_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let unused_address = unused_listener.local_addr().unwrap();
-    drop(unused_listener);
+    let connection_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let connection_address = connection_listener.local_addr().unwrap();
+    let connection_server = thread::spawn(move || {
+        let (stream, _) = connection_listener.accept().unwrap();
+        drop(stream);
+    });
     let connection = ModelTestConfiguration {
-        base_url: format!("http://{unused_address}/tls-provider/v1"),
+        base_url: format!("http://{connection_address}/tls-provider/v1"),
         ..direct_model_test_configuration()
     };
     let connection_result =
@@ -6685,6 +6692,7 @@ async fn model_test_classifies_base_dns_connection_and_tls_failures_safely() {
             .await
             .unwrap();
     assert_eq!(connection_result.error_code.as_deref(), Some("connection"));
+    connection_server.join().unwrap();
 
     let tls_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tls_address = tls_listener.local_addr().unwrap();
@@ -6813,8 +6821,9 @@ fn start_hanging_model_test_server() -> (String, Receiver<()>, JoinHandle<()>) {
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let _ = read_model_test_request(&mut stream);
         sender.send(()).unwrap();
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request);
         thread::sleep(Duration::from_millis(400));
         let response = r#"{"output":[{"type":"message"}]}"#;
         let _ = write!(
