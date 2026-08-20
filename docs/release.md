@@ -21,7 +21,7 @@ issue #16 的全部 GitHub blockers 已关闭：#7、#8、#9、#10、#11、#12�
 Linux 只在 Ubuntu 22.04 构建一次，以最老支持系统控制 glibc；Ubuntu 24.04 job 只下载并启动同一份收集后的 `.AppImage`，不重新构建或发布第二套 amd64 bundle。
 
 macOS 构建显式设置 `MACOSX_DEPLOYMENT_TARGET=13.0`，并在 `tauri.conf.json` 写入 `bundle.macOS.minimumSystemVersion=13.0`。runner 只构建自己的 Rust host target，不使用交叉编译参数。
-Windows 安装器使用 Tauri `webviewInstallMode.type=skip`；正式支持的 Windows 10 22H2/11 已随系统提供 WebView2 Runtime。`windows-2022` 是 Server runner，workflow 在安装 MSI 前显式安装 Evergreen Runtime，不能把 Server runner 当作 Windows 客户端版本声明。
+Windows 安装器使用 Tauri `webviewInstallMode.type=skip`；正式支持的 Windows 10 22H2/11 已随系统提供 WebView2 Runtime。`windows-2022` 是 Server runner，workflow 在安装 NSIS 前显式安装 Evergreen Runtime，不能把 Server runner 当作 Windows 客户端版本声明。
 
 ## 构建前校验
 

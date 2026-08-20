@@ -157,16 +157,14 @@ jobs:
         env:
           OMP_SWITCH_SMOKE_REPORT: ${{ runner.temp }}/omp-switch-smoke.json
         run: |
-          $msi = Get-ChildItem -Path "src-tauri/target/release/bundle/msi" -Filter "*.msi" | Select-Object -First 1
-          if ($null -eq $msi) { throw "No MSI installer was produced" }
-          $installerLog = Join-Path $env:RUNNER_TEMP "omp-switch-msi.log"
-          $installer = Start-Process msiexec.exe -ArgumentList @('/i', $msi.FullName, '/qn', '/norestart', '/l*v', $installerLog) -PassThru -NoNewWindow
+          $setup = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis" -Filter "*-setup.exe" | Select-Object -First 1
+          if ($null -eq $setup) { throw "No NSIS installer was produced" }
+          $installer = Start-Process $setup.FullName -ArgumentList @('/S') -PassThru -NoNewWindow
           if (-not $installer.WaitForExit(180000)) {
             if (-not $installer.HasExited) { Stop-Process -Id $installer.Id -Force }
-            if (Test-Path -LiteralPath $installerLog) { Get-Content -LiteralPath $installerLog -Tail 80 }
-            throw "MSI installer did not exit within 180 seconds"
+            throw "NSIS installer did not exit within 180 seconds"
           }
-          if ($installer.ExitCode -notin @(0, 3010)) { throw "MSI installer failed with exit code $($installer.ExitCode)" }
+          if ($installer.ExitCode -ne 0) { throw "NSIS installer failed with exit code $($installer.ExitCode)" }
           $candidates = @(
             (Join-Path $env:ProgramFiles "OMP Switch\omp-switch.exe"),
             (Join-Path ${env:ProgramFiles(x86)} "OMP Switch\omp-switch.exe"),
@@ -174,8 +172,8 @@ jobs:
             (Join-Path $env:LOCALAPPDATA "Programs\OMP Switch\omp-switch.exe")
           )
           $binaryPath = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
-          if ($null -eq $binaryPath) { throw "Installed omp-switch.exe was not found in expected MSI locations: $($candidates -join ', ')" }
-          $env:OMP_SWITCH_RELEASE_ASSET = $msi.FullName
+          if ($null -eq $binaryPath) { throw "Installed omp-switch.exe was not found in expected NSIS locations: $($candidates -join ', ')" }
+          $env:OMP_SWITCH_RELEASE_ASSET = $setup.FullName
           node scripts/platform-smoke.mjs $binaryPath --report $env:OMP_SWITCH_SMOKE_REPORT
 
       - name: Build test-enabled UI application
