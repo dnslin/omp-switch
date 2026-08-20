@@ -182,7 +182,10 @@ impl OmpEnvironment for FakeOmpEnvironment {
 
         match (name, arguments) {
             ("saved-omp", ["--version"]) => Ok(CommandOutput::success("17.4.1\n")),
-            ("saved-omp", ["config", "path"]) => Ok(CommandOutput::success("/tmp/saved-agent\n")),
+            ("saved-omp", ["config", "path"]) => Ok(CommandOutput::success(format!(
+                "{}\n",
+                fake_omp_target_path("saved-agent").display()
+            ))),
             ("temp-omp", ["--version"]) if self.vary_temp_version => {
                 let sequence = self.temp_version_calls.fetch_add(1, Ordering::AcqRel);
                 Ok(CommandOutput::success(format!("17.2.{}\n", 15 + sequence)))
@@ -198,7 +201,10 @@ impl OmpEnvironment for FakeOmpEnvironment {
                 self.config_path.as_ref().unwrap().display()
             ))),
             ("path-omp", ["--version"]) => Ok(CommandOutput::success("18.0.0\n")),
-            ("path-omp", ["config", "path"]) => Ok(CommandOutput::success("/tmp/path-agent\n")),
+            ("path-omp", ["config", "path"]) => Ok(CommandOutput::success(format!(
+                "{}\n",
+                fake_omp_target_path("path-agent").display()
+            ))),
             ("broken-version", ["--version"]) => {
                 Ok(CommandOutput::failure(7, "API_KEY=super-secret"))
             }
@@ -250,6 +256,17 @@ impl OmpEnvironment for FakeOmpEnvironment {
                 crate::target_configuration::initialize_target_configuration(target, expectation)
             }
         }
+    }
+}
+
+fn fake_omp_target_path(name: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"C:\omp-switch-test").join(name)
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/tmp").join(name)
     }
 }
 
@@ -707,7 +724,9 @@ fn startup_detection_prefers_saved_omp_and_runs_only_fixed_commands() {
         StartupState::OmpReady {
             executable_path: "/bin/saved-omp".to_owned(),
             version: "17.4.1".to_owned(),
-            target_configuration: Box::new(writable_target(Path::new("/tmp/saved-agent"))),
+            target_configuration: Box::new(writable_target(
+                fake_omp_target_path("saved-agent").as_path()
+            )),
             requires_confirmation: false,
             previous_target_configuration: None,
         }
@@ -948,8 +967,9 @@ fn valid_manual_replacement_is_saved_only_after_explicit_confirmation() {
             ref target_configuration,
             ref previous_target_configuration,
             ..
-        } if target_configuration.path == "/tmp/path-agent"
-            && previous_target_configuration.as_deref() == Some("/tmp/saved-agent")
+        } if target_configuration.path == fake_omp_target_path("path-agent").to_string_lossy()
+            && previous_target_configuration.as_deref()
+                == Some(fake_omp_target_path("saved-agent").to_string_lossy().as_ref())
     ));
     assert_eq!(
         service
@@ -1431,7 +1451,7 @@ fn current_target_directory_reads_confirmed_state_without_clearing_pending_switc
     ));
     assert_eq!(
         service.current_target_directory().unwrap(),
-        PathBuf::from("/tmp/saved-agent")
+        fake_omp_target_path("saved-agent")
     );
     service
         .confirm_selected_omp(PathBuf::from("/bin/path-omp"))
@@ -1447,7 +1467,7 @@ fn current_target_directory_uses_path_when_no_omp_path_is_saved() {
 
     assert_eq!(
         service.current_target_directory().unwrap(),
-        PathBuf::from("/tmp/path-agent")
+        fake_omp_target_path("path-agent")
     );
 }
 
