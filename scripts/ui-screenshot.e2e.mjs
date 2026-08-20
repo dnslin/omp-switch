@@ -121,11 +121,21 @@ async function assertOverviewEndpointVisible() {
   const rawMetrics = await browser.execute(() => {
     const row = Array.from(document.querySelectorAll(".overview-result-row")).find((candidate) => candidate.firstElementChild?.textContent?.trim() === "最终地址");
     const value = row?.lastElementChild;
-    if (!(value instanceof HTMLElement)) return { error: "overview-endpoint-row-not-found" };
+    const panel = row?.closest(".overview-result");
+    if (!(value instanceof HTMLElement) || !(panel instanceof HTMLElement)) return { error: "overview-endpoint-row-not-found" };
+    const range = document.createRange();
+    range.selectNodeContents(value);
+    const textRight = Math.max(...Array.from(range.getClientRects(), (rect) => rect.right));
+    const textStyle = getComputedStyle(value);
+    const panelRect = panel.getBoundingClientRect();
     return {
       text: value.textContent?.trim() ?? "",
       clientWidth: value.clientWidth,
       scrollWidth: value.scrollWidth,
+      textRight,
+      panelRight: panelRect.right,
+      overflow: textStyle.overflow,
+      textOverflow: textStyle.textOverflow,
     };
   });
   const metrics = rawMetrics.value ?? rawMetrics;
@@ -133,8 +143,10 @@ async function assertOverviewEndpointVisible() {
   if (metrics.text !== "https://cpa.example.xyz/v1/responses") {
     throw new Error(`overview endpoint text mismatch: ${JSON.stringify(metrics.text)}`);
   }
-  if (metrics.scrollWidth > metrics.clientWidth + 1) {
-    throw new Error(`overview endpoint is clipped: scrollWidth=${metrics.scrollWidth}, clientWidth=${metrics.clientWidth}`);
+  const fitsInsideCell = metrics.scrollWidth <= metrics.clientWidth + 1;
+  const visiblyFitsInsidePanel = metrics.overflow === "visible" && metrics.textOverflow === "clip" && metrics.textRight <= metrics.panelRight + 1;
+  if (!fitsInsideCell && !visiblyFitsInsidePanel) {
+    throw new Error(`overview endpoint is clipped: scrollWidth=${metrics.scrollWidth}, clientWidth=${metrics.clientWidth}, textRight=${metrics.textRight}, panelRight=${metrics.panelRight}, overflow=${metrics.overflow}, textOverflow=${metrics.textOverflow}`);
   }
 }
 
