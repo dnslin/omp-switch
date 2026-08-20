@@ -2515,7 +2515,7 @@
                     {
                       "type": "frame",
                       "id": "uoZwj",
-                      "name": "Sync / 最近备份  2 分钟前",
+                      "name": "Sync / 最近备份  —",
                       "width": "fill_container",
                       "height": 40,
                       "stroke": "$color-border",
@@ -2526,9 +2526,9 @@
                         {
                           "type": "text",
                           "id": "PpBtp",
-                          "name": "Sync Text / 最近备份  2 分钟前",
+                          "name": "Sync Text / 最近备份  —",
                           "fill": "$color-text-primary",
-                          "content": "最近备份  2 分钟前",
+                          "content": "最近备份  —",
                           "fontFamily": "$font-ui",
                           "fontSize": 16,
                           "fontWeight": "normal"
@@ -3244,6 +3244,68 @@
                               "content": "dnslin/gpt-5.6-sol",
                               "fontFamily": "$font-ui",
                               "fontSize": 16,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "YyAFk",
+                          "name": "Result / 有效协议",
+                          "width": "fill_container",
+                          "gap": 30,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "UGli5",
+                              "name": "有效协议 Result Label",
+                              "fill": "$color-text-primary",
+                              "textGrowth": "fixed-width",
+                              "width": 120,
+                              "content": "有效协议",
+                              "fontFamily": "$font-ui",
+                              "fontSize": 16,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "Q39oo6",
+                              "name": "有效协议 Result Value",
+                              "fill": "$color-text-primary",
+                              "content": "openai-responses",
+                              "fontFamily": "$font-ui",
+                              "fontSize": 16,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "zVPoy",
+                          "name": "Result / 最终地址",
+                          "width": "fill_container",
+                          "gap": 30,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "v3Ol5",
+                              "name": "最终地址 Result Label",
+                              "fill": "$color-text-primary",
+                              "textGrowth": "fixed-width",
+                              "width": 120,
+                              "content": "最终地址",
+                              "fontFamily": "$font-ui",
+                              "fontSize": 16,
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "EO9GW",
+                              "name": "最终地址 Result Value",
+                              "fill": "$color-text-primary",
+                              "content": "https://cpa.example.xyz/v1/responses",
+                              "fontFamily": "$font-mono",
+                              "fontSize": 13,
                               "fontWeight": "normal"
                             }
                           ]

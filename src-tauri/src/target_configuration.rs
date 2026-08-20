@@ -1319,11 +1319,10 @@ fn open_or_create_target_directory(
                 "injected crash after directory marker persistence",
             ));
         }
+        let staged_identity = filesystem_identity_from_file(&staged.try_clone()?.into_std_file())?;
         manifest
             .created_directory_identities
-            .push(filesystem_identity_from_file(
-                &staged.try_clone()?.into_std_file(),
-            )?);
+            .push(staged_identity.clone());
         manifest.directory_creation_in_progress = None;
         persist_initialization_manifest(manifest_path, manifest)?;
         if failure == Some(InitializationFailurePoint::CrashBeforeDirectoryRename) {
@@ -1331,9 +1330,16 @@ fn open_or_create_target_directory(
                 "injected crash before directory capability rename",
             ));
         }
+        drop(staged);
         current.rename(&staging_name, &current, destination_name)?;
+        let published = current.open_dir(Path::new(destination_name))?;
+        if filesystem_identity_from_file(&published.try_clone()?.into_std_file())?
+            != staged_identity
+        {
+            return Err(io::Error::other("初始化目录发布后的文件系统身份发生变化"));
+        }
         after_directory_publish();
-        current = staged;
+        current = published;
         created_directories.push(current.try_clone()?);
     }
     Ok(OpenedTargetDirectory {
@@ -2226,17 +2232,16 @@ mod tests {
         fs::create_dir(&real).unwrap();
         fs::write(real.join("models.yml"), "providers: {}\n").unwrap();
         fs::write(real.join("config.yml"), "modelRoles: {}\n").unwrap();
-        let command = format!(
-            "mklink /J \"{}\" \"{}\"",
-            junction.display(),
-            real.display()
-        );
+        let junction_result = Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&real)
+            .output()
+            .unwrap();
         assert!(
-            Command::new("cmd")
-                .args(["/C", &command])
-                .status()
-                .unwrap()
-                .success()
+            junction_result.status.success(),
+            "mklink failed: {}",
+            String::from_utf8_lossy(&junction_result.stderr)
         );
 
         let discovery = discover_target_configuration(&junction).unwrap();
@@ -2244,7 +2249,7 @@ mod tests {
         assert_eq!(discovery.status, TargetConfigurationStatus::Writable);
         assert_eq!(
             discovery.resolved_path.as_deref(),
-            Some(real.to_string_lossy().as_ref())
+            Some(real.canonicalize().unwrap().to_string_lossy().as_ref())
         );
     }
 
@@ -2465,6 +2470,7 @@ mod tests {
         assert!(!real_b.join("agent").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn publication_retarget_retains_manifest_and_reports_incomplete_recovery() {
         let root = tempdir().unwrap();
@@ -2491,6 +2497,7 @@ mod tests {
                 .is_some()
         );
     }
+    #[cfg(unix)]
     #[test]
     fn directory_publication_retarget_keeps_the_staged_handle_bound() {
         let root = tempdir().unwrap();
@@ -2537,6 +2544,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn nested_directory_publish_failure_skips_path_rollback_after_swap() {
         let root = tempdir().unwrap();
@@ -2596,6 +2604,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn committed_cleanup_does_not_touch_a_replacement_directory() {
         let root = tempdir().unwrap();
@@ -2652,6 +2661,7 @@ mod tests {
         assert_eq!(manifest.phase, InitializationPhase::Committed);
     }
 
+    #[cfg(unix)]
     #[test]
     fn committed_cleanup_uses_created_directory_handle_after_retarget() {
         let root = tempdir().unwrap();

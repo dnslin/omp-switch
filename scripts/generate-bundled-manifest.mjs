@@ -16,7 +16,16 @@ if (typeof packageJson.version !== "string" || !/^[0-9A-Za-z][0-9A-Za-z._-]*$/.t
   throw new TypeError("The official pi-catalog package must declare a safe exact version.");
 }
 
-const source = JSON.parse(await readFile(join(catalogPath, "src", "models.json"), "utf8"));
+let sourceText;
+try {
+  sourceText = await readFile(join(catalogPath, "src", "models.json"), "utf8");
+} catch (error) {
+  if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+    throw new Error("The official pi-catalog package must include canonical src/models.json.", { cause: error });
+  }
+  throw error;
+}
+const source = JSON.parse(sourceText);
 if (!source || typeof source !== "object" || Array.isArray(source)) {
   throw new TypeError("pi-catalog models.json must contain a provider object.");
 }

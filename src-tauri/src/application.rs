@@ -297,7 +297,11 @@ struct PendingOmpSwitch {
     use_system_path: bool,
 }
 impl PendingOmpSwitch {
-    fn from_state(executable: PathBuf, state: &StartupState, use_system_path: bool) -> Option<Self> {
+    fn from_state(
+        executable: PathBuf,
+        state: &StartupState,
+        use_system_path: bool,
+    ) -> Option<Self> {
         let confirmation = PendingOmpConfirmation::from_state(state)?;
         Some(Self {
             executable,
@@ -1061,7 +1065,9 @@ impl AppService {
             previous_target_configuration.clone(),
         );
         let pending_confirmation = PendingOmpConfirmation::from_state(&state);
-        let pending_use_path = pending.as_ref().is_some_and(|pending| pending.use_system_path);
+        let pending_use_path = pending
+            .as_ref()
+            .is_some_and(|pending| pending.use_system_path);
         let target = match state {
             StartupState::OmpReady {
                 ref target_configuration,
@@ -1199,7 +1205,10 @@ impl AppService {
             if pending_state.executable != executable {
                 return Err(AppError::internal("OMP 验证状态已变化，请重新检测"));
             }
-            (pending_state.confirmation.clone(), pending_state.use_system_path)
+            (
+                pending_state.confirmation.clone(),
+                pending_state.use_system_path,
+            )
         };
         let target_changed = pending_confirmation.as_ref().map_or(true, |pending| {
             pending.previous_target.as_deref() != Some(pending.candidate_target.as_str())
@@ -1568,6 +1577,10 @@ impl AppService {
 
     pub fn get_model_test_state(&self) -> ModelTestState {
         self.model_tests.state()
+    }
+    #[cfg(feature = "webdriver")]
+    pub fn set_webdriver_model_test_state(&self, result: ModelTestResult) {
+        self.model_tests.set_webdriver_result(result);
     }
 
     #[cfg(test)]
@@ -2280,6 +2293,15 @@ pub fn get_model_test_state(service: tauri::State<'_, AppService>) -> ModelTestS
         elapsed_ms = started_at.elapsed().as_millis() as u64
     );
     state
+}
+
+#[cfg(feature = "webdriver")]
+#[tauri::command]
+pub fn set_webdriver_model_test_state(
+    service: tauri::State<'_, AppService>,
+    result: ModelTestResult,
+) {
+    service.set_webdriver_model_test_state(result);
 }
 
 #[tauri::command]

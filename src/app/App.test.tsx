@@ -182,6 +182,7 @@ describe("React page seam", () => {
 
     expect(await screen.findByRole("heading", { name: "OMP 已找到" })).toBeVisible();
     expect(screen.getByText("OMP Switch 已确认可执行文件和权威配置目录。")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "手动选择 OMP" })).not.toBeInTheDocument();
     expect(screen.getByText("/usr/local/bin/omp")).toBeVisible();
     expect(screen.getByText("/Users/username/.omp/agent")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "进入应用" }));
@@ -247,7 +248,7 @@ describe("React page seam", () => {
 
 
 
-  it("allows selecting a replacement while the current OMP is ready", async () => {
+  it("allows selecting a replacement from Settings while the current OMP is ready", async () => {
     const user = userEvent.setup();
     const selectOmpExecutable = vi.fn(async () => "/opt/new/bin/omp");
     const replacementState: StartupState = {
@@ -259,19 +260,19 @@ describe("React page seam", () => {
       requiresConfirmation: true,
     };
     const validateSelectedOmp = vi.fn(async () => replacementState);
-    renderRoute("/setup", {
+    renderRoute("/settings", {
       ...unavailableClient,
       getStartupState: async () => readyState,
       selectOmpExecutable,
       validateSelectedOmp,
     });
 
-    expect(await screen.findByRole("heading", { name: "OMP 已找到" })).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "手动选择 OMP" }));
+    expect(await screen.findByRole("heading", { name: "设置" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "重新选择" }));
 
     expect(selectOmpExecutable).toHaveBeenCalledTimes(1);
     expect(validateSelectedOmp).toHaveBeenCalledWith("/opt/new/bin/omp");
-    expect(await screen.findByRole("heading", { name: "确认切换 OMP" })).toBeVisible();
+    expect(await screen.findByRole("dialog")).toHaveTextContent("确认切换 OMP");
   });
 
   it("keeps the successful setup layout mounted while redetection is pending", async () => {
@@ -725,6 +726,9 @@ describe("React page seam", () => {
       element?.classList.contains("provider-create-step")
       && element.textContent === "步骤 2 / 2 · 首个模型",
     ))).toBeVisible();
+    const wizardDialog = screen.getByRole("dialog");
+    expect(wizardDialog).toHaveClass("provider-create-dialog--wizard-model");
+    expect(wizardDialog).not.toHaveClass("model-create-sheet");
     expect(screen.queryByText("Model ID 不能为空。")).not.toBeInTheDocument();
     expect(screen.queryByText("名称不能为空。")).not.toBeInTheDocument();
     expect(screen.getByText("new-provider")).toBeVisible();
@@ -1668,6 +1672,8 @@ describe("React page seam", () => {
     await user.clear(screen.getByLabelText("搜索 Model ID"));
     await user.click(screen.getByRole("button", { name: "新增模型" }));
     const sheet = await screen.findByRole("dialog");
+    expect(sheet).toHaveClass("model-create-sheet");
+    expect(sheet).not.toHaveClass("provider-create-dialog--wizard-model");
     expect(within(sheet).getByRole("heading", { name: "新增模型" })).toBeVisible();
     expect(within(sheet).getByLabelText("Model ID")).toBeVisible();
     await user.type(within(sheet).getByLabelText("Model ID"), "new-model");
@@ -1819,7 +1825,7 @@ describe("React page seam", () => {
     renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad, deleteProvider });
 
     await screen.findByText("Sol");
-    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    await user.click(screen.getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "删除 Provider" }));
 
@@ -1864,7 +1870,7 @@ describe("React page seam", () => {
     });
 
     await screen.findByText("Sol");
-    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    await user.click(screen.getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "删除 Provider" }));
 
@@ -1922,7 +1928,7 @@ describe("React page seam", () => {
     renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad, deleteProvider });
 
     await screen.findByText("Sol");
-    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    await user.click(screen.getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "删除 Provider" }));
 
@@ -1950,7 +1956,7 @@ describe("React page seam", () => {
     renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview, readyState), openTargetConfigurationDirectory, deleteProvider });
 
     await screen.findByText("Sol");
-    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    await user.click(screen.getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveTextContent("包含模型");
     expect(dialog).toHaveTextContent("gpt-5.6-sol");
@@ -1989,7 +1995,7 @@ describe("React page seam", () => {
     renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad: async () => overviewLoad(overview, readyState), deleteProvider });
 
     await screen.findByText("Advanced model");
-    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    await user.click(screen.getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveTextContent("Provider 包含只读 Model definition advanced-model");
     expect(within(dialog).getByRole("button", { name: "删除 Provider" })).toBeDisabled();
@@ -2008,7 +2014,7 @@ describe("React page seam", () => {
     renderRoute("/providers/dnslin", { ...unavailableClient, getOverviewLoad, deleteProvider });
 
     await screen.findByText("Sol");
-    await user.click(screen.getByRole("button", { name: "删除 Provider" }));
+    await user.click(screen.getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveTextContent("dnslin");
     expect(dialog).toHaveTextContent("gpt-5.6-sol");
@@ -3158,7 +3164,7 @@ describe("Overview page seam", () => {
     expect(panel).toHaveTextContent(/anthropic-messages\s+·\s+Provider 默认值/);
     expect(panel).toHaveTextContent("https://api.anthropic.com/v1/messages");
     expect(panel).toHaveTextContent("Text");
-    expect(panel).toHaveTextContent("200,000");
+    expect(panel).toHaveTextContent("200K");
     await waitFor(() => expect(saveUiSettings).toHaveBeenCalledTimes(2));
     expect(saveUiSettings).toHaveBeenNthCalledWith(2, {
       theme: "dark",
@@ -3358,7 +3364,7 @@ describe("Overview page seam", () => {
     expect(panel).toHaveTextContent("claude-sonnet-4");
     expect(panel).toHaveTextContent(/anthropic-messages\s+·\s+Provider 默认值/);
     expect(panel).toHaveTextContent("https://api.anthropic.com/v1/messages");
-    expect(panel).toHaveTextContent("200,000");
+    expect(panel).toHaveTextContent("200K");
     expect(saveUiSettings).not.toHaveBeenCalled();
   });
   it("preserves a saved Provider with an intentionally empty Model", async () => {
@@ -3524,7 +3530,7 @@ describe("Overview page seam", () => {
     expect(panel).toHaveTextContent(/openai-completions\s+·\s+模型指定/);
     expect(panel).toHaveTextContent("https://legacy.example/v1/chat/completions");
     expect(panel).toHaveTextContent(/Text\s+·\s+Image\s+·\s+Reasoning/);
-    expect(panel).toHaveTextContent("64,000");
+    expect(panel).toHaveTextContent("64K");
     expect(screen.getByRole("button", { name: "测试模型" })).toBeDisabled();
   });
 
@@ -3755,6 +3761,11 @@ describe("Model test page seam", () => {
     await waitFor(() => expect(testModel).toHaveBeenCalledWith({ providerId: "dnslin", modelId: "gpt-5.6-sol" }));
     expect(await screen.findByText("模型连接成功")).toBeVisible();
     expect(screen.getByText("42 ms")).toBeVisible();
+    const result = screen.getByRole("region", { name: "测试结果" });
+    expect(result).toHaveTextContent("openai-responses");
+    expect(result).toHaveTextContent("https://example.com/responses");
+    expect(result).toHaveTextContent("HTTP 200");
+    expect(screen.getByRole("region", { name: "快速测试" })).toHaveTextContent("356K");
   });
   it("clears a completed result when refresh reconciles an invalidated remote state", async () => {
     const user = userEvent.setup();

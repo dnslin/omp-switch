@@ -1,0 +1,8 @@
+{
+  "platform": "darwin",
+  "architecture": "arm64",
+  "binaryPath": "/Volumes/data/project/omp-switch/src-tauri/target/release/omp-switch",
+  "releaseAssetName": null,
+  "launchWindowMs": 5000,
+  "launched": true
+}

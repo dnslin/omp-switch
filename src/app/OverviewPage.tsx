@@ -402,7 +402,7 @@ function QuickTestPanel({
       <OverviewField label="有效协议" value={protocol} />
       <OverviewField label="最终地址" value={finalAddress} mono />
       <OverviewField label="能力" value={capabilities} />
-      <OverviewField label="Context Window" value={model?.contextWindow ? formatOverviewCount(model.contextWindow) : "—"} />
+      <OverviewField label="Context Window" value={model?.contextWindow ? formatContextWindow(model.contextWindow) : "—"} />
       <div className="overview-panel-actions">
         <Button
           disabled={disabled}
@@ -501,7 +501,7 @@ function TestResultPanel({ providers, result, terminal, running, providerId, mod
       <OverviewResultRow label="有效协议" value={protocol} />
       <OverviewResultRow label="最终地址" value={endpoint} mono />
       <OverviewResultRow label="耗时" value={running || !result ? "—" : `${result.latencyMs} ms`} />
-      <OverviewResultRow label="状态码" value={running || !result ? "—" : result.status ? String(result.status) : "—"} />
+      <OverviewResultRow label="状态码" value={running || !result ? "—" : result.status ? `HTTP ${result.status}` : "—"} />
       <OverviewResultRow label="时间" value={running ? "请求进行中" : result || terminal ? "刚刚" : "—"} />
     </section>
   );
@@ -511,6 +511,12 @@ function OverviewResultRow({ label, value, mono = false }: { label: string; valu
   return <div className="overview-result-row"><span>{label}</span><span className={mono ? "overview-result-row__value--mono" : undefined}>{value}</span></div>;
 }
 
+
+function formatContextWindow(value: number) {
+  if (value >= 1_000_000 && value % 1_000_000 === 0) return `${value / 1_000_000}M`;
+  if (value >= 1_000 && value % 1_000 === 0) return `${value / 1_000}K`;
+  return new Intl.NumberFormat("zh-CN").format(value);
+}
 
 function formatOverviewCount(value: number) {
   return new Intl.NumberFormat("zh-CN").format(value);

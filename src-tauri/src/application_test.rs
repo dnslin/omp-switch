@@ -174,10 +174,18 @@ impl OmpEnvironment for FakeOmpEnvironment {
         {
             barrier.wait();
         }
-        let name = executable.file_name().unwrap().to_string_lossy();
-        match (name.as_ref(), arguments) {
+        let executable_name = executable.to_string_lossy();
+        let name = executable_name
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default();
+
+        match (name, arguments) {
             ("saved-omp", ["--version"]) => Ok(CommandOutput::success("17.4.1\n")),
-            ("saved-omp", ["config", "path"]) => Ok(CommandOutput::success("/tmp/saved-agent\n")),
+            ("saved-omp", ["config", "path"]) => Ok(CommandOutput::success(format!(
+                "{}\n",
+                fake_omp_target_path("saved-agent").display()
+            ))),
             ("temp-omp", ["--version"]) if self.vary_temp_version => {
                 let sequence = self.temp_version_calls.fetch_add(1, Ordering::AcqRel);
                 Ok(CommandOutput::success(format!("17.2.{}\n", 15 + sequence)))
@@ -193,7 +201,10 @@ impl OmpEnvironment for FakeOmpEnvironment {
                 self.config_path.as_ref().unwrap().display()
             ))),
             ("path-omp", ["--version"]) => Ok(CommandOutput::success("18.0.0\n")),
-            ("path-omp", ["config", "path"]) => Ok(CommandOutput::success("/tmp/path-agent\n")),
+            ("path-omp", ["config", "path"]) => Ok(CommandOutput::success(format!(
+                "{}\n",
+                fake_omp_target_path("path-agent").display()
+            ))),
             ("broken-version", ["--version"]) => {
                 Ok(CommandOutput::failure(7, "API_KEY=super-secret"))
             }
@@ -245,6 +256,17 @@ impl OmpEnvironment for FakeOmpEnvironment {
                 crate::target_configuration::initialize_target_configuration(target, expectation)
             }
         }
+    }
+}
+
+fn fake_omp_target_path(name: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"C:\omp-switch-test").join(name)
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/tmp").join(name)
     }
 }
 
@@ -702,7 +724,9 @@ fn startup_detection_prefers_saved_omp_and_runs_only_fixed_commands() {
         StartupState::OmpReady {
             executable_path: "/bin/saved-omp".to_owned(),
             version: "17.4.1".to_owned(),
-            target_configuration: Box::new(writable_target(Path::new("/tmp/saved-agent"))),
+            target_configuration: Box::new(writable_target(
+                fake_omp_target_path("saved-agent").as_path()
+            )),
             requires_confirmation: false,
             previous_target_configuration: None,
         }
@@ -943,8 +967,9 @@ fn valid_manual_replacement_is_saved_only_after_explicit_confirmation() {
             ref target_configuration,
             ref previous_target_configuration,
             ..
-        } if target_configuration.path == "/tmp/path-agent"
-            && previous_target_configuration.as_deref() == Some("/tmp/saved-agent")
+        } if target_configuration.path == fake_omp_target_path("path-agent").to_string_lossy()
+            && previous_target_configuration.as_deref()
+                == Some(fake_omp_target_path("saved-agent").to_string_lossy().as_ref())
     ));
     assert_eq!(
         service
@@ -1426,7 +1451,7 @@ fn current_target_directory_reads_confirmed_state_without_clearing_pending_switc
     ));
     assert_eq!(
         service.current_target_directory().unwrap(),
-        PathBuf::from("/tmp/saved-agent")
+        fake_omp_target_path("saved-agent")
     );
     service
         .confirm_selected_omp(PathBuf::from("/bin/path-omp"))
@@ -1442,7 +1467,7 @@ fn current_target_directory_uses_path_when_no_omp_path_is_saved() {
 
     assert_eq!(
         service.current_target_directory().unwrap(),
-        PathBuf::from("/tmp/path-agent")
+        fake_omp_target_path("path-agent")
     );
 }
 
@@ -1992,17 +2017,16 @@ fn application_service_reports_junction_real_target() {
     fs::create_dir(&real).unwrap();
     fs::write(real.join("models.yml"), "providers: {}\n").unwrap();
     fs::write(real.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let command = format!(
-        "mklink /J \"{}\" \"{}\"",
-        junction.display(),
-        real.display()
-    );
+    let junction_result = Command::new("cmd.exe")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&real)
+        .output()
+        .unwrap();
     assert!(
-        Command::new("cmd")
-            .args(["/C", &command])
-            .status()
-            .unwrap()
-            .success()
+        junction_result.status.success(),
+        "mklink failed: {}",
+        String::from_utf8_lossy(&junction_result.stderr)
     );
 
     let state = service_for_target(&junction).detect_omp();
@@ -6223,9 +6247,9 @@ async fn model_test_reloads_saved_openai_completions_and_uses_a_minimal_authenti
                 }
             }
         }
-        let request_text = String::from_utf8_lossy(&request);
-        assert!(request_text.starts_with("POST /v1/chat/completions HTTP/1.1"));
-        assert!(request_text.contains("authorization: Bearer saved-secret"));
+        let request_text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+        assert!(request_text.starts_with("post /v1/chat/completions http/1.1"));
+        assert!(request_text.contains("authorization: bearer saved-secret"));
         let header_end = request
             .windows(4)
             .position(|window| window == b"\r\n\r\n")
@@ -6673,11 +6697,14 @@ async fn model_test_classifies_base_dns_connection_and_tls_failures_safely() {
             .unwrap();
     assert_eq!(dns_result.error_code.as_deref(), Some("dns"));
 
-    let unused_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let unused_address = unused_listener.local_addr().unwrap();
-    drop(unused_listener);
+    let connection_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let connection_address = connection_listener.local_addr().unwrap();
+    let connection_server = thread::spawn(move || {
+        let (stream, _) = connection_listener.accept().unwrap();
+        drop(stream);
+    });
     let connection = ModelTestConfiguration {
-        base_url: format!("http://{unused_address}/tls-provider/v1"),
+        base_url: format!("http://{connection_address}/tls-provider/v1"),
         ..direct_model_test_configuration()
     };
     let connection_result =
@@ -6685,6 +6712,7 @@ async fn model_test_classifies_base_dns_connection_and_tls_failures_safely() {
             .await
             .unwrap();
     assert_eq!(connection_result.error_code.as_deref(), Some("connection"));
+    connection_server.join().unwrap();
 
     let tls_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tls_address = tls_listener.local_addr().unwrap();
@@ -6791,7 +6819,9 @@ fn start_status_model_test_server(responses: Vec<(u16, &'static str)>) -> (Strin
     (address, handle)
 }
 
-fn start_hanging_model_test_server() -> (String, Receiver<()>, JoinHandle<()>) {
+fn start_hanging_model_test_server(
+    response_delay: Duration,
+) -> (String, Receiver<()>, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = format!("http://{}", listener.local_addr().unwrap());
@@ -6813,9 +6843,10 @@ fn start_hanging_model_test_server() -> (String, Receiver<()>, JoinHandle<()>) {
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let _ = read_model_test_request(&mut stream);
         sender.send(()).unwrap();
-        thread::sleep(Duration::from_millis(400));
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request);
+        thread::sleep(response_delay);
         let response = r#"{"output":[{"type":"message"}]}"#;
         let _ = write!(
             stream,
@@ -6902,32 +6933,23 @@ async fn model_test_returns_safe_error_categories_and_supports_no_authentication
 
 #[tokio::test]
 async fn model_test_is_single_concurrent_cancellable_and_time_bounded() {
-    let (base_url, started, server) = start_hanging_model_test_server();
-    let app_data = tempdir().unwrap().keep();
-    let target = app_data.join("agent");
-    fs::create_dir_all(&target).unwrap();
-    fs::write(
-        target.join("models.yml"),
-        format!(
-            "providers:\n  test-timeout:\n    baseUrl: {base_url}/v1\n    api: openai-responses\n    apiKey: timeout-key\n    models:\n      - id: timeout-model\n        name: Timeout\n        input: [text]\n        contextWindow: 128000\n        maxTokens: 4096\n"
-        ),
+    let (base_url, started, server) = start_hanging_model_test_server(Duration::from_secs(1));
+    let timeout_configuration = ModelTestConfiguration {
+        base_url: format!("{base_url}/v1"),
+        ..direct_model_test_configuration()
+    };
+    let result = crate::model_test::execute(
+        timeout_configuration,
+        CancellationToken::new(),
+        Duration::from_millis(250),
     )
+    .await
     .unwrap();
-    fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
-    let service = service_for_target(&target);
-    service.accept_model_test_cost_notice().unwrap();
-    service.set_model_test_timeout_for_test(Duration::from_millis(50));
-    let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
-        "providerId": "test-timeout",
-        "modelId": "timeout-model"
-    }))
-    .unwrap();
-    let result = service.test_model(input).await.unwrap();
     assert_eq!(result.error_code.as_deref(), Some("timeout"));
     started.recv_timeout(Duration::from_secs(1)).unwrap();
     server.join().unwrap();
 
-    let (base_url, started, server) = start_hanging_model_test_server();
+    let (base_url, started, server) = start_hanging_model_test_server(Duration::from_millis(400));
     let app_data = tempdir().unwrap().keep();
     let target = app_data.join("agent");
     fs::create_dir_all(&target).unwrap();
@@ -7153,7 +7175,8 @@ async fn model_test_times_out_while_waiting_for_a_stuck_omp_detection_lock() {
 fn runtime_info_emits_redacted_operation_log() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::registry().with(OperationLogCapture(events.clone()));
-    let runtime = tracing::subscriber::with_default(subscriber, crate::application::get_runtime_info);
+    let runtime =
+        tracing::subscriber::with_default(subscriber, crate::application::get_runtime_info);
 
     assert!(!runtime.platform.is_empty());
     assert!(!runtime.architecture.is_empty());

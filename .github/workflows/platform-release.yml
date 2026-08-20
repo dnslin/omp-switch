@@ -1,0 +1,416 @@
+name: Platform release
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: macos-intel
+            name: macOS Intel
+            runner: macos-15-intel
+            node-platform: darwin
+            node-architecture: x64
+            rust-target: x86_64-apple-darwin
+            smoke-shell: macos
+          - id: macos-arm64
+            name: macOS Apple Silicon
+            runner: macos-14
+            node-platform: darwin
+            node-architecture: arm64
+            rust-target: aarch64-apple-darwin
+            smoke-shell: macos
+          - id: ubuntu-22-x64
+            name: Ubuntu 22.04 x64
+            runner: ubuntu-22.04
+            node-platform: linux
+            node-architecture: x64
+            rust-target: x86_64-unknown-linux-gnu
+            smoke-shell: linux
+          - id: windows-x64
+            name: Windows x64
+            runner: windows-2022
+            node-platform: win32
+            node-architecture: x64
+            rust-target: x86_64-pc-windows-msvc
+            smoke-shell: windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify native runner target
+        shell: bash
+        run: node scripts/verify-native-platform.mjs "${{ matrix.node-platform }}" "${{ matrix.node-architecture }}" "${{ matrix.rust-target }}"
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install Ubuntu dependencies
+        if: matrix.runner == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            file \
+            libayatana-appindicator3-dev \
+            libfuse2 \
+            libgtk-3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            openbox \
+            patchelf \
+            xdg-utils \
+            xvfb
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate bundled manifest source
+        run: pnpm test:manifest
+
+      - name: Typecheck React
+        run: pnpm typecheck
+
+      - name: Test React high-level seam
+        run: pnpm exec vitest run
+
+      - name: Test Rust application-service seam
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build native release bundles
+        run: pnpm tauri build -- --verbose
+
+      - name: Smoke test packaged macOS application
+        if: matrix.smoke-shell == 'macos'
+        shell: bash
+        env:
+          OMP_SWITCH_SMOKE_REPORT: ${{ runner.temp }}/omp-switch-smoke.json
+        run: |
+          app="$(find src-tauri/target/release/bundle/macos -type d -name '*.app' -print -quit)"
+          test -n "$app"
+          binary="$app/Contents/MacOS/omp-switch"
+          test -x "$binary"
+          export OMP_SWITCH_RELEASE_ASSET="$app"
+          echo "OMP_SWITCH_RELEASE_ASSET=$app" >> "$GITHUB_ENV"
+          node scripts/platform-smoke.mjs "$binary" --report "$OMP_SWITCH_SMOKE_REPORT"
+
+      - name: Smoke test packaged application on Ubuntu 22.04
+        if: matrix.smoke-shell == 'linux'
+        shell: bash
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          OMP_SWITCH_SMOKE_REPORT: ${{ runner.temp }}/omp-switch-smoke.json
+        run: |
+          asset="$(find src-tauri/target/release/bundle -type f -iname '*.AppImage' -print -quit)"
+          test -n "$asset"
+          chmod +x "$asset"
+          export OMP_SWITCH_RELEASE_ASSET="$asset"
+          echo "OMP_SWITCH_RELEASE_ASSET=$asset" >> "$GITHUB_ENV"
+          xvfb-run -a -s "-screen 0 1536x1024x24" node scripts/platform-smoke.mjs "$asset" --report "$OMP_SWITCH_SMOKE_REPORT"
+
+      - name: Install WebView2 runtime for Windows smoke
+        if: matrix.smoke-shell == 'windows'
+        shell: pwsh
+        run: |
+          $runtimePath = Join-Path $env:RUNNER_TEMP "MicrosoftEdgeWebView2Setup.exe"
+          Invoke-WebRequest -UseBasicParsing -Uri "https://go.microsoft.com/fwlink/?linkid=2124703" -OutFile $runtimePath
+          $runtime = Start-Process $runtimePath -ArgumentList @('/silent', '/install') -PassThru -Wait -NoNewWindow
+          if ($runtime.ExitCode -notin @(0, 3010)) { throw "WebView2 runtime installer failed with exit code $($runtime.ExitCode)" }
+      - name: Smoke test installed Windows application
+        if: matrix.smoke-shell == 'windows'
+        shell: pwsh
+        env:
+          OMP_SWITCH_SMOKE_REPORT: ${{ runner.temp }}/omp-switch-smoke.json
+        run: |
+          $setup = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis" -Filter "*-setup.exe" | Select-Object -First 1
+          if ($null -eq $setup) { throw "No NSIS installer was produced" }
+          $installer = Start-Process $setup.FullName -ArgumentList @('/S') -PassThru -NoNewWindow
+          if (-not $installer.WaitForExit(180000)) {
+            if (-not $installer.HasExited) { Stop-Process -Id $installer.Id -Force }
+            throw "NSIS installer did not exit within 180 seconds"
+          }
+          if ($installer.ExitCode -ne 0) { throw "NSIS installer failed with exit code $($installer.ExitCode)" }
+          $candidates = @(
+            (Join-Path $env:ProgramFiles "OMP Switch\omp-switch.exe"),
+            (Join-Path ${env:ProgramFiles(x86)} "OMP Switch\omp-switch.exe"),
+            (Join-Path $env:LOCALAPPDATA "OMP Switch\omp-switch.exe"),
+            (Join-Path $env:LOCALAPPDATA "Programs\OMP Switch\omp-switch.exe")
+          )
+          $binaryPath = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if ($null -eq $binaryPath) { throw "Installed omp-switch.exe was not found in expected NSIS locations: $($candidates -join ', ')" }
+          $env:OMP_SWITCH_RELEASE_ASSET = $setup.FullName
+          node scripts/platform-smoke.mjs $binaryPath --report $env:OMP_SWITCH_SMOKE_REPORT
+
+      - name: Build test-enabled UI application
+        env:
+          VITE_WDIO: "1"
+        run: pnpm tauri build --no-bundle --debug --features webdriver --config src-tauri/tauri.webdriver.conf.json --verbose
+
+      - name: Prepare macOS UI display
+        if: matrix.smoke-shell == 'macos'
+        shell: bash
+        run: |
+          defaults write com.apple.dock autohide -bool true
+          defaults write NSGlobalDomain _HIHideMenuBar -bool true
+          killall Dock 2>/dev/null || true
+          killall SystemUIServer 2>/dev/null || true
+
+      - name: Capture macOS 1536x1024 UI viewport evidence
+        if: matrix.smoke-shell == 'macos'
+        env:
+          OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/viewport
+          OMP_SWITCH_UI_HEIGHT: "1024"
+        run: pnpm exec wdio run wdio.ui-acceptance.mjs
+
+      - name: Capture macOS 1536x960 Pencil content evidence
+        if: matrix.smoke-shell == 'macos'
+        env:
+          OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/content
+          OMP_SWITCH_UI_HEIGHT: "960"
+        run: pnpm exec wdio run wdio.ui-acceptance.mjs
+
+      - name: Restore macOS UI display
+        if: ${{ always() && matrix.smoke-shell == 'macos' }}
+        shell: bash
+        run: |
+          defaults write com.apple.dock autohide -bool false
+          defaults delete NSGlobalDomain _HIHideMenuBar 2>/dev/null || true
+          killall Dock 2>/dev/null || true
+          killall SystemUIServer 2>/dev/null || true
+
+      - name: Capture Windows 1536x1024 UI viewport evidence
+        if: matrix.smoke-shell == 'windows'
+        env:
+          OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch.exe
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/viewport
+          OMP_SWITCH_UI_HEIGHT: "1024"
+        run: pnpm exec wdio run wdio.ui-acceptance.mjs
+
+      - name: Capture Windows 1536x960 Pencil content evidence
+        if: matrix.smoke-shell == 'windows'
+        env:
+          OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch.exe
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/content
+          OMP_SWITCH_UI_HEIGHT: "960"
+        run: pnpm exec wdio run wdio.ui-acceptance.mjs
+
+      - name: Capture Ubuntu 1536x1024 UI viewport evidence
+        if: matrix.smoke-shell == 'linux'
+        env:
+          OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/viewport
+          OMP_SWITCH_UI_HEIGHT: "1024"
+        run: xvfb-run -a -s "-screen 0 1920x1200x24" bash -lc 'openbox --sm-disable >/tmp/omp-switch-openbox.log 2>&1 & sleep 1; exec pnpm exec wdio run wdio.ui-acceptance.mjs'
+
+      - name: Capture Ubuntu 1536x960 Pencil content evidence
+        if: matrix.smoke-shell == 'linux'
+        env:
+          OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/content
+          OMP_SWITCH_UI_HEIGHT: "960"
+        run: xvfb-run -a -s "-screen 0 1920x1200x24" bash -lc 'openbox --sm-disable >/tmp/omp-switch-openbox.log 2>&1 & sleep 1; exec pnpm exec wdio run wdio.ui-acceptance.mjs'
+
+      - name: Upload UI screenshot evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: omp-switch-${{ matrix.id }}-ui
+          path: .artifacts/ui-acceptance
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Collect installer assets by explicit allowlist
+        run: node scripts/collect-release-assets.mjs src-tauri/target/release/bundle release-assets/${{ matrix.id }}
+
+      - name: Upload native release bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: omp-switch-${{ matrix.id }}-bundles
+          path: release-assets/${{ matrix.id }}
+          if-no-files-found: error
+          retention-days: 14
+
+
+      - name: Upload packaged application smoke evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: omp-switch-${{ matrix.id }}-smoke
+          path: ${{ runner.temp }}/omp-switch-smoke.json
+          if-no-files-found: error
+          retention-days: 14
+
+  ubuntu-24-smoke:
+    name: Ubuntu 24.04 smoke of Ubuntu 22.04 AppImage
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Ubuntu 24.04 runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            file \
+            libayatana-appindicator3-dev \
+            libfuse2 \
+            libgtk-3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            openbox \
+            xdg-utils \
+            xvfb
+
+      - name: Download Ubuntu 22.04 release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: omp-switch-ubuntu-22-x64-bundles
+          path: smoke-bundle
+
+      - name: Locate and prepare the published AppImage
+        shell: bash
+        run: |
+          asset="$(find smoke-bundle -type f -iname '*.AppImage' -print -quit)"
+          test -n "$asset"
+          chmod +x "$asset"
+          echo "OMP_SWITCH_RELEASE_ASSET=$asset" >> "$GITHUB_ENV"
+          echo "OMP_SWITCH_SMOKE_BINARY=$asset" >> "$GITHUB_ENV"
+
+      - name: Smoke test the same Ubuntu 22.04 AppImage on Ubuntu 24.04
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          OMP_SWITCH_SMOKE_REPORT: ${{ runner.temp }}/omp-switch-smoke.json
+        run: xvfb-run -a -s "-screen 0 1536x1024x24" node scripts/platform-smoke.mjs "$OMP_SWITCH_SMOKE_BINARY" --report "$OMP_SWITCH_SMOKE_REPORT"
+
+      - name: Upload Ubuntu 24.04 smoke evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: omp-switch-ubuntu-24-x64-smoke
+          path: ${{ runner.temp }}/omp-switch-smoke.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Build test-enabled Ubuntu 24 UI application
+        env:
+          VITE_WDIO: "1"
+        run: pnpm tauri build --no-bundle --debug --features webdriver --config src-tauri/tauri.webdriver.conf.json --verbose
+
+
+      - name: Capture Ubuntu 24 1536x1024 UI viewport evidence
+        env:
+          OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/viewport
+          OMP_SWITCH_UI_HEIGHT: "1024"
+        run: xvfb-run -a -s "-screen 0 1920x1200x24" bash -lc 'openbox --sm-disable >/tmp/omp-switch-openbox.log 2>&1 & sleep 1; exec pnpm exec wdio run wdio.ui-acceptance.mjs'
+
+      - name: Capture Ubuntu 24 1536x960 Pencil content evidence
+        env:
+          OMP_SWITCH_UI_BINARY: src-tauri/target/debug/omp-switch
+          OMP_SWITCH_UI_OUTPUT: .artifacts/ui-acceptance/content
+          OMP_SWITCH_UI_HEIGHT: "960"
+        run: xvfb-run -a -s "-screen 0 1920x1200x24" bash -lc 'openbox --sm-disable >/tmp/omp-switch-openbox.log 2>&1 & sleep 1; exec pnpm exec wdio run wdio.ui-acceptance.mjs'
+
+      - name: Upload Ubuntu 24 UI screenshot evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: omp-switch-ubuntu-24-x64-ui
+          path: .artifacts/ui-acceptance
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish draft release assets
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build, ubuntu-24-smoke]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release notes
+        uses: actions/checkout@v4
+
+      - name: Download native bundles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: omp-switch-*-bundles
+          path: release-assets
+          merge-multiple: false
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --draft --title "OMP Switch $GITHUB_REF_NAME" --notes-file docs/release.md
+          fi
+
+      - name: Upload installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          while IFS= read -r -d '' asset; do
+            gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
+          done < <(find release-assets -type f \(
+            -iname '*.appimage' -o \
+            -iname '*.deb' -o \
+            -iname '*.dmg' -o \
+            -iname '*.exe' -o \
+            -iname '*.msi' -o \
+            -iname '*.pkg' -o \
+            -iname '*.rpm' \
+          \) -print0)
