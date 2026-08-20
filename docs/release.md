@@ -69,7 +69,7 @@ React page seam 使用真实 routed pages、可访问控件和 typed Tauri clien
 - `W7copJ`：Settings
 - `N3OTR` / `r67daM`：Foundations / Components
 
-Provider 创建两步和 Model Create Sheet 使用对应 `.pen` 状态；issue #16 的原生截图分别位于 `.artifacts/issue-16/provider-create-step1-tauri-1536x961.png`、`.artifacts/issue-16/provider-create-step2-tauri-1536x961.png` 和 `.artifacts/issue-16/model-create-sheet-tauri-1536x961.png`，Retina 原件以 `*-tauri-retina.png` 保留；逐页比较记录位于 `.artifacts/issue-16/visual-comparison.txt`。未批准的肉眼可见差异不能通过文档豁免。
+Provider 创建两步和 Model Create Sheet 必须使用对应 `.pen` 的已填写可提交状态：Step 1 的 Provider ID、Base URL、API Key 已填且“下一步”可用；Step 2 的 Model ID、名称已填、最终地址已解析且“创建 Provider”可用；Model Sheet 的 Model ID、名称、显式协议已填且“保存模型”可用。issue #16 的 1536×961 原生截图分别位于 `.artifacts/issue-16/provider-create-step1-tauri-1536x961.png`、`.artifacts/issue-16/provider-create-step2-tauri-1536x961.png` 和 `.artifacts/issue-16/model-create-sheet-tauri-1536x961.png`，3072×1922 Retina 原件以 `*-tauri-retina.png` 保留；逐页比较记录位于 `.artifacts/issue-16/visual-comparison.txt`。未批准的肉眼可见差异不能通过文档豁免。
 
 ## 发布命令
 

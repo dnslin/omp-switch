@@ -11,8 +11,9 @@ Observed matches:
 - Provider Detail: breadcrumb, provider actions, summary, model table, test panel, and spacing match.
 - Roles Dirty: dirty status, save affordance, role table, and inline selectors match; the captured dirty state is intentionally unsaved.
 - Settings: section panels, rows, controls, reset/danger area, and responsive spacing match.
-- Provider creation step 1: centered 752px-class modal, two-column form, protocol/auth controls, and footer match.
-- Provider creation step 2: rebuilt geometry is centered with left offset calc(50% + 96px), 752px x 740px class sizing, compact rows, final address and explanatory note visible at the default scroll position, and the capability legend/checkboxes are on one row.
-- Model Create Sheet: rebuilt geometry is centered with left offset calc(50% + 64px), 590px x 608px class sizing, compact rows, absolute capability legend, body scrolling boundary, and footer match.
+- Provider creation step 1: the 1536x961 evidence uses the approved filled state: Provider ID and Base URL are populated, API Key is populated but remains masked, and 下一步 is enabled; the centered 814px-class modal, two-column form, protocol/auth controls, and footer match `designs/23-provider-create-step1.png`.
+- Provider creation step 2: the 1536x961 evidence uses the approved filled state: Model ID and 名称 are populated, 最终地址 resolves to `http://127.0.0.1:9/v1/responses`, and 创建 Provider is enabled; the 752px x 740px geometry, 12px heading gap, inherited 90px footer/46px buttons, compact rows, final address, explanatory note, and one-row capabilities match `designs/24-provider-create-step2.png`.
+- Model Create Sheet: the 1536x961 evidence uses the approved filled state: Model ID and 名称 are populated, protocol is explicitly `google-generative-ai`, the final address resolves, and 保存模型 is enabled; the 590px x 608px geometry, absolute capability legend, body boundary, right-aligned footer actions, and sheet footer match `designs/32-model-create-sheet.png`.
+- All three current logical evidence files are exactly 1536x961; their Retina originals are exactly 3072x1922. The earlier Step 1 `752px` description and the earlier empty/disabled Step 2 and Model Sheet captures are superseded and are not release evidence.
 
-No unapproved visual deviation was observed in the inspected states. Provider creation step 2 and Model Create Sheet use separate geometry classes; their seam tests assert the distinction.
+The rebuilt screenshots now match their corresponding approved Pencil states. No unapproved visual deviation was observed in the inspected states; the earlier invalidated conclusion is replaced by this filled-state comparison.
