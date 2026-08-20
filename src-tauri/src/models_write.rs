@@ -678,6 +678,10 @@ fn create_private_backup_directory(
     Ok(())
 }
 
+pub(crate) fn ensure_private_backup_directory(path: &Path) -> std::io::Result<()> {
+    create_private_backup_directory(path, None)
+}
+
 fn allocate_backup_file(
     directory: &Path,
     failure: Option<ModelsWriteFailurePoint>,

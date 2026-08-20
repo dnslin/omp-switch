@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { ConfirmDialog } from "../components/ui";
-import { asAppError, useTauriClient, type ModelTestResult, type OverviewModel, type OverviewProvider, type TauriClient } from "../lib/tauri-client";
+import { asAppError, useTauriClient, type AppError, type ModelTestResult, type OverviewModel, type OverviewProvider, type TauriClient } from "../lib/tauri-client";
 import { useModelTestStore } from "../store/model-test";
 import { useUiSettings } from "../store/ui-settings";
 import { buildModelEndpoint } from "./model-endpoint";
@@ -41,6 +41,7 @@ export function useRefreshAfterModelTest({
   const running = useModelTestStore((state) => state.running);
   const needsOverviewRefresh = useModelTestStore((state) => state.needsOverviewRefresh);
   const reconcileModelTest = useModelTestStore((state) => state.reconcile);
+  const setModelTestError = useModelTestStore((state) => state.setError);
   const reconciledRevision = useRef<number | null>(null);
 
   useEffect(() => {
@@ -60,7 +61,8 @@ export function useRefreshAfterModelTest({
         if (!active) return;
         if (!failureNotified) {
           const error = asAppError(cause, "无法同步模型测试状态");
-          toast.error(error.message, { description: error.action });
+          setModelTestError(error);
+          toast.error(error.message);
           failureNotified = true;
         }
         retryTimer = window.setTimeout(() => {
@@ -74,7 +76,7 @@ export function useRefreshAfterModelTest({
       active = false;
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
     };
-  }, [client, loading, ready, reconcileModelTest, revision]);
+  }, [client, loading, ready, reconcileModelTest, revision, setModelTestError]);
 
   useEffect(() => {
     if (!ready || loading || running || !needsOverviewRefresh) return;
@@ -89,15 +91,17 @@ export function useRefreshAfterModelTest({
         if (refreshError) {
           clearInvalidatedResult();
           const error = asAppError(refreshError, "无法刷新模型测试后的配置");
-          toast.error(error.message, { description: error.action });
+          setModelTestError(error);
+          toast.error(error.message);
         }
       } catch (cause: unknown) {
         clearInvalidatedResult();
         const error = asAppError(cause, "无法刷新模型测试后的配置");
-        toast.error(error.message, { description: error.action });
+        setModelTestError(error);
+        toast.error(error.message);
       }
     })();
-  }, [loading, needsOverviewRefresh, ready, refresh, running]);
+  }, [loading, needsOverviewRefresh, ready, refresh, running, setModelTestError]);
 }
 
 type PendingTest = { providerId: string; modelId: string };
@@ -121,7 +125,8 @@ function syncRemoteModelTestState(client: Pick<TauriClient, "getModelTestState">
       if (useModelTestStore.getState().generation !== generation) return;
       if (!failureNotified) {
         const error = asAppError(cause, "无法读取模型测试状态");
-        toast.error(error.message, { description: error.action });
+        useModelTestStore.getState().setError(error);
+        toast.error(error.message);
         failureNotified = true;
       }
       window.setTimeout(() => void poll(), REMOTE_MODEL_TEST_STATE_POLL_MS);
@@ -139,6 +144,7 @@ export function useModelTestRunner() {
   const activeModelId = useModelTestStore((state) => state.modelId);
   const result = useModelTestStore((state) => state.result);
   const terminal = useModelTestStore((state) => state.terminal);
+  const error = useModelTestStore((state) => state.error);
   const [pendingTest, setPendingTest] = useState<PendingTest | null>(null);
 
   const execute = useCallback(async (test: PendingTest) => {
@@ -161,13 +167,15 @@ export function useModelTestRunner() {
       if (error.code === "model-test-cancelled" || error.code === "model-test-timeout") {
         const generation = useModelTestStore.getState().recoverRemote();
         if (error.code === "model-test-timeout") {
-          toast.error(error.message, { description: error.action });
+          useModelTestStore.getState().setError(error);
+          toast.error(error.message);
         }
         syncRemoteModelTestState(client, generation);
         return;
       }
       useModelTestStore.getState().fail();
-      toast.error(error.message, { description: error.action });
+      useModelTestStore.getState().setError(error);
+      toast.error(error.message);
     }
   }, [client]);
 
@@ -188,7 +196,8 @@ export function useModelTestRunner() {
   const cancel = useCallback(() => {
     void client.cancelModelTest().catch((cause: unknown) => {
       const error = asAppError(cause, "无法取消模型测试");
-      toast.error(error.message, { description: error.action });
+      useModelTestStore.getState().setError(error);
+      toast.error(error.message);
     });
   }, [client]);
 
@@ -202,7 +211,8 @@ export function useModelTestRunner() {
       void execute(test);
     } catch (cause: unknown) {
       const error = asAppError(cause, "无法保存费用说明偏好");
-      toast.error(error.message, { description: error.action });
+      useModelTestStore.getState().setError(error);
+      toast.error(error.message);
     }
   }, [client, execute, pendingTest]);
 
@@ -227,10 +237,22 @@ export function useModelTestRunner() {
     start,
     settingsReady: hydrationState === "ready",
     cancel,
+    error,
     isActive: (providerId: string, modelId: string) => running && activeProviderId === providerId && activeModelId === modelId,
+
     isBusy: (providerId: string, modelId: string) => running && !(activeProviderId === providerId && activeModelId === modelId),
     costNoticeDialog,
   };
+}
+export function ModelTestErrorNotice({ error }: { error: AppError | null }) {
+  if (!error) return null;
+  return (
+    <section className="technical-details model-test-error" role="alert" aria-live="assertive">
+      <strong>模型测试失败</strong>
+      <p>{error.message}</p>
+      <p>{error.action}</p>
+    </section>
+  );
 }
 
 function notifyResult(result: ModelTestResult) {
@@ -239,7 +261,7 @@ function notifyResult(result: ModelTestResult) {
     toast.success(`模型连接成功 · ${result.latencyMs} ms`);
     return;
   }
-  toast.error("模型测试失败", { description: modelTestFailureAction(result.errorCode) });
+  toast.error("模型测试失败");
 }
 
 function modelTestFailureAction(errorCode: string | undefined): string {

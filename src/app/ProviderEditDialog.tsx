@@ -196,10 +196,9 @@ export function ProviderEditDialog({
       successfulSubmission.current = false;
       const error = asAppError(cause, "无法保存 Provider");
       const field = errorField(error.code);
+      setSubmissionError(error);
       if (field) {
         setError(field, { type: "server", message: error.message }, { shouldFocus: true });
-      } else {
-        setSubmissionError(error);
       }
       toast.error("无法保存 Provider");
     } finally {

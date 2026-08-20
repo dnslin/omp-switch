@@ -3,8 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useNavigate, useParams } from "react-router";
 import { toast, Toaster } from "sonner";
 import { RedetectionLoader } from "../components/redetection-loader";
-import { Button, Card, ConfirmDialog, PageTitle, SearchInput, StatusIndicator } from "../components/ui";
-import { asAppError, useTauriClient, type AppError, type OverviewModel, type StartupState } from "../lib/tauri-client";
+import { Button, Card, ConfirmDialog, SearchInput, StatusIndicator } from "../components/ui";
+import { asAppError, useTauriClient, type AppError, type StartupState, type OverviewModel } from "../lib/tauri-client";
 import { useModelTestStore } from "../store/model-test";
 import { useUiSettings } from "../store/ui-settings";
 import { MainShell } from "./MainShell";
@@ -13,10 +13,12 @@ import { OverviewPage } from "./OverviewPage";
 import { ProviderEditDialog } from "./ProviderEditDialog";
 import { ProvidersPage } from "./ProvidersPage";
 import { ModelRolesPage } from "./ModelRolesPage";
+import { SettingsPage } from "./SettingsPage";
+import { usePageSearchFocus } from "./use-page-search-focus";
 import { useOverviewLoad } from "./overview-load";
 import { buildModelEndpoint } from "./model-endpoint";
-import { isModelTestable, useModelTestRunner, useRefreshAfterModelTest } from "./model-test";
-import { fileStatusView, providerAuthSummary, startupShellStatus, targetConfigurationStatusView, type RowStatus } from "./omp-presentation";
+import { isModelTestable, ModelTestErrorNotice, useModelTestRunner, useRefreshAfterModelTest } from "./model-test";
+import { fileStatusView, providerAuthSummary, targetConfigurationStatusView, type RowStatus } from "./omp-presentation";
 
 
 const REDETECT_MINIMUM_DURATION_MS = 1200;
@@ -106,17 +108,24 @@ function SetupPage() {
   const navigate = useNavigate();
   const [state, setState] = useState<StartupState>({ kind: "detecting" });
   const [redetecting, setRedetecting] = useState(false);
+  const [pageError, setPageError] = useState<AppError | null>(null);
   const [initializing, setInitializing] = useState(false);
   const detectionInFlight = useRef(false);
   const initializationInFlight = useRef(false);
   useEffect(() => {
     let active = true;
     void client.getStartupState().then((next) => {
-      if (active) setState(next);
+      if (active) {
+        setState(next);
+        setPageError(null);
+      }
     }).catch((error: unknown) => {
       const appError = asAppError(error, "无法读取启动状态");
-      toast.error(appError.message, { description: appError.action });
-      if (active) setState({ kind: "omp-unavailable", message: appError.message });
+      toast.error(appError.message);
+      if (active) {
+        setPageError(appError);
+        setState({ kind: "omp-unavailable", message: appError.message });
+      }
     });
     return () => { active = false; };
   }, [client]);
@@ -143,9 +152,11 @@ function SetupPage() {
         nextState = await client.detectOmp();
       }
       setState(nextState);
+      setPageError(null);
     } catch (error: unknown) {
       const appError = asAppError(error, "无法重新检测 OMP");
-      toast.error(appError.message, { description: appError.action });
+      toast.error(appError.message);
+      setPageError(appError);
       setState({ kind: "omp-unavailable", message: appError.message });
     } finally {
       detectionInFlight.current = false;
@@ -159,9 +170,11 @@ function SetupPage() {
       if (!path) return;
       setState({ kind: "detecting" });
       setState(await client.validateSelectedOmp(path));
+      setPageError(null);
     } catch (error: unknown) {
       const appError = asAppError(error, "无法验证所选 OMP");
-      toast.error(appError.message, { description: appError.action });
+      toast.error(appError.message);
+      setPageError(appError);
       setState({ kind: "omp-unavailable", message: appError.message });
     }
   }
@@ -175,9 +188,11 @@ function SetupPage() {
         createPaths: state.targetConfiguration.createPaths,
         discoveryToken: state.targetConfiguration.discoveryToken,
       }));
+      setPageError(null);
     } catch (error: unknown) {
       const appError = asAppError(error, "无法创建最小 Target configuration");
-      toast.error(appError.message, { description: appError.action });
+      toast.error(appError.message);
+      setPageError(appError);
       try {
         setState(await client.validateSelectedOmp(state.executablePath));
       } catch {
@@ -196,7 +211,8 @@ function SetupPage() {
       await client.openTargetConfigurationDirectory(state.executablePath);
     } catch (error: unknown) {
       const appError = asAppError(error, "无法打开配置目录");
-      toast.error(appError.message, { description: appError.action });
+      toast.error(appError.message);
+      setPageError(appError);
     }
   }
 
@@ -205,10 +221,12 @@ function SetupPage() {
     if (!getTargetPresentation(state.targetConfiguration, state.requiresConfirmation).canEnter) return;
     try {
       if (state.requiresConfirmation) await client.confirmSelectedOmp(state.executablePath);
+      setPageError(null);
       navigate("/overview");
     } catch (error: unknown) {
       const appError = asAppError(error, "无法保存 OMP 选择");
-      toast.error(appError.message, { description: appError.action });
+      toast.error(appError.message);
+      setPageError(appError);
     }
   }
 
@@ -225,6 +243,7 @@ function SetupPage() {
             <span className="status-dot" aria-hidden="true" />
             {statusText}
           </div>
+          {pageError ? <div className="technical-details" role="alert"><strong>{pageError.message}</strong><p>{pageError.action}</p></div> : null}
           {readyState && target ? (
             <>
               <div className="setup-table">
@@ -305,49 +324,7 @@ function formatIssueLocation(line: number | null, column: number | null) {
 
 
 
-const routeCopy = {
-  settings: ["设置", "配置 OMP 路径、主题与轻量界面偏好。", "设置能力将在后续工单中扩展；当前不会保存任何 Provider、Model definition、Model role 或 Direct API Key。"],
-} as const;
 
-function SettingsPage() {
-  const client = useTauriClient();
-  const [state, setState] = useState<StartupState>({ kind: "detecting" });
-
-  useEffect(() => {
-    let active = true;
-    void client.getStartupState().then((next) => {
-      if (active) setState(next);
-    }).catch((cause: unknown) => {
-      if (active) setState({ kind: "omp-unavailable", message: asAppError(cause, "无法读取 OMP 状态").message });
-    });
-    return () => { active = false; };
-  }, [client]);
-
-  const ready = state.kind === "omp-ready";
-  const targetStatus = ready ? targetConfigurationStatusView(state.targetConfiguration.status) : null;
-  const statusText = targetStatus?.label
-    ?? (state.kind === "detecting"
-      ? "正在检测 OMP…"
-      : "message" in state
-        ? state.message
-        : "OMP 状态不可用");
-  return (
-    <MainShell status={startupShellStatus(state)}>
-      <PageTitle title="设置" description="配置 OMP 路径、主题与轻量界面偏好。" />
-      <section id="omp-settings" className="settings-section" aria-labelledby="omp-settings-title">
-        <h2 id="omp-settings-title">OMP 与 Target configuration</h2>
-        <StatusIndicator tone={targetStatus?.tone ?? "warning"}>{statusText}</StatusIndicator>
-        {ready ? (
-          <div className="settings-details">
-            <p><strong>版本</strong><span>{state.version}</span></p>
-            <p><strong>可执行文件</strong><code>{state.executablePath}</code></p>
-            <p><strong>权威配置目录</strong><code>{state.targetConfiguration.resolvedPath ?? state.targetConfiguration.path}</code></p>
-          </div>
-        ) : <p className="placeholder-card">完成 OMP 检测后，这里会显示权威配置目录和文件状态。</p>}
-      </section>
-    </MainShell>
-  );
-}
 
 const providerDetailLoadCopy = {
   missingOverview: {
@@ -451,6 +428,7 @@ function ProviderDetailPage() {
   const [deleteError, setDeleteError] = useState<ReturnType<typeof asAppError> | null>(null);
   const [providerDeleteError, setProviderDeleteError] = useState<ReturnType<typeof asAppError> | null>(null);
   const [openModelActions, setOpenModelActions] = useState<string | null>(null);
+  const searchRef = usePageSearchFocus(Boolean(editing || modelEditor || deletingModel || deletingProvider));
   const provider = data?.providers.find((item) => item.id === providerId);
   const authSummary = provider ? providerAuthSummary(provider) : "不支持的认证";
   const latestResult = provider && modelTest.result?.providerId === provider.id ? modelTest.result : null;
@@ -492,14 +470,14 @@ function ProviderDetailPage() {
   const openTargetDirectory = useCallback(async () => {
     const executablePath = startupState?.kind === "omp-ready" ? startupState.executablePath : data?.omp.executablePath;
     if (!executablePath) {
-      toast.error("无法打开配置目录", { description: "当前 OMP 路径不可用，请重新检测。" });
+      toast.error("无法打开配置目录");
       return;
     }
     try {
       await client.openTargetConfigurationDirectory(executablePath);
     } catch (cause: unknown) {
       const appError = asAppError(cause, "无法打开配置目录");
-      toast.error(appError.message, { description: appError.action });
+      toast.error(appError.message);
     }
   }, [client, data?.omp.executablePath, startupState]);
   const canOpenModelTargetDirectory = modelRoleReferences.length > 0 || modelOtherReferences.length > 0;
@@ -544,7 +522,7 @@ function ProviderDetailPage() {
   ) => {
     const reloadError = await reload();
     if (reloadError) {
-      toast.error(reloadError.message, { description: reloadError.action });
+      toast.error(reloadError.message);
       return;
     }
     clear();
@@ -710,7 +688,7 @@ function ProviderDetailPage() {
               </section>
             ) : null}
             <section className="provider-detail-search-row" aria-label="Model 操作">
-              <SearchInput name="model-search" aria-label="搜索 Model ID" value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="搜索 Model ID…" />
+              <SearchInput ref={searchRef} name="model-search" aria-label="搜索 Model ID" value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="搜索 Model ID…" />
               <Button type="button" disabled={!canManageModels} onClick={() => openModelEditor({ mode: "create" })} title={!canManageModels ? "当前 Provider 只读或配置不可写" : undefined}>新增模型</Button>
             </section>
             <section className="provider-detail-summary" aria-label="Provider 摘要">
@@ -763,6 +741,7 @@ function ProviderDetailPage() {
                 </tbody>
               </table>
             </section>
+            <ModelTestErrorNotice error={modelTest.error} />
             <section className="provider-detail-latest-test" aria-label="最近测试" aria-live="polite">
               {modelTest.running ? (
                 <>
@@ -832,6 +811,19 @@ export function App() {
   const hydrateModelTest = useModelTestStore((state) => state.hydrate);
   const prepareModelTestHydration = useModelTestStore((state) => state.prepareHydration);
 
+  const theme = useUiSettings((state) => state.theme);
+
+  useEffect(() => {
+    const media = typeof window.matchMedia === "function" ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+    const applyTheme = () => {
+      const resolvedTheme = theme === "system" ? (media?.matches ? "dark" : "light") : theme;
+      document.documentElement.dataset.theme = resolvedTheme;
+    };
+    applyTheme();
+    if (theme !== "system" || !media) return;
+    media.addEventListener?.("change", applyTheme);
+    return () => media.removeEventListener?.("change", applyTheme);
+  }, [theme]);
   useEffect(() => {
     let active = true;
     beginHydration();
@@ -839,9 +831,9 @@ export function App() {
       if (active) hydrate(settings);
     }).catch((error: unknown) => {
       if (!active) return;
-      failHydration();
       const appError = asAppError(error, "无法读取界面状态");
-      toast.error(appError.message, { description: appError.action });
+      failHydration(appError);
+      toast.error(appError.message);
     });
     return () => { active = false; };
   }, [beginHydration, client, failHydration, hydrate]);
@@ -870,7 +862,7 @@ export function App() {
         if (!active) return;
         if (!failureNotified) {
           const appError = asAppError(cause, "无法读取模型测试状态");
-          toast.error(appError.message, { description: appError.action });
+          toast.error(appError.message);
           failureNotified = true;
         }
         schedule();
@@ -892,7 +884,7 @@ export function App() {
         <Route path="/providers" element={<ProvidersPage />} />
         <Route path="/providers/:providerId" element={<ProviderDetailPage />} />
         <Route path="/roles" element={<ModelRolesPage />} />
-        <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/settings" element={<SettingsPage getTargetPresentation={getTargetPresentation} />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
       <Toaster position="bottom-right" richColors />

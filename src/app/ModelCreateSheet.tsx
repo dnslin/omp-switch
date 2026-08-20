@@ -20,7 +20,7 @@ import {
   useTauriClient,
 } from "../lib/tauri-client";
 import { buildModelEndpoint, isHttpUrl } from "./model-endpoint";
-import { isModelTestable, useModelTestRunner } from "./model-test";
+import { ModelTestErrorNotice, isModelTestable, useModelTestRunner } from "./model-test";
 
 const protocols = [
   "openai-completions",
@@ -182,10 +182,9 @@ export function ModelCreateSheet({
     } catch (cause: unknown) {
       const error = asAppError(cause, isEditing ? "保存 Model 失败" : "创建 Model 失败");
       const field = errorField(error.code);
+      setSubmissionError(error);
       if (field) {
         setError(field, { type: "server", message: error.message }, { shouldFocus: true });
-      } else {
-        setSubmissionError(error);
       }
     } finally {
       submissionInFlight.current = false;
@@ -278,6 +277,7 @@ export function ModelCreateSheet({
                 <Button type="button" variant="secondary" disabled={testDisabled} title={activeTest ? undefined : !modelTest.settingsReady ? "正在读取设置" : !canTest ? (isViewing ? "只读 Model definition 不能测试" : "请先保存 Model definition") : modelTest.running ? "已有模型测试正在进行" : undefined} onClick={() => { if (!source) return; if (activeTest) modelTest.cancel(); else modelTest.start(provider.id, source.id); }}>{testLabel}</Button>
                 <span>{isViewing ? "只读 Model definition 不可测试" : activeTest ? "正在测试已保存的 Model definition" : "仅可测试已保存模型"}</span>
               </div>
+              <ModelTestErrorNotice error={modelTest.error} />
               {submissionError ? (
                 <section ref={feedbackRef} className="provider-create-submit-error" role="alert" aria-live="assertive">
                   <div><strong>{submissionError.code === "models-hash-conflict" ? "配置冲突" : "无法保存 Model"}</strong><p>{submissionError.message}</p><p>{submissionError.action}</p></div>

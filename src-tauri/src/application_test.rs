@@ -73,6 +73,47 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CleanupWarningCoun
         }
     }
 }
+#[derive(Clone)]
+struct OperationLogCapture(Arc<Mutex<Vec<String>>>);
+
+#[derive(Default)]
+struct OperationLogVisitor {
+    operation: Option<String>,
+    status: Option<String>,
+    code: Option<String>,
+    cause: Option<String>,
+}
+
+impl tracing::field::Visit for OperationLogVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        match field.name() {
+            "operation" => self.operation = Some(value.to_owned()),
+            "status" => self.status = Some(value.to_owned()),
+            "code" => self.code = Some(value.to_owned()),
+            "cause" => self.cause = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.record_str(field, &format!("{value:?}"));
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for OperationLogCapture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let mut visitor = OperationLogVisitor::default();
+        event.record(&mut visitor);
+        if let Some(operation) = visitor.operation {
+            self.0.lock().push(format!(
+                "operation={operation};status={};code={};cause={}",
+                visitor.status.unwrap_or_default(),
+                visitor.code.unwrap_or_default(),
+                visitor.cause.unwrap_or_default(),
+            ));
+        }
+    }
+}
 
 #[derive(Default)]
 struct FakeOmpEnvironment {
@@ -926,6 +967,35 @@ fn valid_manual_replacement_is_saved_only_after_explicit_confirmation() {
         Some("/bin/path-omp")
     );
 }
+#[test]
+fn confirming_new_omp_clears_saved_model_selection_for_new_target() {
+    let environment = Arc::new(FakeOmpEnvironment::default());
+    let service = service_with(environment, Some("/bin/saved-omp"));
+    service
+        .save_ui_settings(UiSettingsUpdate {
+            theme: Theme::Dark,
+            selected_provider_id: Some("old-provider".to_owned()),
+            selected_model_id: Some("old-model".to_owned()),
+        })
+        .unwrap();
+
+    assert!(matches!(
+        service.validate_selected_omp(PathBuf::from("/bin/path-omp")),
+        StartupState::OmpReady { .. }
+    ));
+    service
+        .confirm_selected_omp(PathBuf::from("/bin/path-omp"))
+        .unwrap();
+
+    let settings = service.get_ui_settings().unwrap();
+    assert_eq!(
+        settings.omp_executable_path.as_deref(),
+        Some("/bin/path-omp")
+    );
+    assert_eq!(settings.theme, Theme::Dark);
+    assert_eq!(settings.selected_provider_id, None);
+    assert_eq!(settings.selected_model_id, None);
+}
 
 #[test]
 fn failed_confirmation_persistence_can_retry_without_revalidation() {
@@ -1303,6 +1373,146 @@ fn settings_seam_persists_only_approved_lightweight_state() {
     let persisted = fs::read_to_string(app_data.path().join("settings.json")).unwrap();
     assert!(!persisted.contains("apiKey"));
     assert!(!persisted.contains("modelRoles"));
+}
+#[test]
+fn resetting_ui_settings_leaves_target_configuration_and_backups_intact() {
+    let app_data = tempdir().unwrap();
+    let settings_path = app_data.path().join("settings.json");
+    let target = app_data.path().join("agent");
+    let backup = app_data
+        .path()
+        .join("target-configuration-backups")
+        .join("target-fingerprint")
+        .join("models");
+    fs::create_dir_all(&target).unwrap();
+    fs::create_dir_all(&backup).unwrap();
+    fs::write(target.join("models.yml"), "providers: {}\n").unwrap();
+    fs::write(backup.join("backup.yml"), "providers: {}\n").unwrap();
+    fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&AppSettings {
+            omp_executable_path: Some("/bin/saved-omp".to_owned()),
+            theme: Theme::Dark,
+            selected_provider_id: Some("provider".to_owned()),
+            selected_model_id: Some("model".to_owned()),
+            model_test_cost_notice_accepted: true,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let service = AppService::new(settings_path).unwrap();
+
+    service.reset_ui_settings().unwrap();
+
+    assert_eq!(service.get_ui_settings().unwrap(), AppSettings::default());
+    assert!(target.join("models.yml").exists());
+    assert!(backup.join("backup.yml").exists());
+}
+#[test]
+fn current_target_directory_reads_confirmed_state_without_clearing_pending_switch() {
+    let environment = Arc::new(FakeOmpEnvironment::default());
+    let service = service_with(environment, Some("/bin/saved-omp"));
+    service
+        .save_ui_settings(UiSettingsUpdate {
+            theme: Theme::Dark,
+            selected_provider_id: Some("provider".to_owned()),
+            selected_model_id: Some("model".to_owned()),
+        })
+        .unwrap();
+
+    assert!(matches!(
+        service.validate_selected_omp(PathBuf::from("/bin/path-omp")),
+        StartupState::OmpReady { .. }
+    ));
+    assert_eq!(
+        service.current_target_directory().unwrap(),
+        PathBuf::from("/tmp/saved-agent")
+    );
+    service
+        .confirm_selected_omp(PathBuf::from("/bin/path-omp"))
+        .unwrap();
+}
+
+#[test]
+fn current_target_directory_uses_path_when_no_omp_path_is_saved() {
+    let service = service_with(
+        Arc::new(FakeOmpEnvironment::with_path("/bin/path-omp")),
+        None,
+    );
+
+    assert_eq!(
+        service.current_target_directory().unwrap(),
+        PathBuf::from("/tmp/path-agent")
+    );
+}
+
+#[test]
+fn target_backup_directory_uses_resolved_target_and_private_permissions() {
+    let app_data = tempdir().unwrap();
+    let target = app_data.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        app_data.path().join("settings.json"),
+        serde_json::to_vec_pretty(&AppSettings {
+            omp_executable_path: Some("/bin/temp-omp".to_owned()),
+            ..AppSettings::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let environment = Arc::new(FakeOmpEnvironment {
+        config_path: Some(target.clone()),
+        inspect_real_target: true,
+        ..FakeOmpEnvironment::default()
+    });
+    let service =
+        AppService::new_with_environment(app_data.path().join("settings.json"), environment)
+            .unwrap();
+
+    let backup = service.target_backup_directory().unwrap();
+    let expected_root = app_data.path().join("target-configuration-backups");
+    let expected = expected_root.join(crate::models_write::target_fingerprint(
+        &target.canonicalize().unwrap(),
+    ));
+    assert_eq!(backup, expected);
+    assert!(backup.is_dir());
+    #[cfg(unix)]
+    {
+        assert_eq!(
+            fs::metadata(&expected_root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+}
+#[test]
+fn path_omp_validation_requires_confirmation_before_clearing_saved_path() {
+    let environment = Arc::new(FakeOmpEnvironment::with_path("/bin/path-omp"));
+    let service = service_with(environment, Some("/bin/saved-omp"));
+
+    assert!(matches!(
+        service.validate_path_omp(),
+        StartupState::OmpReady {
+            executable_path,
+            requires_confirmation: true,
+            ..
+        } if executable_path == "/bin/path-omp"
+    ));
+    assert_eq!(
+        service
+            .get_ui_settings()
+            .unwrap()
+            .omp_executable_path
+            .as_deref(),
+        Some("/bin/saved-omp")
+    );
+    service
+        .confirm_path_omp(PathBuf::from("/bin/path-omp"))
+        .unwrap();
+    assert_eq!(service.get_ui_settings().unwrap().omp_executable_path, None);
 }
 
 #[test]
@@ -6938,4 +7148,17 @@ async fn model_test_times_out_while_waiting_for_a_stuck_omp_detection_lock() {
     assert!(started.elapsed() < Duration::from_secs(1));
     release_detection.wait();
     detection.join().unwrap();
+}
+#[test]
+fn runtime_info_emits_redacted_operation_log() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(OperationLogCapture(events.clone()));
+    let runtime = tracing::subscriber::with_default(subscriber, crate::application::get_runtime_info);
+
+    assert!(!runtime.platform.is_empty());
+    assert!(!runtime.architecture.is_empty());
+    let events = events.lock();
+    assert!(events.iter().any(|event| {
+        event.contains("operation=get_runtime_info") && event.contains("status=success")
+    }));
 }

@@ -277,12 +277,11 @@ export function ProviderCreateDialog({
       successfulSubmission.current = false;
       const error = asAppError(cause, "创建 Provider 失败");
       const field = errorField(error.code);
+      setSubmissionError(error);
       if (field) {
         const returnsToProviderStep = providerStepFields.includes(field as (typeof providerStepFields)[number]);
         if (returnsToProviderStep) setStep("provider");
         setError(field, { type: "server", message: error.message }, { shouldFocus: !returnsToProviderStep });
-      } else {
-        setSubmissionError(error);
       }
     } finally {
       submissionInFlight.current = false;

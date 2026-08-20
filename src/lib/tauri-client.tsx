@@ -249,6 +249,16 @@ export type UiSettings = {
   selectedModelId: string | null;
   modelTestCostNoticeAccepted: boolean;
 };
+export type SettingsDirectories = {
+  targetConfiguration: string | null;
+  applicationConfiguration: string;
+  applicationLog: string;
+  targetBackup: string | null;
+};
+export type RuntimeInfo = {
+  platform: string;
+  architecture: string;
+};
 
 export type UiSettingsUpdate = Omit<UiSettings, "ompExecutablePath" | "modelTestCostNoticeAccepted">;
 
@@ -292,13 +302,22 @@ export interface TauriClient {
   cancelModelTest(): Promise<boolean>;
   getModelTestState(): Promise<ModelTestState>;
   detectOmp(): Promise<StartupState>;
+  getRuntimeInfo(): Promise<RuntimeInfo>;
   selectOmpExecutable(): Promise<string | null>;
   validateSelectedOmp(executablePath: string): Promise<StartupState>;
+  validatePathOmp(): Promise<StartupState>;
   confirmSelectedOmp(executablePath: string): Promise<void>;
+  confirmPathOmp(executablePath: string): Promise<UiSettings>;
   initializeTargetConfiguration(executablePath: string, expectation: TargetInitializationExpectation): Promise<StartupState>;
   openTargetConfigurationDirectory(executablePath: string): Promise<void>;
+  openCurrentTargetConfigurationDirectory(): Promise<void>;
+  openApplicationConfigurationDirectory(): Promise<void>;
+  openApplicationLogDirectory(): Promise<void>;
+  openTargetBackupDirectory(): Promise<void>;
+  getSettingsDirectories(): Promise<SettingsDirectories>;
   getUiSettings(): Promise<UiSettings>;
   saveUiSettings(settings: UiSettingsUpdate): Promise<UiSettings>;
+  resetUiSettings(): Promise<UiSettings>;
   acceptModelTestCostNotice(): Promise<UiSettings>;
 }
 export const tauriClient: TauriClient = {
@@ -314,17 +333,26 @@ export const tauriClient: TauriClient = {
   testModel: (input) => invoke<ModelTestResult>("test_model", { input }),
   cancelModelTest: () => invoke<boolean>("cancel_model_test"),
   getModelTestState: () => invoke<ModelTestState>("get_model_test_state"),
+  getRuntimeInfo: () => invoke<RuntimeInfo>("get_runtime_info"),
   detectOmp: () => invoke<StartupState>("detect_omp"),
   selectOmpExecutable: async () => {
     const selected = await open({ multiple: false, directory: false, title: "选择 OMP 可执行文件" });
     return typeof selected === "string" ? selected : null;
   },
   validateSelectedOmp: (executablePath) => invoke<StartupState>("validate_selected_omp", { executablePath }),
+  validatePathOmp: () => invoke<StartupState>("validate_path_omp"),
   confirmSelectedOmp: async (executablePath) => { await invoke("confirm_selected_omp", { executablePath }); },
+  confirmPathOmp: (executablePath) => invoke<UiSettings>("confirm_path_omp", { executablePath }),
   initializeTargetConfiguration: (executablePath, expectation) => invoke<StartupState>("initialize_target_configuration", { executablePath, expectation }),
   openTargetConfigurationDirectory: async (executablePath) => { await invoke("open_target_configuration_directory", { executablePath }); },
+  openCurrentTargetConfigurationDirectory: async () => { await invoke("open_current_target_configuration_directory"); },
+  openApplicationConfigurationDirectory: async () => { await invoke("open_application_configuration_directory"); },
+  openApplicationLogDirectory: async () => { await invoke("open_application_log_directory"); },
+  openTargetBackupDirectory: async () => { await invoke("open_target_backup_directory"); },
+  getSettingsDirectories: () => invoke<SettingsDirectories>("get_settings_directories"),
   getUiSettings: () => invoke<UiSettings>("get_ui_settings"),
   saveUiSettings: (settings) => invoke<UiSettings>("save_ui_settings", { settings }),
+  resetUiSettings: () => invoke<UiSettings>("reset_ui_settings"),
   acceptModelTestCostNotice: () => invoke<UiSettings>("accept_model_test_cost_notice"),
 };
 

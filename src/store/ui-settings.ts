@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Theme, UiSettings } from "../lib/tauri-client";
+import type { AppError, Theme, UiSettings } from "../lib/tauri-client";
 
 export type ModelSelection =
   | { kind: "none" }
@@ -11,13 +11,14 @@ type UiSettingsWithoutSelection = Omit<UiSettings, "selectedProviderId" | "selec
 
 type UiSettingsState = UiSettingsWithoutSelection & {
   hydrationState: HydrationState;
+  hydrationError: AppError | null;
   selection: ModelSelection;
   savedSelectionInvalid: boolean;
   setTheme(theme: Theme): void;
   setModelTestCostNoticeAccepted(accepted: boolean): void;
   beginHydration(): void;
   hydrate(settings: UiSettings): void;
-  failHydration(): void;
+  failHydration(error: AppError): void;
   setSelection(selection: ModelSelection): void;
 };
 
@@ -55,11 +56,12 @@ export const useUiSettings = create<UiSettingsState>((set) => ({
   ...DEFAULT_UI_SETTINGS,
   hydrationState: "loading",
   selection: NO_MODEL_SELECTION,
+  hydrationError: null,
   savedSelectionInvalid: false,
   setTheme: (theme) => set({ theme }),
   setModelTestCostNoticeAccepted: (accepted) => set({ modelTestCostNoticeAccepted: accepted }),
-  beginHydration: () => set({ ...DEFAULT_UI_SETTINGS, selection: NO_MODEL_SELECTION, savedSelectionInvalid: false, hydrationState: "loading" }),
-  hydrate: ({ selectedProviderId, selectedModelId, ...settings }) => set({ ...settings, ...persistedModelSelection(selectedProviderId, selectedModelId), hydrationState: "ready" }),
-  failHydration: () => set({ selection: NO_MODEL_SELECTION, savedSelectionInvalid: false, hydrationState: "error" }),
+  beginHydration: () => set({ ...DEFAULT_UI_SETTINGS, selection: NO_MODEL_SELECTION, savedSelectionInvalid: false, hydrationError: null, hydrationState: "loading" }),
+  hydrate: ({ selectedProviderId, selectedModelId, ...settings }) => set({ ...settings, ...persistedModelSelection(selectedProviderId, selectedModelId), hydrationError: null, hydrationState: "ready" }),
+  failHydration: (error) => set({ selection: NO_MODEL_SELECTION, savedSelectionInvalid: false, hydrationError: error, hydrationState: "error" }),
   setSelection: (selection) => set({ selection, savedSelectionInvalid: false }),
 }));

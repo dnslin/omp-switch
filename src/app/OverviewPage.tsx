@@ -11,7 +11,7 @@ import { MainShell } from "./MainShell";
 import { fileStatusView } from "./omp-presentation";
 import { useOverviewLoad } from "./overview-load";
 import { buildModelEndpoint, type ModelEndpoint } from "./model-endpoint";
-import { isModelTestable, useModelTestRunner, useRefreshAfterModelTest, type ModelTestRunner } from "./model-test";
+import { isModelTestable, ModelTestErrorNotice, useModelTestRunner, useRefreshAfterModelTest, type ModelTestRunner } from "./model-test";
 type OverviewError = Pick<AppError, "message" | "action">;
 
 const overviewLoadCopy = {
@@ -30,7 +30,12 @@ type InitialOverviewSelection = {
 
 const overviewSettingsSaveQueues = new WeakMap<TauriClient, Promise<void>>();
 
-function enqueueOverviewSettingsSave(client: TauriClient, settings: UiSettingsUpdate, isActive: () => boolean) {
+function enqueueOverviewSettingsSave(
+  client: TauriClient,
+  settings: UiSettingsUpdate,
+  isActive: () => boolean,
+  onError: (error: AppError) => void,
+) {
   const previous = overviewSettingsSaveQueues.get(client) ?? Promise.resolve();
   const queued = previous.then(async () => {
     try {
@@ -38,7 +43,8 @@ function enqueueOverviewSettingsSave(client: TauriClient, settings: UiSettingsUp
     } catch (cause: unknown) {
       if (!isActive()) return;
       const appError = asAppError(cause, "无法保存快速测试选择");
-      toast.error(appError.message, { description: appError.action });
+      onError(appError);
+      toast.error(appError.message);
     }
   });
   overviewSettingsSaveQueues.set(client, queued);
@@ -107,6 +113,7 @@ function sameModelSelection(left: ModelSelection, right: ModelSelection) {
 export function OverviewPage() {
   const client = useTauriClient();
   const hydrationState = useUiSettings((state) => state.hydrationState);
+  const hydrationError = useUiSettings((state) => state.hydrationError);
   const { data, startupState, error, loading, revision, reload, refresh, shellStatus } = useOverviewLoad(overviewLoadCopy);
   const modelTest = useModelTestRunner();
   useRefreshAfterModelTest({ ready: Boolean(data), loading, revision, refresh });
@@ -117,7 +124,7 @@ export function OverviewPage() {
       await client.openTargetConfigurationDirectory(startupState.executablePath);
     } catch (cause: unknown) {
       const appError = asAppError(cause, "无法打开配置目录");
-      toast.error(appError.message, { description: appError.action });
+      toast.error(appError.message);
     }
   }
 
@@ -128,6 +135,12 @@ export function OverviewPage() {
     <MainShell status={shellStatus}>
       <div className={`overview-page ${pageClass}`} aria-busy={pageLoading}>
         <OverviewPageHeader />
+        {hydrationError ? (
+          <section className="overview-state-banner overview-state-banner--readonly" role="alert" aria-live="assertive">
+            <CircleAlert aria-hidden="true" />
+            <div><strong>无法读取界面设置</strong><p>{hydrationError.message}</p><p>{hydrationError.action}</p></div>
+          </section>
+        ) : null}
         {pageLoading ? <OverviewLoadingBody /> : error ? <OverviewErrorBody error={error} onReload={reload} onOpenTargetDirectory={openDirectory} /> : data ? <OverviewContentBody data={data} modelTest={modelTest} /> : <OverviewErrorBody error={overviewLoadCopy.missingOverview} onReload={reload} onOpenTargetDirectory={openDirectory} />}
       </div>
     </MainShell>
@@ -185,6 +198,7 @@ function OverviewErrorBody({ error, onReload, onOpenTargetDirectory }: { error: 
 
 function OverviewContentBody({ data, modelTest }: { data: OverviewDto; modelTest: ModelTestRunner }) {
   const client = useTauriClient();
+  const [selectionError, setSelectionError] = useState<AppError | null>(null);
   const hydrationState = useUiSettings((state) => state.hydrationState);
   const storedSelection = useUiSettings((state) => state.selection);
   const savedSelectionInvalid = useUiSettings((state) => state.savedSelectionInvalid);
@@ -193,14 +207,16 @@ function OverviewContentBody({ data, modelTest }: { data: OverviewDto; modelTest
   const staleSavedSelectionHandled = useRef(false);
   const [initialSelection] = useState(() => resolveInitialOverviewSelection(data, hydrationState, storedSelection, savedSelectionInvalid));
   const [selection, setSelection] = useState<ModelSelection>(initialSelection.selection);
+
   useEffect(() => {
     isActive.current = true;
     return () => { isActive.current = false; };
   }, []);
+
   const enqueueSelectionSave = useCallback((nextSelection: ModelSelection) => {
     const { theme } = useUiSettings.getState();
     const settings = { theme, ...modelSelectionFields(nextSelection) };
-    enqueueOverviewSettingsSave(client, settings, () => isActive.current);
+    enqueueOverviewSettingsSave(client, settings, () => isActive.current, setSelectionError);
   }, [client]);
 
   useEffect(() => {
@@ -220,6 +236,7 @@ function OverviewContentBody({ data, modelTest }: { data: OverviewDto; modelTest
 
   function commitSelection(nextSelection: ModelSelection) {
     if (sameModelSelection(selection, nextSelection)) return;
+    setSelectionError(null);
     setSelection(nextSelection);
     setStoredSelection(nextSelection);
     if (hydrationState === "ready") enqueueSelectionSave(nextSelection);
@@ -237,6 +254,7 @@ function OverviewContentBody({ data, modelTest }: { data: OverviewDto; modelTest
     if (!nextModel) return;
     commitSelection({ kind: "model", providerId: selectedProvider.id, modelId: nextModel.id });
   }
+
   return (
     <>
       <OverviewSyncStrip data={data} />
@@ -244,6 +262,8 @@ function OverviewContentBody({ data, modelTest }: { data: OverviewDto; modelTest
       <OverviewMetrics data={data} />
       {data.state === "empty" || data.state === "read-only" ? <OverviewStateBanner data={data} /> : null}
       <div className="overview-test-area">
+        {selectionError ? <section className="technical-details" role="alert" aria-live="assertive"><strong>无法保存快速测试选择</strong><p>{selectionError.message}</p><p>{selectionError.action}</p></section> : null}
+        <ModelTestErrorNotice error={modelTest.error} />
         <QuickTestPanel providers={data.providers} provider={selectedProvider} model={selectedModel} targetWritable={data.targetConfiguration.status === "writable" && data.targetConfiguration.writable} onProviderChange={handleProviderChange} onModelChange={handleModelChange} modelTest={modelTest} />
         <TestResultPanel providers={data.providers} result={modelTest.result} terminal={modelTest.terminal} running={modelTest.running} providerId={modelTest.activeProviderId} modelId={modelTest.activeModelId} onCancel={modelTest.cancel} />
       </div>
