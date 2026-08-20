@@ -182,6 +182,7 @@ describe("React page seam", () => {
 
     expect(await screen.findByRole("heading", { name: "OMP 已找到" })).toBeVisible();
     expect(screen.getByText("OMP Switch 已确认可执行文件和权威配置目录。")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "手动选择 OMP" })).not.toBeInTheDocument();
     expect(screen.getByText("/usr/local/bin/omp")).toBeVisible();
     expect(screen.getByText("/Users/username/.omp/agent")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "进入应用" }));
@@ -247,7 +248,7 @@ describe("React page seam", () => {
 
 
 
-  it("allows selecting a replacement while the current OMP is ready", async () => {
+  it("allows selecting a replacement from Settings while the current OMP is ready", async () => {
     const user = userEvent.setup();
     const selectOmpExecutable = vi.fn(async () => "/opt/new/bin/omp");
     const replacementState: StartupState = {
@@ -259,19 +260,19 @@ describe("React page seam", () => {
       requiresConfirmation: true,
     };
     const validateSelectedOmp = vi.fn(async () => replacementState);
-    renderRoute("/setup", {
+    renderRoute("/settings", {
       ...unavailableClient,
       getStartupState: async () => readyState,
       selectOmpExecutable,
       validateSelectedOmp,
     });
 
-    expect(await screen.findByRole("heading", { name: "OMP 已找到" })).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "手动选择 OMP" }));
+    expect(await screen.findByRole("heading", { name: "设置" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "重新选择" }));
 
     expect(selectOmpExecutable).toHaveBeenCalledTimes(1);
     expect(validateSelectedOmp).toHaveBeenCalledWith("/opt/new/bin/omp");
-    expect(await screen.findByRole("heading", { name: "确认切换 OMP" })).toBeVisible();
+    expect(await screen.findByRole("dialog")).toHaveTextContent("确认切换 OMP");
   });
 
   it("keeps the successful setup layout mounted while redetection is pending", async () => {

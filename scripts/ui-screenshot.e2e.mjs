@@ -110,6 +110,12 @@ async function fill(selector, value) {
   await element.clearValue();
   await element.setValue(value);
 }
+async function blurActiveElement() {
+  await browser.execute(() => {
+    const activeElement = document.activeElement;
+    if (activeElement instanceof HTMLElement) activeElement.blur();
+  });
+}
 async function setModelTestResult(result) {
   await browser.tauri.execute(
     (tauri, nextResult) => tauri.core.invoke("set_webdriver_model_test_state", { result: nextResult }),
@@ -192,13 +198,14 @@ describe("OMP Switch real packaged UI evidence", () => {
       message: "测试成功",
     });
     await waitHeading("dnslin");
+    await blurActiveElement();
     await screenshot("provider-detail");
-
     setScenario("roles");
     await (await visible('a[href="/roles"]')).click();
     await waitHeading("角色");
     await selectOption("Thinking advisor", "max");
     await visible(`//*[contains(normalize-space(), ${xpathLiteral("有未保存的修改")})]`);
+    await blurActiveElement();
     await screenshot("roles-dirty");
 
     await (await visible('a[href="/settings"]')).click();
@@ -215,16 +222,14 @@ describe("OMP Switch real packaged UI evidence", () => {
     await fill("#provider-id", "dnslin");
     await fill("#provider-base-url", "https://cpa.example.xyz/v1");
     await fill("#provider-api-key", `sk-${"x".repeat(40)}`);
+    await blurActiveElement();
     await screenshot("provider-create-step1");
 
     await clickText("下一步", "button");
     await visible('[role="dialog"]');
     await fill("#provider-model-id", "gpt-5.6-sol");
     await fill("#provider-model-name", "GPT 5.6 Sol");
-    await browser.execute(() => {
-      const activeElement = document.activeElement;
-      if (activeElement instanceof HTMLElement) activeElement.blur();
-    });
+    await blurActiveElement();
     await screenshot("provider-create-step2");
 
     await clickText("取消", "button");
@@ -238,6 +243,7 @@ describe("OMP Switch real packaged UI evidence", () => {
     await fill("#model-sheet-id", "gemini-3.6-pro");
     await fill("#model-sheet-name", "Gemini 3.6 Pro");
     await selectOption("协议", "google-generative-ai");
+    await blurActiveElement();
     await screenshot("model-create-sheet");
   });
 });

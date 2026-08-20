@@ -105,7 +105,7 @@ export function writeSettings() {
   const root = fixtureRoot();
   const settings = JSON.stringify({
     ompExecutablePath: null,
-    theme: "system",
+    theme: "light",
     selectedProviderId: "dnslin",
     selectedModelId: "gpt-5.6-sol",
     modelTestCostNoticeAccepted: true,
