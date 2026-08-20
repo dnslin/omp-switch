@@ -725,6 +725,9 @@ describe("React page seam", () => {
       element?.classList.contains("provider-create-step")
       && element.textContent === "步骤 2 / 2 · 首个模型",
     ))).toBeVisible();
+    const wizardDialog = screen.getByRole("dialog");
+    expect(wizardDialog).toHaveClass("provider-create-dialog--wizard-model");
+    expect(wizardDialog).not.toHaveClass("model-create-sheet");
     expect(screen.queryByText("Model ID 不能为空。")).not.toBeInTheDocument();
     expect(screen.queryByText("名称不能为空。")).not.toBeInTheDocument();
     expect(screen.getByText("new-provider")).toBeVisible();
@@ -1668,6 +1671,8 @@ describe("React page seam", () => {
     await user.clear(screen.getByLabelText("搜索 Model ID"));
     await user.click(screen.getByRole("button", { name: "新增模型" }));
     const sheet = await screen.findByRole("dialog");
+    expect(sheet).toHaveClass("model-create-sheet");
+    expect(sheet).not.toHaveClass("provider-create-dialog--wizard-model");
     expect(within(sheet).getByRole("heading", { name: "新增模型" })).toBeVisible();
     expect(within(sheet).getByLabelText("Model ID")).toBeVisible();
     await user.type(within(sheet).getByLabelText("Model ID"), "new-model");

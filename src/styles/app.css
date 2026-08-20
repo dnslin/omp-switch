@@ -360,12 +360,26 @@ a { color: inherit; text-decoration: none; }
 }
 
 .provider-create-dialog { width: min(814px, calc(100vw - 48px)); height: min(677px, calc(100vh - 48px)); padding: 0; overflow: hidden; }
-.provider-create-dialog--model { left: auto; top: 0; right: 0; width: min(590px, 100vw); height: 100vh; max-height: none; transform: none; border-radius: 0; }
+.provider-create-dialog--wizard-model { left: calc(50% + 96px); width: min(752px, calc(100vw - 48px)); height: min(740px, calc(100vh - 48px)); max-height: calc(100vh - 48px); }
+.model-create-sheet { left: calc(50% + 64px); width: min(590px, calc(100vw - 48px)); height: min(608px, calc(100vh - 48px)); max-height: calc(100vh - 48px); }
+.provider-create-dialog--wizard-model .provider-create-form__body { padding: 28px 30px 12px; }
+.provider-create-dialog--wizard-model .provider-create-heading { gap: 4px; }
+.provider-create-dialog--wizard-model .provider-create-heading h2 { font-size: 24px; }
+.provider-create-dialog--wizard-model .provider-create-fields { margin-top: 14px; }
+.provider-create-dialog--wizard-model .provider-create-field, .provider-create-dialog--wizard-model .provider-create-capabilities { grid-template-columns: 186px minmax(0, 1fr); gap: 20px; }
+.provider-create-dialog--wizard-model .provider-create-field input, .provider-create-dialog--wizard-model .provider-create-select { min-height: 42px; }
+.provider-create-dialog--wizard-model .provider-create-field > label { padding-top: 8px; }
+.provider-create-dialog--wizard-model .provider-create-field-error { min-height: 12px; margin: 1px 0 0; font-size: 11px; line-height: 12px; }
+.provider-create-dialog--wizard-model .provider-create-capabilities > div { min-height: 36px; }
+.provider-create-dialog--wizard-model .provider-create-footer .app-button { min-height: 42px; }
+.provider-create-dialog--wizard-model .provider-create-footer { min-height: 68px; padding: 10px 30px; }
+.provider-create-dialog--wizard-model .provider-create-capabilities { position: relative; display: block; padding-left: 206px; }
+.provider-create-dialog--wizard-model .provider-create-capabilities legend { position: absolute; top: 0; left: 0; padding-top: 8px; }
 .provider-create-form { height: 100%; display: grid; grid-template-rows: minmax(0, 1fr) auto; }
 .provider-create-form__body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 28px 30px 27px; }
 .provider-create-heading { display: grid; gap: 8px; }
-.provider-create-dialog--model .provider-create-heading { gap: 4px; }
-.provider-create-dialog--model .provider-create-heading h2 { font-size: 24px; }
+.model-create-sheet .provider-create-heading { gap: 4px; }
+.model-create-sheet .provider-create-heading h2 { font-size: 24px; }
 .provider-create-heading h2 { margin: 0; font-size: 26px; line-height: 1.25; font-weight: var(--font-weight-medium); }
 .provider-create-step { margin: 6px 0 0; color: var(--color-primary); font-size: 18px; font-weight: var(--font-weight-medium); }
 .provider-create-step__current { display: inline-flex; width: 22px; height: 22px; align-items: center; justify-content: center; border-radius: 50%; background: var(--color-primary); color: #ffffff; font-size: 14px; line-height: 1; vertical-align: 1px; }
@@ -400,22 +414,22 @@ a { color: inherit; text-decoration: none; }
 .provider-create-footer { min-height: 90px; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 20px 30px; border-top: 1px solid var(--color-border); background: var(--color-bg-surface); }
 .provider-create-footer__actions { display: flex; justify-content: flex-end; gap: 20px; }
 .provider-create-footer .app-button { min-height: 46px; padding-inline: 22px; }
-.provider-create-dialog--model .provider-create-form__body { padding: 20px 30px 12px; }
-.provider-create-dialog--model .provider-create-fields { margin-top: 14px; }
-.provider-create-dialog--model .provider-create-field, .provider-create-dialog--model .provider-create-capabilities { grid-template-columns: 126px minmax(0, 1fr); gap: 16px; }
-.provider-create-dialog--model .provider-create-field input, .provider-create-dialog--model .provider-create-select { min-height: 42px; }
-.provider-create-dialog--model .provider-create-field > label { padding-top: 8px; }
-.provider-create-dialog--model .provider-create-field-error { min-height: 12px; margin: 1px 0 0; font-size: 11px; line-height: 12px; }
-.provider-create-dialog--model .provider-create-capabilities > div { min-height: 36px; }
-.provider-create-dialog--model .provider-create-footer .app-button { min-height: 42px; }
-.provider-create-dialog--model .provider-create-footer { min-height: 68px; padding: 10px 30px; }
-.provider-create-dialog--model .provider-create-capabilities { position: relative; display: block; padding-left: 142px; }
-.provider-create-dialog--model .provider-create-capabilities legend { position: absolute; top: 0; left: 0; padding-top: 8px; }
-.provider-create-dialog--model .provider-create-capabilities > div { min-height: 36px; }
-.provider-create-dialog--model .provider-create-capabilities .provider-create-field-error { display: block; grid-column: auto; }
+.model-create-sheet .provider-create-form__body { padding: 20px 30px 12px; }
+.model-create-sheet .provider-create-fields { margin-top: 14px; }
+.model-create-sheet .provider-create-field, .model-create-sheet .provider-create-capabilities { grid-template-columns: 126px minmax(0, 1fr); gap: 16px; }
+.model-create-sheet .provider-create-field input, .model-create-sheet .provider-create-select { min-height: 42px; }
+.model-create-sheet .provider-create-field > label { padding-top: 8px; }
+.model-create-sheet .provider-create-field-error { min-height: 12px; margin: 1px 0 0; font-size: 11px; line-height: 12px; }
+.model-create-sheet .provider-create-capabilities > div { min-height: 36px; }
+.model-create-sheet .provider-create-footer .app-button { min-height: 42px; }
+.model-create-sheet .provider-create-footer { min-height: 68px; padding: 10px 30px; }
+.model-create-sheet .provider-create-capabilities { position: relative; display: block; padding-left: 142px; }
+.model-create-sheet .provider-create-capabilities legend { position: absolute; top: 0; left: 0; padding-top: 8px; }
+.model-create-sheet .provider-create-capabilities > div { min-height: 36px; }
+.model-create-sheet .provider-create-capabilities .provider-create-field-error { display: block; grid-column: auto; }
 @media (max-width: 760px) {
-  .provider-create-dialog--model .provider-create-capabilities { padding-left: 0; }
-  .provider-create-dialog--model .provider-create-capabilities legend { position: static; padding-top: 0; }
+  .model-create-sheet .provider-create-capabilities { padding-left: 0; }
+  .model-create-sheet .provider-create-capabilities legend { position: static; padding-top: 0; }
 }
 .provider-create-summary { min-width: 0; min-height: 45px; display: flex; align-items: center; gap: 10px; margin-top: 18px; padding: 0 16px; overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text-secondary); font-size: 13px; white-space: nowrap; }
 .provider-create-summary code { min-width: 0; overflow: hidden; color: var(--color-text-primary); text-overflow: ellipsis; font-family: var(--font-mono); font-size: 13px; }
@@ -530,7 +544,10 @@ a { color: inherit; text-decoration: none; }
 
 @media (max-width: 1200px) {
   .provider-create-field, .provider-create-auth, .provider-create-capabilities { grid-template-columns: 160px minmax(0, 1fr); gap: 16px; }
-  .provider-create-dialog--model .provider-create-field, .provider-create-dialog--model .provider-create-capabilities { grid-template-columns: 150px minmax(0, 1fr); }
+  .provider-create-dialog--wizard-model .provider-create-field, .provider-create-dialog--wizard-model .provider-create-capabilities { grid-template-columns: 160px minmax(0, 1fr); gap: 16px; }
+  .model-create-sheet .provider-create-field, .model-create-sheet .provider-create-capabilities { grid-template-columns: 150px minmax(0, 1fr); gap: 16px; }
+  .provider-create-dialog--wizard-model .provider-create-capabilities { padding-left: 176px; }
+  .model-create-sheet .provider-create-capabilities { padding-left: 166px; }
   .provider-detail-summary { grid-template-columns: auto minmax(150px, 1fr) auto minmax(150px, 1fr); padding-block: 14px; }
   .provider-edit-no-auth { margin-left: 176px; }
 }
@@ -539,13 +556,14 @@ a { color: inherit; text-decoration: none; }
   .provider-create-heading h2 { font-size: 23px; }
   .provider-create-fields { margin-top: 16px; }
   .provider-create-footer { min-height: 72px; padding-block: 13px; }
-  .provider-create-dialog--model .provider-create-form__body { padding-block: 20px 16px; }
+  .provider-create-dialog--wizard-model .provider-create-form__body, .model-create-sheet .provider-create-form__body { padding-block: 20px 16px; }
 }
 @media (max-width: 760px) {
-  .provider-create-dialog, .provider-create-dialog--model { width: calc(100vw - 24px); }
-  .provider-create-dialog--model { width: 100vw; height: 100vh; }
-  .provider-create-form__body, .provider-create-dialog--model .provider-create-form__body { padding-inline: 20px; }
-  .provider-create-field, .provider-create-auth, .provider-create-capabilities, .provider-create-dialog--model .provider-create-field, .provider-create-dialog--model .provider-create-capabilities { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .provider-create-dialog, .provider-create-dialog--wizard-model, .model-create-sheet { width: calc(100vw - 24px); }
+  .provider-create-form__body, .provider-create-dialog--wizard-model .provider-create-form__body, .model-create-sheet .provider-create-form__body { padding-inline: 20px; }
+  .provider-create-field, .provider-create-auth, .provider-create-capabilities, .provider-create-dialog--wizard-model .provider-create-field, .provider-create-dialog--wizard-model .provider-create-capabilities, .model-create-sheet .provider-create-field, .model-create-sheet .provider-create-capabilities { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .provider-create-dialog--wizard-model .provider-create-capabilities, .model-create-sheet .provider-create-capabilities { padding-left: 0; }
+  .provider-create-dialog--wizard-model .provider-create-capabilities legend, .model-create-sheet .provider-create-capabilities legend { position: static; padding-top: 0; }
   .provider-create-field > label, .provider-create-auth__label, .provider-create-capabilities legend { padding-top: 0; }
   .provider-create-capabilities > div { flex-wrap: wrap; gap: 12px 24px; }
   .provider-create-capabilities .provider-create-field-error { grid-column: 1; }

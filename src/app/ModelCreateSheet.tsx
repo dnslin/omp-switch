@@ -197,7 +197,7 @@ export function ModelCreateSheet({
       <Dialog open onOpenChange={(open) => { if (!open) requestDismiss(); }}>
         <DialogContent
           aria-describedby="model-create-sheet-description"
-          className="provider-create-dialog provider-create-dialog--model model-create-sheet"
+          className="provider-create-dialog model-create-sheet"
           onEscapeKeyDown={(event) => {
             event.preventDefault();
             requestDismiss();

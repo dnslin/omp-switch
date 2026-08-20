@@ -9,7 +9,7 @@ use std::{
 
 use parking_lot::Mutex;
 use reqwest::{
-    Method,
+    Client, Method,
     header::{AUTHORIZATION, HeaderMap, HeaderValue},
 };
 use serde::{Deserialize, Serialize};
@@ -419,18 +419,19 @@ pub(crate) async fn execute_until(
     if remaining.is_zero() {
         return Ok(timeout_result(&configuration, elapsed_ms(started_at)));
     }
-    let client = reqwest::Client::builder()
+    let client_builder = Client::builder()
         .connect_timeout(remaining)
         .timeout(remaining)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| {
-            AppError::new(
-                "model-test-client",
-                "无法初始化模型测试客户端。",
-                "请重试；如果问题持续，请查看脱敏日志。",
-            )
-        })?;
+        .redirect(reqwest::redirect::Policy::none());
+    #[cfg(test)]
+    let client_builder = client_builder.no_proxy();
+    let client = client_builder.build().map_err(|_| {
+        AppError::new(
+            "model-test-client",
+            "无法初始化模型测试客户端。",
+            "请重试；如果问题持续，请查看脱敏日志。",
+        )
+    })?;
     if Instant::now() >= deadline {
         return Ok(timeout_result(&configuration, elapsed_ms(started_at)));
     }

@@ -1,0 +1,18 @@
+Issue #16 Pencil visual verification
+
+Reference frames: designs/01-setup-success.png, 10-overview-normal.png, 20-providers-list.png, 30-provider-detail.png, 50-roles-dirty.png, 60-settings-normal.png, 23-provider-create-step1.png, 24-provider-create-step2.png, 32-model-create-sheet.png. Each reference is 1536x1024.
+
+Native evidence was captured from the rebuilt macOS arm64 release binary with Orca computer-use. The logical window was 1536x961; Retina originals are retained as *-tauri-retina.png and logical-size copies are *-tauri-1536x961.png. Native titlebar and window controls are the only OS-native visual difference.
+
+Observed matches:
+- Setup Success: setup card hierarchy, status rows, actions, spacing, and native titlebar match; only temporary OMP paths/version data differ.
+- Overview: sidebar, status cards, environment/statistics/test panels, typography, controls, and spacing match; provider/test data reflects the temporary target.
+- Providers List: page header, search control, table geometry, action affordance, and status styling match; row count reflects the temporary target.
+- Provider Detail: breadcrumb, provider actions, summary, model table, test panel, and spacing match.
+- Roles Dirty: dirty status, save affordance, role table, and inline selectors match; the captured dirty state is intentionally unsaved.
+- Settings: section panels, rows, controls, reset/danger area, and responsive spacing match.
+- Provider creation step 1: centered 752px-class modal, two-column form, protocol/auth controls, and footer match.
+- Provider creation step 2: rebuilt geometry is centered with left offset calc(50% + 96px), 752px x 740px class sizing, compact rows, final address and explanatory note visible at the default scroll position, and the capability legend/checkboxes are on one row.
+- Model Create Sheet: rebuilt geometry is centered with left offset calc(50% + 64px), 590px x 608px class sizing, compact rows, absolute capability legend, body scrolling boundary, and footer match.
+
+No unapproved visual deviation was observed in the inspected states. Provider creation step 2 and Model Create Sheet use separate geometry classes; their seam tests assert the distinction.

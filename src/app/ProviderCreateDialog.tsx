@@ -337,7 +337,7 @@ export function ProviderCreateDialog({
       <Dialog open onOpenChange={(open) => { if (!open) requestDismiss(); }}>
         <DialogContent
           aria-describedby="provider-create-description"
-          className={`provider-create-dialog ${step === "model" ? "provider-create-dialog--model" : ""}`}
+          className={`provider-create-dialog ${step === "model" ? "provider-create-dialog--wizard-model" : ""}`}
           onEscapeKeyDown={(event) => {
             event.preventDefault();
             requestDismiss();

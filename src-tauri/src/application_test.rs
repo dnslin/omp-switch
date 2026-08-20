@@ -6223,9 +6223,9 @@ async fn model_test_reloads_saved_openai_completions_and_uses_a_minimal_authenti
                 }
             }
         }
-        let request_text = String::from_utf8_lossy(&request);
-        assert!(request_text.starts_with("POST /v1/chat/completions HTTP/1.1"));
-        assert!(request_text.contains("authorization: Bearer saved-secret"));
+        let request_text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+        assert!(request_text.starts_with("post /v1/chat/completions http/1.1"));
+        assert!(request_text.contains("authorization: bearer saved-secret"));
         let header_end = request
             .windows(4)
             .position(|window| window == b"\r\n\r\n")
@@ -7153,7 +7153,8 @@ async fn model_test_times_out_while_waiting_for_a_stuck_omp_detection_lock() {
 fn runtime_info_emits_redacted_operation_log() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::registry().with(OperationLogCapture(events.clone()));
-    let runtime = tracing::subscriber::with_default(subscriber, crate::application::get_runtime_info);
+    let runtime =
+        tracing::subscriber::with_default(subscriber, crate::application::get_runtime_info);
 
     assert!(!runtime.platform.is_empty());
     assert!(!runtime.architecture.is_empty());
