@@ -52,8 +52,8 @@ if (reportPath) {
 console.log(JSON.stringify(report));
 
 if (process.platform === "win32") {
-  const result = spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-  if (result.status !== 0) child.kill();
+  const result = spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", timeout: 5000 });
+  if (result.status !== 0 || result.error) child.kill();
 } else {
   child.kill("SIGTERM");
 }
