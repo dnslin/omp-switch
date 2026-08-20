@@ -6941,7 +6941,7 @@ async fn model_test_is_single_concurrent_cancellable_and_time_bounded() {
     let result = crate::model_test::execute(
         timeout_configuration,
         CancellationToken::new(),
-        Duration::from_millis(50),
+        Duration::from_millis(250),
     )
     .await
     .unwrap();
