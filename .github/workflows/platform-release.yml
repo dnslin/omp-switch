@@ -143,6 +143,14 @@ jobs:
           echo "OMP_SWITCH_RELEASE_ASSET=$asset" >> "$GITHUB_ENV"
           xvfb-run -a -s "-screen 0 1536x1024x24" node scripts/platform-smoke.mjs "$asset" --report "$OMP_SWITCH_SMOKE_REPORT"
 
+      - name: Install WebView2 runtime for Windows smoke
+        if: matrix.smoke-shell == 'windows'
+        shell: pwsh
+        run: |
+          $runtimePath = Join-Path $env:RUNNER_TEMP "MicrosoftEdgeWebView2Setup.exe"
+          Invoke-WebRequest -UseBasicParsing -Uri "https://go.microsoft.com/fwlink/?linkid=2124703" -OutFile $runtimePath
+          $runtime = Start-Process $runtimePath -ArgumentList @('/silent', '/install') -PassThru -Wait -NoNewWindow
+          if ($runtime.ExitCode -notin @(0, 3010)) { throw "WebView2 runtime installer failed with exit code $($runtime.ExitCode)" }
       - name: Smoke test installed Windows application
         if: matrix.smoke-shell == 'windows'
         shell: pwsh
