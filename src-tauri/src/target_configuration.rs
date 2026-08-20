@@ -2249,7 +2249,7 @@ mod tests {
         assert_eq!(discovery.status, TargetConfigurationStatus::Writable);
         assert_eq!(
             discovery.resolved_path.as_deref(),
-            Some(real.to_string_lossy().as_ref())
+            Some(real.canonicalize().unwrap().to_string_lossy().as_ref())
         );
     }
 

@@ -6819,7 +6819,9 @@ fn start_status_model_test_server(responses: Vec<(u16, &'static str)>) -> (Strin
     (address, handle)
 }
 
-fn start_hanging_model_test_server() -> (String, Receiver<()>, JoinHandle<()>) {
+fn start_hanging_model_test_server(
+    response_delay: Duration,
+) -> (String, Receiver<()>, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = format!("http://{}", listener.local_addr().unwrap());
@@ -6844,7 +6846,7 @@ fn start_hanging_model_test_server() -> (String, Receiver<()>, JoinHandle<()>) {
         sender.send(()).unwrap();
         let mut request = [0_u8; 4096];
         let _ = stream.read(&mut request);
-        thread::sleep(Duration::from_millis(400));
+        thread::sleep(response_delay);
         let response = r#"{"output":[{"type":"message"}]}"#;
         let _ = write!(
             stream,
@@ -6931,7 +6933,7 @@ async fn model_test_returns_safe_error_categories_and_supports_no_authentication
 
 #[tokio::test]
 async fn model_test_is_single_concurrent_cancellable_and_time_bounded() {
-    let (base_url, started, server) = start_hanging_model_test_server();
+    let (base_url, started, server) = start_hanging_model_test_server(Duration::from_secs(1));
     let app_data = tempdir().unwrap().keep();
     let target = app_data.join("agent");
     fs::create_dir_all(&target).unwrap();
@@ -6945,7 +6947,7 @@ async fn model_test_is_single_concurrent_cancellable_and_time_bounded() {
     fs::write(target.join("config.yml"), "modelRoles: {}\n").unwrap();
     let service = service_for_target(&target);
     service.accept_model_test_cost_notice().unwrap();
-    service.set_model_test_timeout_for_test(Duration::from_millis(50));
+    service.set_model_test_timeout_for_test(Duration::from_millis(500));
     let input: crate::application::ModelTestInput = serde_json::from_value(serde_json::json!({
         "providerId": "test-timeout",
         "modelId": "timeout-model"
@@ -6956,7 +6958,7 @@ async fn model_test_is_single_concurrent_cancellable_and_time_bounded() {
     started.recv_timeout(Duration::from_secs(1)).unwrap();
     server.join().unwrap();
 
-    let (base_url, started, server) = start_hanging_model_test_server();
+    let (base_url, started, server) = start_hanging_model_test_server(Duration::from_millis(400));
     let app_data = tempdir().unwrap().keep();
     let target = app_data.join("agent");
     fs::create_dir_all(&target).unwrap();
