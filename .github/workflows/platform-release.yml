@@ -151,7 +151,14 @@ jobs:
         run: |
           $msi = Get-ChildItem -Path "src-tauri/target/release/bundle/msi" -Filter "*.msi" | Select-Object -First 1
           if ($null -eq $msi) { throw "No MSI installer was produced" }
-          Start-Process msiexec.exe -ArgumentList @('/i', $msi.FullName, '/qn', '/norestart') -Wait -NoNewWindow
+          $installerLog = Join-Path $env:RUNNER_TEMP "omp-switch-msi.log"
+          $installer = Start-Process msiexec.exe -ArgumentList @('/i', $msi.FullName, '/qn', '/norestart', '/l*v', $installerLog) -PassThru -NoNewWindow
+          if (-not $installer.WaitForExit(180000)) {
+            if (-not $installer.HasExited) { Stop-Process -Id $installer.Id -Force }
+            if (Test-Path -LiteralPath $installerLog) { Get-Content -LiteralPath $installerLog -Tail 80 }
+            throw "MSI installer did not exit within 180 seconds"
+          }
+          if ($installer.ExitCode -notin @(0, 3010)) { throw "MSI installer failed with exit code $($installer.ExitCode)" }
           $candidates = @(
             (Join-Path $env:ProgramFiles "OMP Switch\omp-switch.exe"),
             (Join-Path ${env:ProgramFiles(x86)} "OMP Switch\omp-switch.exe"),
